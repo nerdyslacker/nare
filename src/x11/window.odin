@@ -1,6 +1,5 @@
 package x11
 
-import "core:math"
 import keyboard "../input"
 import xlib "vendor:x11/xlib"
 
@@ -26,8 +25,8 @@ Window :: struct {
 	display:   ^xlib.Display,
 	id:        xlib.Window,
 	gc:        xlib.GC,
-	font:      ^xlib.XFontStruct,
 	visual:    ^xlib.Visual,
+	depth:     int,
 	wm_delete: xlib.Atom,
 	width:     int,
 	height:    int,
@@ -67,30 +66,24 @@ open :: proc(title: cstring = "nare") -> (window: Window, err: Error) {
 	window.black = xlib.BlackPixel(display, screen)
 	window.white = xlib.WhitePixel(display, screen)
 	window.visual = xlib.DefaultVisual(display, screen)
-	window.font = xlib.LoadQueryFont(display, "fixed")
-	if window.font == nil {
-		close(&window)
-		return window, .Create_Renderer
-	}
+	window.depth = int(xlib.DefaultDepth(display, screen))
 	values := xlib.XGCValues{
 		foreground = window.white,
 		background = window.black,
-		font = window.font.fid,
 		graphics_exposures = false,
 	}
 	window.gc = xlib.CreateGC(
 		display,
 		xlib.Drawable(window.id),
-		{.GCForeground, .GCBackground, .GCFont, .GCGraphicsExposures},
+		{.GCForeground, .GCBackground, .GCGraphicsExposures},
 		&values,
 	)
 	if window.gc == nil {
 		close(&window)
 		return window, .Create_Renderer
 	}
-	scale := max(window.dpi / 96, 0.75)
-	window.cell_w = max(1, int(math.round(f32(window.font.max_bounds.width) * scale)))
-	window.cell_h = max(1, int(math.round(f32(window.font.ascent+window.font.descent) * scale)))
+	window.cell_w = 8
+	window.cell_h = 16
 	xlib.SelectInput(display, window.id, base_event_mask())
 	window.wm_delete = xlib.InternAtom(display, "WM_DELETE_WINDOW", false)
 	if window.wm_delete == 0 || xlib.SetWMProtocols(display, window.id, &window.wm_delete, 1) == .Success {
@@ -116,6 +109,11 @@ connection_fd :: proc(window: ^Window) -> int {
 
 grid_size :: proc(window: ^Window) -> (columns, rows: int) {
 	return max(1, window.width / window.cell_w), max(1, window.height / window.cell_h)
+}
+
+set_cell_size :: proc(window: ^Window, width, height: int) {
+	window.cell_w = max(1, width)
+	window.cell_h = max(1, height)
 }
 
 next_event :: proc(window: ^Window) -> (result: Event, available: bool) {
@@ -238,7 +236,6 @@ key_from_keysym :: proc(keysym: xlib.KeySym) -> keyboard.Key {
 close :: proc(window: ^Window) {
 	if window.display == nil do return
 	if window.gc != nil do xlib.FreeGC(window.display, window.gc)
-	if window.font != nil do xlib.FreeFont(window.display, window.font)
 	if window.id != 0 do xlib.DestroyWindow(window.display, window.id)
 	xlib.CloseDisplay(window.display)
 	window^ = {}
