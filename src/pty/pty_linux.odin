@@ -2,6 +2,7 @@ package pty
 
 import "core:c"
 import "core:sys/posix"
+import "core:time"
 
 foreign import libc "system:c"
 foreign libc {
@@ -224,10 +225,27 @@ close :: proc(process: ^Process) {
 
 shutdown :: proc(process: ^Process) {
 	close(process)
-	if process.child > 0 && !process.reaped {
-		_ = posix.killpg(process.child, .SIGHUP)
-		_, _ = reap(process, true)
+	if process.child <= 0 || process.reaped do return
+	terminate_group(process, .SIGHUP)
+	if wait_for_reap(process, 10) do return
+	terminate_group(process, .SIGTERM)
+	if wait_for_reap(process, 10) do return
+	terminate_group(process, .SIGKILL)
+	_, _ = reap(process, true)
+}
+
+terminate_group :: proc(process: ^Process, signal: posix.Signal) {
+	if posix.killpg(process.child, signal) != .OK do _ = posix.kill(process.child, signal)
+}
+
+wait_for_reap :: proc(process: ^Process, attempts: int) -> bool {
+	for attempt in 0..<attempts {
+		done, err := reap(process)
+		if done do return true
+		if err != .None do return false
+		if attempt+1 < attempts do time.sleep(10 * time.Millisecond)
 	}
+	return false
 }
 
 error_string :: proc(err: Error) -> string {

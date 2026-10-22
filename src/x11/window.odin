@@ -7,7 +7,7 @@ import xlib "vendor:x11/xlib"
 DEFAULT_WIDTH  :: 800
 DEFAULT_HEIGHT :: 480
 
-Error :: enum { None, Open_Display, Create_Window, WM_Protocol }
+Error :: enum { None, Open_Display, Create_Window, Create_Renderer, WM_Protocol }
 Event_Kind :: enum { None, Close, Redraw, Resize, Focus, Input, Mouse }
 
 Event :: struct {
@@ -25,10 +25,15 @@ Event :: struct {
 Window :: struct {
 	display:   ^xlib.Display,
 	id:        xlib.Window,
+	gc:        xlib.GC,
+	font:      ^xlib.XFontStruct,
+	visual:    ^xlib.Visual,
 	wm_delete: xlib.Atom,
 	width:     int,
 	height:    int,
 	dpi:       f32,
+	black:     uint,
+	white:     uint,
 	cell_w:    int,
 	cell_h:    int,
 	focused:   bool,
@@ -59,9 +64,33 @@ open :: proc(title: cstring = "nare") -> (window: Window, err: Error) {
 	window.width = DEFAULT_WIDTH
 	window.height = DEFAULT_HEIGHT
 	window.dpi = display_dpi(display, screen)
+	window.black = xlib.BlackPixel(display, screen)
+	window.white = xlib.WhitePixel(display, screen)
+	window.visual = xlib.DefaultVisual(display, screen)
+	window.font = xlib.LoadQueryFont(display, "fixed")
+	if window.font == nil {
+		close(&window)
+		return window, .Create_Renderer
+	}
+	values := xlib.XGCValues{
+		foreground = window.white,
+		background = window.black,
+		font = window.font.fid,
+		graphics_exposures = false,
+	}
+	window.gc = xlib.CreateGC(
+		display,
+		xlib.Drawable(window.id),
+		{.GCForeground, .GCBackground, .GCFont, .GCGraphicsExposures},
+		&values,
+	)
+	if window.gc == nil {
+		close(&window)
+		return window, .Create_Renderer
+	}
 	scale := max(window.dpi / 96, 0.75)
-	window.cell_w = max(1, int(math.round(8 * scale)))
-	window.cell_h = max(1, int(math.round(16 * scale)))
+	window.cell_w = max(1, int(math.round(f32(window.font.max_bounds.width) * scale)))
+	window.cell_h = max(1, int(math.round(f32(window.font.ascent+window.font.descent) * scale)))
 	xlib.SelectInput(display, window.id, base_event_mask())
 	window.wm_delete = xlib.InternAtom(display, "WM_DELETE_WINDOW", false)
 	if window.wm_delete == 0 || xlib.SetWMProtocols(display, window.id, &window.wm_delete, 1) == .Success {
@@ -206,13 +235,10 @@ key_from_keysym :: proc(keysym: xlib.KeySym) -> keyboard.Key {
 	}
 }
 
-redraw :: proc(window: ^Window) {
-	xlib.ClearWindow(window.display, window.id)
-	_ = xlib.Flush(window.display)
-}
-
 close :: proc(window: ^Window) {
 	if window.display == nil do return
+	if window.gc != nil do xlib.FreeGC(window.display, window.gc)
+	if window.font != nil do xlib.FreeFont(window.display, window.font)
 	if window.id != 0 do xlib.DestroyWindow(window.display, window.id)
 	xlib.CloseDisplay(window.display)
 	window^ = {}
@@ -223,6 +249,7 @@ error_string :: proc(err: Error) -> string {
 	case .None:          return "none"
 	case .Open_Display:  return "could not open X11 display"
 	case .Create_Window: return "could not create X11 window"
+	case .Create_Renderer: return "could not initialize X11 text renderer"
 	case .WM_Protocol:   return "could not register WM_DELETE_WINDOW"
 	}
 	return "unknown X11 error"

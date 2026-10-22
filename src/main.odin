@@ -1,6 +1,5 @@
 package main
 
-import "core:c"
 import "core:fmt"
 import "core:os"
 import "core:strings"
@@ -90,6 +89,7 @@ run :: proc(window: ^x11.Window, process: ^pty.Process, terminal: ^vt.Terminal) 
 	defer delete(pending)
 	pending_offset := 0
 	running := true
+	close_requested := false
 
 	for running {
 		x11.set_mouse_tracking(window, terminal.modes.mouse_tracking)
@@ -98,15 +98,18 @@ run :: proc(window: ^x11.Window, process: ^pty.Process, terminal: ^vt.Terminal) 
 			if !available do break
 			#partial switch event.kind {
 			case .Close:
+				close_requested = true
 				running = false
 			case .Redraw:
-				x11.redraw(window)
+				x11.redraw(window, terminal)
 			case .Resize:
 				columns, rows := x11.grid_size(window)
 				if !vt.terminal_resize(terminal, columns, rows) ||
 				   pty.resize(process, pty_size(columns, rows, event.width, event.height)) != .None {
 					fmt.eprintln("could not resize PTY")
 					running = false
+				} else {
+					x11.redraw(window, terminal)
 				}
 			case .Input:
 				encoded: [16]byte
@@ -151,7 +154,7 @@ run :: proc(window: ^x11.Window, process: ^pty.Process, terminal: ^vt.Terminal) 
 		}
 
 		if .IN in fds[1].revents || .HUP in fds[1].revents {
-			if !drain_pty(process, terminal) do running = false
+			if !drain_pty(window, process, terminal) do running = false
 			replies := vt.terminal_take_replies(terminal)
 			queue_input(&pending, pending_offset, replies)
 			vt.terminal_consume_replies(terminal, len(replies))
@@ -174,8 +177,8 @@ run :: proc(window: ^x11.Window, process: ^pty.Process, terminal: ^vt.Terminal) 
 		if .ERR in fds[1].revents || .NVAL in fds[1].revents do running = false
 	}
 
-	_, reap_err := pty.reap(process, true)
-	if reap_err != .None do return 1
+	pty.shutdown(process)
+	if close_requested do return 0
 	return pty.exit_code(process)
 }
 
@@ -183,33 +186,25 @@ queue_input :: proc(pending: ^[dynamic]byte, offset: int, data: []byte) {
 	if len(pending^) - offset + len(data) <= MAX_PENDING_INPUT do append(pending, ..data)
 }
 
-drain_pty :: proc(process: ^pty.Process, terminal: ^vt.Terminal) -> bool {
+drain_pty :: proc(window: ^x11.Window, process: ^pty.Process, terminal: ^vt.Terminal) -> bool {
 	buffer: [16 * 1024]byte
+	dirty := false
 	for {
 		count, result := pty.read(process, buffer[:])
 		switch result {
 		case .Data:
 			vt.terminal_feed(terminal, buffer[:count])
-			write_all_stdout(buffer[:count])
+			dirty = true
 		case .Would_Block:
+			if dirty do x11.redraw(window, terminal)
 			return true
 		case .End:
+			if dirty do x11.redraw(window, terminal)
 			return false
 		case .Failed:
+			if dirty do x11.redraw(window, terminal)
 			fmt.eprintln("PTY read failed")
 			return false
 		}
-	}
-}
-
-write_all_stdout :: proc(data: []byte) {
-	for offset := 0; offset < int(len(data)); {
-		written := posix.write(1, raw_data(data[offset:]), c.size_t(int(len(data))-offset))
-		if written > 0 {
-			offset += int(written)
-			continue
-		}
-		if written < 0 && posix.errno() == .EINTR do continue
-		return
 	}
 }
