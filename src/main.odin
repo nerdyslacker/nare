@@ -41,7 +41,7 @@ app_main :: proc() -> int {
 		fmt.eprintln(drawing.error_string(render_error))
 		return 1
 	}
-	defer drawing.destroy(&renderer)
+	defer drawing.destroy(&renderer, &window)
 
 	columns, rows := x11.grid_size(&window)
 	process, process_err := pty.spawn(command[:], pty_size(columns, rows, window.width, window.height))

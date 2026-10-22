@@ -10,6 +10,8 @@ Error :: enum { None, Font, CPU, GPU_Unavailable }
 Renderer :: struct {
 	font: fonts.Manager,
 	cpu: CPU,
+	gpu: GPU,
+	active: Kind,
 	ligatures: bool,
 }
 
@@ -20,7 +22,6 @@ init :: proc(
 	ligatures: bool = true,
 	family: string = fonts.DEFAULT_FAMILY,
 ) -> Error {
-	if kind == .GPU do return .GPU_Unavailable
 	font_error := fonts.init(&renderer.font, family)
 	if font_error != .None do return .Font
 	x11.set_cell_size(window, renderer.font.cell_width, renderer.font.cell_height)
@@ -28,23 +29,63 @@ init :: proc(
 		destroy(renderer)
 		return .CPU
 	}
+	renderer.active = .CPU
+	gpu_ready := false
+	if kind != .CPU {
+		gpu_ready = gpu_init(&renderer.gpu, window)
+	}
+	selected, available := select_kind(kind, gpu_ready)
+	if !available {
+		destroy(renderer, window)
+		return .GPU_Unavailable
+	}
+	renderer.active = selected
 	renderer.ligatures = ligatures
 	return .None
 }
 
-destroy :: proc(renderer: ^Renderer) {
+select_kind :: proc(requested: Kind, gpu_ready: bool) -> (selected: Kind, available: bool) {
+	switch requested {
+	case .CPU:
+		return .CPU, true
+	case .GPU:
+		return .GPU, gpu_ready
+	case .Auto:
+		if gpu_ready do return .GPU, true
+		return .CPU, true
+	}
+	return .CPU, false
+}
+
+destroy :: proc(renderer: ^Renderer, window: ^x11.Window = nil) {
+	if window != nil do gpu_destroy(&renderer.gpu, window)
 	cpu_destroy(&renderer.cpu)
 	fonts.destroy(&renderer.font)
 	renderer^ = {}
 }
 
 resize :: proc(renderer: ^Renderer, window: ^x11.Window) -> bool {
-	return cpu_resize(&renderer.cpu, window)
+	if !cpu_resize(&renderer.cpu, window) do return false
+	if renderer.active == .GPU && !gpu_resize(&renderer.gpu, window) {
+		gpu_destroy(&renderer.gpu, window)
+		renderer.active = .CPU
+	}
+	return true
 }
 
 draw :: proc(renderer: ^Renderer, window: ^x11.Window, terminal: ^vt.Terminal, force: bool = false) {
 	if terminal.modes.synchronized_updates do return
-	cpu_draw(&renderer.cpu, &renderer.font, window, terminal, renderer.ligatures, force)
+	if renderer.active == .CPU {
+		cpu_draw(&renderer.cpu, &renderer.font, window, terminal, renderer.ligatures, force)
+		return
+	}
+	if !cpu_render(&renderer.cpu, &renderer.font, window, terminal, renderer.ligatures, force) do return
+	if !gpu_present(&renderer.gpu, &renderer.cpu, window) {
+		gpu_destroy(&renderer.gpu, window)
+		renderer.active = .CPU
+		screen := vt.terminal_screen(terminal)
+		cpu_present(&renderer.cpu, window, screen.columns)
+	}
 }
 
 error_string :: proc(err: Error) -> string {

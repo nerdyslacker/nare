@@ -14,6 +14,7 @@ CPU :: struct {
 	pixels: []u32,
 	width, height: int,
 	previous: []vt.Cell,
+	dirty_rows: []bool,
 	previous_cursor: vt.Cursor,
 	previous_cursor_visible: bool,
 	previous_alternate: bool,
@@ -54,24 +55,27 @@ cpu_resize :: proc(cpu: ^CPU, window: ^x11.Window) -> bool {
 	cpu.height = window.height
 	delete(cpu.previous)
 	cpu.previous = nil
+	delete(cpu.dirty_rows)
+	cpu.dirty_rows = nil
 	return true
 }
 
 cpu_destroy :: proc(cpu: ^CPU) {
 	if cpu.image != nil do xlib.DestroyImage(cpu.image)
 	delete(cpu.previous)
+	delete(cpu.dirty_rows)
 	cpu^ = {}
 }
 
-cpu_draw :: proc(
+cpu_render :: proc(
 	cpu: ^CPU,
 	font: ^fonts.Manager,
 	window: ^x11.Window,
 	terminal: ^vt.Terminal,
 	ligatures: bool,
 	force: bool,
-) {
-	if cpu.image == nil do return
+) -> bool {
+	if cpu.image == nil do return false
 	screen := vt.terminal_screen(terminal)
 	full_redraw := force
 	if len(cpu.previous) != len(screen.cells) {
@@ -79,7 +83,15 @@ cpu_draw :: proc(
 		cpu.previous = make([]vt.Cell, len(screen.cells))
 		full_redraw = true
 	}
+	if len(cpu.dirty_rows) != screen.rows {
+		delete(cpu.dirty_rows)
+		cpu.dirty_rows = make([]bool, screen.rows)
+		full_redraw = true
+	} else {
+		for index in 0..<len(cpu.dirty_rows) do cpu.dirty_rows[index] = false
+	}
 	if cpu.previous_alternate != terminal.using_alternate do full_redraw = true
+	any_dirty := false
 	for row in 0..<screen.rows {
 		dirty := full_redraw || row == screen.cursor.row || row == cpu.previous_cursor.row
 		if !dirty {
@@ -92,11 +104,23 @@ cpu_draw :: proc(
 			}
 		}
 		if !dirty do continue
+		cpu.dirty_rows[row] = true
+		any_dirty = true
 		render_row(cpu, font, window, terminal, screen, row, ligatures)
 		copy(
 			cpu.previous[row*screen.columns:(row+1)*screen.columns],
 			screen.cells[row*screen.columns:(row+1)*screen.columns],
 		)
+	}
+	cpu.previous_cursor = screen.cursor
+	cpu.previous_cursor_visible = terminal.modes.cursor_visible
+	cpu.previous_alternate = terminal.using_alternate
+	return any_dirty
+}
+
+cpu_present :: proc(cpu: ^CPU, window: ^x11.Window, columns: int) {
+	for dirty, row in cpu.dirty_rows {
+		if !dirty do continue
 		y := row * window.cell_h
 		if y >= cpu.height do continue
 		height := min(window.cell_h, cpu.height-y)
@@ -109,14 +133,24 @@ cpu_draw :: proc(
 			i32(y),
 			0,
 			i32(y),
-			u32(min(cpu.width, screen.columns*window.cell_w)),
+			u32(min(cpu.width, columns*window.cell_w)),
 			u32(height),
 		)
 	}
-	cpu.previous_cursor = screen.cursor
-	cpu.previous_cursor_visible = terminal.modes.cursor_visible
-	cpu.previous_alternate = terminal.using_alternate
 	_ = xlib.Flush(window.display)
+}
+
+cpu_draw :: proc(
+	cpu: ^CPU,
+	font: ^fonts.Manager,
+	window: ^x11.Window,
+	terminal: ^vt.Terminal,
+	ligatures: bool,
+	force: bool,
+) {
+	if !cpu_render(cpu, font, window, terminal, ligatures, force) do return
+	screen := vt.terminal_screen(terminal)
+	cpu_present(cpu, window, screen.columns)
 }
 
 render_row :: proc(
