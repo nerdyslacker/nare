@@ -1,6 +1,7 @@
 package vt
 
 import "core:unicode"
+import "core:unicode/utf8"
 
 MAX_COMBINING_RUNES :: 4
 DEFAULT_SCROLLBACK_LINES :: 10000
@@ -256,6 +257,52 @@ destroy_logical_lines :: proc(lines: ^[dynamic]Logical_Line) {
 
 cell_at :: proc(screen: ^Screen, row, column: int) -> ^Cell {
 	return &screen.cells[row * screen.columns + column]
+}
+
+screen_position :: proc(screen: ^Screen, row, column: int) -> Cursor {
+	position := Cursor{
+		row = clamp(row, 0, screen.rows-1),
+		column = clamp(column, 0, screen.columns-1),
+	}
+	if cell_at(screen, position.row, position.column).continuation && position.column > 0 {
+		position.column -= 1
+	}
+	return position
+}
+
+screen_extract :: proc(screen: ^Screen, first, last: Cursor) -> string {
+	start := screen_position(screen, first.row, first.column)
+	end := screen_position(screen, last.row, last.column)
+	if cursor_after(start, end) do start, end = end, start
+	result: [dynamic]byte
+	for row in start.row..=end.row {
+		start_column := start.column if row == start.row else 0
+		end_column := end.column if row == end.row else screen.columns-1
+		if row < end.row && !screen.wrapped[row] {
+			for end_column >= start_column && copy_blank(cell_at(screen, row, end_column)) do end_column -= 1
+		}
+		for column := start_column; column <= end_column; column += 1 {
+			cell := cell_at(screen, row, column)
+			if cell.continuation do continue
+			append_rune(&result, cell.codepoint)
+			for index in 0..<int(cell.combining_count) do append_rune(&result, cell.combining[index])
+		}
+		if row < end.row && !screen.wrapped[row] do append(&result, '\n')
+	}
+	return string(result[:])
+}
+
+cursor_after :: proc(left, right: Cursor) -> bool {
+	return left.row > right.row || left.row == right.row && left.column > right.column
+}
+
+copy_blank :: proc(cell: ^Cell) -> bool {
+	return !cell.continuation && cell.codepoint == ' ' && cell.combining_count == 0
+}
+
+append_rune :: proc(output: ^[dynamic]byte, value: rune) {
+	bytes, count := utf8.encode_rune(value)
+	append(output, ..bytes[:count])
 }
 
 blank_cell :: proc(attributes: Attributes) -> Cell {
