@@ -15,6 +15,7 @@ CPU :: struct {
 	width, height: int,
 	previous: []vt.Cell,
 	dirty_rows: []bool,
+	commands: [dynamic]Command,
 	previous_cursor: vt.Cursor,
 	previous_cursor_visible: bool,
 	previous_alternate: bool,
@@ -64,6 +65,7 @@ cpu_destroy :: proc(cpu: ^CPU) {
 	if cpu.image != nil do xlib.DestroyImage(cpu.image)
 	delete(cpu.previous)
 	delete(cpu.dirty_rows)
+	delete(cpu.commands)
 	cpu^ = {}
 }
 
@@ -75,6 +77,16 @@ cpu_render :: proc(
 	ligatures: bool,
 	force: bool,
 ) -> bool {
+	if cpu.image == nil do return false
+	if !damage_rows(cpu, terminal, force) do return false
+	screen := vt.terminal_screen(terminal)
+	for dirty, row in cpu.dirty_rows {
+		if dirty do render_row(cpu, font, window, terminal, screen, row, ligatures)
+	}
+	return true
+}
+
+damage_rows :: proc(cpu: ^CPU, terminal: ^vt.Terminal, force: bool) -> bool {
 	if cpu.image == nil do return false
 	screen := vt.terminal_screen(terminal)
 	full_redraw := force
@@ -106,7 +118,6 @@ cpu_render :: proc(
 		if !dirty do continue
 		cpu.dirty_rows[row] = true
 		any_dirty = true
-		render_row(cpu, font, window, terminal, screen, row, ligatures)
 		copy(
 			cpu.previous[row*screen.columns:(row+1)*screen.columns],
 			screen.cells[row*screen.columns:(row+1)*screen.columns],
@@ -162,79 +173,18 @@ render_row :: proc(
 	row: int,
 	ligatures: bool,
 ) {
-	y := row * window.cell_h
-	if y >= cpu.height do return
-	for column in 0..<screen.columns {
-		cell := vt.cell_at(screen, row, column)
-		foreground, background := cell_colors(cell)
-		if block_cursor(terminal, screen, row, column) do foreground, background = background, foreground
-		fill_rect(cpu, window, column*window.cell_w, y, window.cell_w, window.cell_h, background)
-		if cell.attributes.underline {
-			fill_rect(cpu, window, column*window.cell_w, y+window.cell_h-1, window.cell_w, 1, foreground)
-			if cell.attributes.double_underline {
-				fill_rect(cpu, window, column*window.cell_w, y+window.cell_h-3, window.cell_w, 1, foreground)
-			}
-		}
-		if cell.attributes.strikethrough {
-			fill_rect(cpu, window, column*window.cell_w, y+window.cell_h/2, window.cell_w, 1, foreground)
+	if row*window.cell_h >= cpu.height do return
+	build_row_commands(&cpu.commands, font, window, terminal, screen, row, ligatures)
+	for command in cpu.commands {
+		switch command.kind {
+		case .Rectangle:
+			fill_rect(cpu, window, command.x, command.y, command.width, command.height, command.color)
+		case .Glyph:
+			glyph := fonts.face_glyph(font, command.face_id, command.glyph_index)
+			if glyph == nil do continue
+			draw_glyph(cpu, window, glyph, command.x, command.y, command.color, command.clip_left, command.clip_right)
 		}
 	}
-
-	column := 0
-	for column < screen.columns {
-		cell := vt.cell_at(screen, row, column)
-		if cell.continuation {
-			column += 1
-			continue
-		}
-		run_start := column
-		attributes := cell.attributes
-		text: [dynamic]rune
-		clusters: [dynamic]int
-		defer delete(text)
-		defer delete(clusters)
-		for column < screen.columns {
-			current := vt.cell_at(screen, row, column)
-			if current.continuation {
-				column += 1
-				continue
-			}
-			if current.attributes != attributes && len(text) > 0 do break
-			append(&text, current.codepoint)
-			append(&clusters, column)
-			for index in 0..<int(current.combining_count) {
-				append(&text, current.combining[index])
-				append(&clusters, column)
-			}
-			column += max(1, int(current.width))
-		}
-		shaped: [dynamic]fonts.Shaped_Glyph
-		style := fonts.style_for_attributes(attributes.bold, attributes.italic)
-		if fonts.shape(font, text[:], ligatures, &shaped, style) {
-			foreground, _ := cell_colors(vt.cell_at(screen, row, run_start))
-			for shaped_glyph in shaped {
-				if shaped_glyph.cluster < 0 || shaped_glyph.cluster >= len(clusters) do continue
-				cached := fonts.face_glyph(font, shaped_glyph.face_id, shaped_glyph.index)
-				if cached == nil do continue
-				origin_column := clusters[shaped_glyph.cluster]
-				if block_cursor(terminal, screen, row, origin_column) {
-					_, foreground = cell_colors(vt.cell_at(screen, row, origin_column))
-				}
-				draw_glyph(
-					cpu,
-					window,
-					cached,
-					origin_column*window.cell_w+cached.left+shaped_glyph.x_offset/64,
-					y+font.ascent-cached.top-shaped_glyph.y_offset/64,
-					foreground,
-					run_start*window.cell_w,
-					min(cpu.width, column*window.cell_w),
-				)
-			}
-		}
-		delete(shaped)
-	}
-	draw_cursor_accent(cpu, window, terminal, screen, row)
 }
 
 draw_glyph :: proc(cpu: ^CPU, window: ^x11.Window, glyph: ^fonts.Glyph, x, y: int, color: u32, clip_left, clip_right: int) {
@@ -380,17 +330,4 @@ mask_field :: proc(mask: uint) -> (shift, field: uint) {
 block_cursor :: proc(terminal: ^vt.Terminal, screen: ^vt.Screen, row, column: int) -> bool {
 	if !terminal.modes.cursor_visible || row != screen.cursor.row || column != screen.cursor.column do return false
 	return terminal.modes.cursor_style == .Blinking_Block || terminal.modes.cursor_style == .Steady_Block
-}
-
-draw_cursor_accent :: proc(cpu: ^CPU, window: ^x11.Window, terminal: ^vt.Terminal, screen: ^vt.Screen, row: int) {
-	if !terminal.modes.cursor_visible || row != screen.cursor.row do return
-	style := terminal.modes.cursor_style
-	if style == .Blinking_Block || style == .Steady_Block do return
-	x := screen.cursor.column*window.cell_w
-	color, _ := cell_colors(vt.cell_at(screen, row, screen.cursor.column))
-	if style == .Blinking_Underline || style == .Steady_Underline {
-		fill_rect(cpu, window, x, row*window.cell_h+window.cell_h-2, window.cell_w, 2, color)
-	} else {
-		fill_rect(cpu, window, x, row*window.cell_h, 2, window.cell_h, color)
-	}
 }

@@ -1,5 +1,7 @@
 package render
 
+import fonts "../font"
+import vt "../vt"
 import x11 "../x11"
 import xlib "vendor:x11/xlib"
 
@@ -7,10 +9,14 @@ GPU_ENABLED :: #config(RENDERER_GPU, false)
 
 GPU :: struct {
 	ctx: rawptr,
-	texture: u32,
+	surface_texture: u32,
+	atlas_texture: u32,
+	framebuffer: u32,
 	width, height: int,
 	double_buffered: bool,
 	drawable: xlib.XID,
+	atlas: Atlas,
+	commands: [dynamic]Command,
 }
 
 when GPU_ENABLED {
@@ -30,6 +36,11 @@ when GPU_ENABLED {
 	foreign gl_library {
 		GenTextures :: proc(count: i32, textures: [^]u32) ---
 		DeleteTextures :: proc(count: i32, textures: [^]u32) ---
+		GenFramebuffers :: proc(count: i32, framebuffers: [^]u32) ---
+		DeleteFramebuffers :: proc(count: i32, framebuffers: [^]u32) ---
+		BindFramebuffer :: proc(target, framebuffer: u32) ---
+		FramebufferTexture2D :: proc(target, attachment, texture_target, texture: u32, level: i32) ---
+		CheckFramebufferStatus :: proc(target: u32) -> u32 ---
 		BindTexture :: proc(target, texture: u32) ---
 		TexParameteri :: proc(target, parameter: u32, value: i32) ---
 		PixelStorei :: proc(parameter: u32, value: i32) ---
@@ -40,6 +51,9 @@ when GPU_ENABLED {
 		Viewport :: proc(x, y, width, height: i32) ---
 		ClearColor :: proc(red, green, blue, alpha: f32) ---
 		Clear :: proc(mask: u32) ---
+		Scissor :: proc(x, y, width, height: i32) ---
+		BlendFunc :: proc(source, destination: u32) ---
+		Color4f :: proc(red, green, blue, alpha: f32) ---
 		Begin :: proc(mode: u32) ---
 		End :: proc() ---
 		TexCoord2f :: proc(s, t: f32) ---
@@ -57,12 +71,20 @@ GL_TEXTURE_MAG_FILTER :: 0x2800
 GL_TEXTURE_MIN_FILTER :: 0x2801
 GL_NEAREST      :: 0x2600
 GL_RGB          :: 0x1907
+GL_RGBA         :: 0x1908
 GL_BGRA         :: 0x80e1
 GL_UNSIGNED_BYTE :: 0x1401
 GL_UNPACK_ALIGNMENT :: 0x0cf5
 GL_COLOR_BUFFER_BIT :: 0x00004000
 GL_QUADS        :: 0x0007
 GL_NO_ERROR     :: 0
+GL_BLEND        :: 0x0be2
+GL_SCISSOR_TEST :: 0x0c11
+GL_ONE          :: 1
+GL_ONE_MINUS_SRC_ALPHA :: 0x0303
+GL_FRAMEBUFFER  :: 0x8d40
+GL_COLOR_ATTACHMENT0 :: 0x8ce0
+GL_FRAMEBUFFER_COMPLETE :: 0x8cd5
 
 gpu_init :: proc(gpu: ^GPU, window: ^x11.Window) -> bool {
 	when !GPU_ENABLED {
@@ -86,11 +108,19 @@ gpu_init :: proc(gpu: ^GPU, window: ^x11.Window) -> bool {
 			gpu^ = {}
 			return false
 		}
-		GenTextures(1, &gpu.texture)
-		if gpu.texture == 0 || GetError() != GL_NO_ERROR {
+		textures: [2]u32
+		GenTextures(2, &textures[0])
+		gpu.surface_texture = textures[0]
+		gpu.atlas_texture = textures[1]
+		GenFramebuffers(1, &gpu.framebuffer)
+		if gpu.surface_texture == 0 || gpu.atlas_texture == 0 || gpu.framebuffer == 0 || GetError() != GL_NO_ERROR {
 			gpu_destroy(gpu, window)
 			return false
 		}
+		BindTexture(GL_TEXTURE_2D, gpu.atlas_texture)
+		TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST)
+		TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
+		TexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, ATLAS_WIDTH, ATLAS_HEIGHT, 0, GL_RGBA, GL_UNSIGNED_BYTE, nil)
 		gpu.double_buffered = double_buffered != 0
 		gpu.drawable = xlib.XID(window.id)
 		if !gpu_resize(gpu, window) {
@@ -104,13 +134,17 @@ gpu_init :: proc(gpu: ^GPU, window: ^x11.Window) -> bool {
 gpu_destroy :: proc(gpu: ^GPU, window: ^x11.Window) {
 	when GPU_ENABLED {
 		if gpu.ctx != nil {
-			if MakeCurrent(window.display, xlib.XID(window.id), gpu.ctx) != false && gpu.texture != 0 {
-				DeleteTextures(1, &gpu.texture)
+			if MakeCurrent(window.display, xlib.XID(window.id), gpu.ctx) != false {
+				textures := [2]u32{gpu.surface_texture, gpu.atlas_texture}
+				DeleteTextures(2, &textures[0])
+				if gpu.framebuffer != 0 do DeleteFramebuffers(1, &gpu.framebuffer)
 			}
 			_ = MakeCurrent(window.display, xlib.XID(0), nil)
 			DestroyContext(window.display, gpu.ctx)
 		}
 	}
+	atlas_destroy(&gpu.atlas)
+	delete(gpu.commands)
 	gpu^ = {}
 }
 
@@ -120,41 +154,72 @@ gpu_resize :: proc(gpu: ^GPU, window: ^x11.Window) -> bool {
 	} else {
 		if gpu.ctx == nil || window.width <= 0 || window.height <= 0 do return false
 		if MakeCurrent(window.display, xlib.XID(window.id), gpu.ctx) == false do return false
-		BindTexture(GL_TEXTURE_2D, gpu.texture)
+		BindTexture(GL_TEXTURE_2D, gpu.surface_texture)
 		TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST)
 		TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
 		PixelStorei(GL_UNPACK_ALIGNMENT, 4)
 		TexImage2D(GL_TEXTURE_2D, 0, GL_RGB, i32(window.width), i32(window.height), 0, GL_BGRA, GL_UNSIGNED_BYTE, nil)
+		BindFramebuffer(GL_FRAMEBUFFER, gpu.framebuffer)
+		FramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, gpu.surface_texture, 0)
+		if CheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE {
+			BindFramebuffer(GL_FRAMEBUFFER, 0)
+			return false
+		}
+		Viewport(0, 0, i32(window.width), i32(window.height))
+		ClearColor(0, 0, 0, 1)
+		Clear(GL_COLOR_BUFFER_BIT)
+		BindFramebuffer(GL_FRAMEBUFFER, 0)
 		gpu.width = window.width
 		gpu.height = window.height
 		return GetError() == GL_NO_ERROR
 	}
 }
 
-gpu_present :: proc(gpu: ^GPU, cpu: ^CPU, window: ^x11.Window) -> bool {
+gpu_draw :: proc(
+	gpu: ^GPU,
+	damage: ^CPU,
+	font: ^fonts.Manager,
+	window: ^x11.Window,
+	terminal: ^vt.Terminal,
+	ligatures: bool,
+	force: bool,
+) -> bool {
 	when !GPU_ENABLED {
 		return false
 	} else {
-		if gpu.ctx == nil || gpu.width != cpu.width || gpu.height != cpu.height do return false
+		if gpu.ctx == nil || gpu.width != damage.width || gpu.height != damage.height do return false
+		if !damage_rows(damage, terminal, force) do return true
 		if MakeCurrent(window.display, xlib.XID(window.id), gpu.ctx) == false do return false
-		BindTexture(GL_TEXTURE_2D, gpu.texture)
-		for dirty, row in cpu.dirty_rows {
+		BindFramebuffer(GL_FRAMEBUFFER, gpu.framebuffer)
+		Viewport(0, 0, i32(gpu.width), i32(gpu.height))
+		Enable(GL_SCISSOR_TEST)
+		screen := vt.terminal_screen(terminal)
+		for dirty, row in damage.dirty_rows {
 			if !dirty do continue
 			y := row * window.cell_h
-			if y >= cpu.height do continue
-			height := min(window.cell_h, cpu.height-y)
-			pixels := rawptr(&cpu.pixels[y*cpu.width])
-			TexSubImage2D(GL_TEXTURE_2D, 0, 0, i32(y), i32(cpu.width), i32(height), GL_BGRA, GL_UNSIGNED_BYTE, pixels)
+			if y >= gpu.height do continue
+			height := min(window.cell_h, gpu.height-y)
+			Scissor(0, i32(gpu.height-y-height), i32(gpu.width), i32(height))
+			build_row_commands(&gpu.commands, font, window, terminal, screen, row, ligatures)
+			if !gpu_prepare_atlas(gpu, font) {
+				BindFramebuffer(GL_FRAMEBUFFER, 0)
+				return false
+			}
+			gpu_draw_commands(gpu)
 		}
+		Disable(GL_SCISSOR_TEST)
+		BindFramebuffer(GL_FRAMEBUFFER, 0)
 		Viewport(0, 0, i32(gpu.width), i32(gpu.height))
 		ClearColor(0, 0, 0, 1)
 		Clear(GL_COLOR_BUFFER_BIT)
+		BindTexture(GL_TEXTURE_2D, gpu.surface_texture)
 		Enable(GL_TEXTURE_2D)
+		Color4f(1, 1, 1, 1)
 		Begin(GL_QUADS)
-		TexCoord2f(0, 0); Vertex2f(-1, 1)
-		TexCoord2f(1, 0); Vertex2f(1, 1)
-		TexCoord2f(1, 1); Vertex2f(1, -1)
-		TexCoord2f(0, 1); Vertex2f(-1, -1)
+		TexCoord2f(0, 1); Vertex2f(-1, 1)
+		TexCoord2f(1, 1); Vertex2f(1, 1)
+		TexCoord2f(1, 0); Vertex2f(1, -1)
+		TexCoord2f(0, 0); Vertex2f(-1, -1)
 		End()
 		Disable(GL_TEXTURE_2D)
 		if GetError() != GL_NO_ERROR do return false
@@ -164,5 +229,137 @@ gpu_present :: proc(gpu: ^GPU, cpu: ^CPU, window: ^x11.Window) -> bool {
 			Flush()
 		}
 		return true
+	}
+}
+
+when GPU_ENABLED {
+	gpu_prepare_atlas :: proc(gpu: ^GPU, font: ^fonts.Manager) -> bool {
+		BindTexture(GL_TEXTURE_2D, gpu.atlas_texture)
+		PixelStorei(GL_UNPACK_ALIGNMENT, 1)
+		attempt := 0
+		for attempt < 3 {
+			attempt += 1
+			generation := gpu.atlas.generation
+			processed := false
+			restart := false
+			for command in gpu.commands {
+				if command.kind != .Glyph do continue
+				if atlas_find(&gpu.atlas, command.face_id, command.glyph_index) != nil {
+					processed = true
+					continue
+				}
+				glyph := fonts.face_glyph(font, command.face_id, command.glyph_index)
+				if glyph == nil || glyph.width == 0 || glyph.height == 0 do continue
+				entry, reset := atlas_place(&gpu.atlas, command.face_id, command.glyph_index, glyph.width, glyph.height)
+				if entry == nil do return false
+				if !gpu_upload_glyph(entry, glyph) do return false
+				if reset && processed && gpu.atlas.generation != generation {
+					restart = true
+					break
+				}
+				generation = gpu.atlas.generation
+				processed = true
+			}
+			if !restart do return true
+		}
+		return false
+	}
+
+	gpu_upload_glyph :: proc(entry: ^Atlas_Entry, glyph: ^fonts.Glyph) -> bool {
+		pixels := make([]u8, glyph.width*glyph.height*4)
+		defer delete(pixels)
+		for index in 0..<glyph.width*glyph.height {
+			if glyph.kind == .Coverage {
+				alpha := glyph.pixels[index]
+				pixels[index*4] = alpha
+				pixels[index*4+1] = alpha
+				pixels[index*4+2] = alpha
+				pixels[index*4+3] = alpha
+			} else {
+				pixels[index*4] = glyph.pixels[index*4+2]
+				pixels[index*4+1] = glyph.pixels[index*4+1]
+				pixels[index*4+2] = glyph.pixels[index*4]
+				pixels[index*4+3] = glyph.pixels[index*4+3]
+			}
+		}
+		TexSubImage2D(
+			GL_TEXTURE_2D,
+			0,
+			i32(entry.x),
+			i32(entry.y),
+			i32(entry.width),
+			i32(entry.height),
+			GL_RGBA,
+			GL_UNSIGNED_BYTE,
+			raw_data(pixels),
+		)
+		return GetError() == GL_NO_ERROR
+	}
+
+	gpu_draw_commands :: proc(gpu: ^GPU) {
+		Disable(GL_TEXTURE_2D)
+		Disable(GL_BLEND)
+		Begin(GL_QUADS)
+		for command in gpu.commands {
+			if command.kind != .Rectangle do continue
+			gpu_color(command.color)
+			gpu_quad(gpu, command.x, command.y, command.x+command.width, command.y+command.height)
+		}
+		End()
+
+		BindTexture(GL_TEXTURE_2D, gpu.atlas_texture)
+		Enable(GL_TEXTURE_2D)
+		Enable(GL_BLEND)
+		BlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA)
+		Begin(GL_QUADS)
+		for command in gpu.commands {
+			if command.kind != .Glyph do continue
+			entry := atlas_find(&gpu.atlas, command.face_id, command.glyph_index)
+			if entry == nil do continue
+			left := max(0, max(command.clip_left, command.x))
+			right := min(gpu.width, min(command.clip_right, command.x+command.width))
+			top := max(0, command.y)
+			bottom := min(gpu.height, command.y+command.height)
+			if left >= right || top >= bottom do continue
+			if command.glyph_kind == .Coverage {
+				gpu_color(command.color)
+			} else {
+				Color4f(1, 1, 1, 1)
+			}
+			u0 := f32(entry.x+left-command.x)/f32(ATLAS_WIDTH)
+			u1 := f32(entry.x+right-command.x)/f32(ATLAS_WIDTH)
+			v0 := f32(entry.y+top-command.y)/f32(ATLAS_HEIGHT)
+			v1 := f32(entry.y+bottom-command.y)/f32(ATLAS_HEIGHT)
+			gpu_textured_quad(gpu, left, top, right, bottom, u0, v0, u1, v1)
+		}
+		End()
+		Disable(GL_BLEND)
+		Disable(GL_TEXTURE_2D)
+	}
+
+	gpu_color :: proc(color: u32) {
+		Color4f(f32((color>>16)&0xff)/255, f32((color>>8)&0xff)/255, f32(color&0xff)/255, 1)
+	}
+
+	gpu_quad :: proc(gpu: ^GPU, left, top, right, bottom: int) {
+		x0 := f32(left)*2/f32(gpu.width)-1
+		x1 := f32(right)*2/f32(gpu.width)-1
+		y0 := 1-f32(top)*2/f32(gpu.height)
+		y1 := 1-f32(bottom)*2/f32(gpu.height)
+		Vertex2f(x0, y0)
+		Vertex2f(x1, y0)
+		Vertex2f(x1, y1)
+		Vertex2f(x0, y1)
+	}
+
+	gpu_textured_quad :: proc(gpu: ^GPU, left, top, right, bottom: int, u0, v0, u1, v1: f32) {
+		x0 := f32(left)*2/f32(gpu.width)-1
+		x1 := f32(right)*2/f32(gpu.width)-1
+		y0 := 1-f32(top)*2/f32(gpu.height)
+		y1 := 1-f32(bottom)*2/f32(gpu.height)
+		TexCoord2f(u0, v0); Vertex2f(x0, y0)
+		TexCoord2f(u1, v0); Vertex2f(x1, y0)
+		TexCoord2f(u1, v1); Vertex2f(x1, y1)
+		TexCoord2f(u0, v1); Vertex2f(x0, y1)
 	}
 }

@@ -79,10 +79,10 @@ draw :: proc(renderer: ^Renderer, window: ^x11.Window, terminal: ^vt.Terminal, f
 		cpu_draw(&renderer.cpu, &renderer.font, window, terminal, renderer.ligatures, force)
 		return
 	}
-	if !cpu_render(&renderer.cpu, &renderer.font, window, terminal, renderer.ligatures, force) do return
-	if !gpu_present(&renderer.gpu, &renderer.cpu, window) {
+	if !gpu_draw(&renderer.gpu, &renderer.cpu, &renderer.font, window, terminal, renderer.ligatures, force) {
 		gpu_destroy(&renderer.gpu, window)
 		renderer.active = .CPU
+		_ = cpu_render(&renderer.cpu, &renderer.font, window, terminal, renderer.ligatures, true)
 		screen := vt.terminal_screen(terminal)
 		cpu_present(&renderer.cpu, window, screen.columns)
 	}
