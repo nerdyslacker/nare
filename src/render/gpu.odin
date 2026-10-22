@@ -1,6 +1,7 @@
 package render
 
 import fonts "../font"
+import selection "../selection"
 import vt "../vt"
 import x11 "../x11"
 import xlib "vendor:x11/xlib"
@@ -183,6 +184,7 @@ gpu_draw :: proc(
 	terminal: ^vt.Terminal,
 	ligatures: bool,
 	force: bool,
+	selection_state: ^selection.State = nil,
 ) -> bool {
 	when !GPU_ENABLED {
 		return false
@@ -200,7 +202,7 @@ gpu_draw :: proc(
 			if y >= gpu.height do continue
 			height := min(window.cell_h, gpu.height-y)
 			Scissor(0, i32(gpu.height-y-height), i32(gpu.width), i32(height))
-			build_row_commands(&gpu.commands, font, window, terminal, screen, row, ligatures)
+			build_row_commands(&gpu.commands, font, window, terminal, screen, row, ligatures, selection_state)
 			if !gpu_prepare_atlas(gpu, font) {
 				BindFramebuffer(GL_FRAMEBUFFER, 0)
 				return false

@@ -5,9 +5,11 @@ import xlib "vendor:x11/xlib"
 
 DEFAULT_WIDTH  :: 800
 DEFAULT_HEIGHT :: 480
+MAX_SELECTION_BYTES :: 64 * 1024
 
-Error :: enum { None, Open_Display, Create_Window, Create_Renderer, WM_Protocol }
-Event_Kind :: enum { None, Close, Redraw, Resize, Focus, Input, Mouse }
+Error :: enum { None, Open_Display, Create_Window, Create_Renderer, WM_Protocol, Selection_Atoms }
+Event_Kind :: enum { None, Close, Redraw, Resize, Focus, Input, Mouse, Paste }
+Selection_Kind :: enum { Primary, Clipboard }
 
 Event :: struct {
 	kind:       Event_Kind,
@@ -37,6 +39,16 @@ Window :: struct {
 	cell_h:    int,
 	focused:   bool,
 	mouse_tracking: int,
+	primary_atom: xlib.Atom,
+	clipboard_atom: xlib.Atom,
+	utf8_atom: xlib.Atom,
+	string_atom: xlib.Atom,
+	targets_atom: xlib.Atom,
+	atom_atom: xlib.Atom,
+	selection_property: xlib.Atom,
+	primary_data: [dynamic]byte,
+	clipboard_data: [dynamic]byte,
+	paste_data: [dynamic]byte,
 }
 
 open :: proc(title: cstring = "nare") -> (window: Window, err: Error) {
@@ -89,6 +101,19 @@ open :: proc(title: cstring = "nare") -> (window: Window, err: Error) {
 	if window.wm_delete == 0 || xlib.SetWMProtocols(display, window.id, &window.wm_delete, 1) == .Success {
 		close(&window)
 		return window, .WM_Protocol
+	}
+	window.primary_atom = xlib.InternAtom(display, "PRIMARY", false)
+	window.clipboard_atom = xlib.InternAtom(display, "CLIPBOARD", false)
+	window.utf8_atom = xlib.InternAtom(display, "UTF8_STRING", false)
+	window.string_atom = xlib.InternAtom(display, "STRING", false)
+	window.targets_atom = xlib.InternAtom(display, "TARGETS", false)
+	window.atom_atom = xlib.InternAtom(display, "ATOM", false)
+	window.selection_property = xlib.InternAtom(display, "NARE_SELECTION", false)
+	if window.primary_atom == 0 || window.clipboard_atom == 0 || window.utf8_atom == 0 ||
+	   window.string_atom == 0 || window.targets_atom == 0 || window.atom_atom == 0 ||
+	   window.selection_property == 0 {
+		close(&window)
+		return window, .Selection_Atoms
 	}
 	xlib.StoreName(display, window.id, title)
 	_ = xlib.MapWindow(display, window.id)
@@ -165,13 +190,137 @@ next_event :: proc(window: ^Window) -> (result: Event, available: bool) {
 		result.mouse.column = max(1, int(event.xmotion.x)/window.cell_w+1)
 		result.mouse.row = max(1, int(event.xmotion.y)/window.cell_h+1)
 		result.mouse.modifiers = modifiers_from_state(event.xmotion.state)
+	case .SelectionRequest:
+		handle_selection_request(window, &event.xselectionrequest)
+	case .SelectionClear:
+		if event.xselectionclear.selection == window.primary_atom do clear(&window.primary_data)
+		if event.xselectionclear.selection == window.clipboard_atom do clear(&window.clipboard_data)
+	case .SelectionNotify:
+		if receive_selection(window, &event.xselection) do result.kind = .Paste
 	case:
 	}
 	return result, true
 }
 
 base_event_mask :: proc() -> xlib.EventMask {
-	return {.KeyPress, .ButtonPress, .ButtonRelease, .Exposure, .StructureNotify, .FocusChange}
+	return {.KeyPress, .ButtonPress, .ButtonRelease, .ButtonMotion, .Exposure, .StructureNotify, .FocusChange}
+}
+
+own_selection :: proc(window: ^Window, kind: Selection_Kind, data: []byte) -> bool {
+	if len(data) > MAX_SELECTION_BYTES do return false
+	atom := window.primary_atom if kind == .Primary else window.clipboard_atom
+	target := &window.primary_data if kind == .Primary else &window.clipboard_data
+	clear(target)
+	append(target, ..data)
+	xlib.SetSelectionOwner(window.display, atom, window.id, xlib.Time(xlib.CurrentTime))
+	_ = xlib.Flush(window.display)
+	return xlib.GetSelectionOwner(window.display, atom) == window.id
+}
+
+request_selection :: proc(window: ^Window, kind: Selection_Kind) {
+	clear(&window.paste_data)
+	atom := window.primary_atom if kind == .Primary else window.clipboard_atom
+	xlib.ConvertSelection(
+		window.display,
+		atom,
+		window.utf8_atom,
+		window.selection_property,
+		window.id,
+		xlib.Time(xlib.CurrentTime),
+	)
+	_ = xlib.Flush(window.display)
+}
+
+take_paste :: proc(window: ^Window) -> []byte {
+	return window.paste_data[:]
+}
+
+consume_paste :: proc(window: ^Window) {
+	clear(&window.paste_data)
+}
+
+handle_selection_request :: proc(window: ^Window, request: ^xlib.XSelectionRequestEvent) {
+	property := request.property
+	if property == 0 do property = request.target
+	reply := xlib.XEvent{}
+	reply.xselection = {
+		type = .SelectionNotify,
+		display = request.display,
+		requestor = request.requestor,
+		selection = request.selection,
+		target = request.target,
+		property = 0,
+		time = request.time,
+	}
+	data: []byte
+	if request.selection == window.primary_atom {
+		data = window.primary_data[:]
+	} else if request.selection == window.clipboard_atom {
+		data = window.clipboard_data[:]
+	} else {
+		_ = xlib.SendEvent(window.display, request.requestor, false, {}, &reply)
+		_ = xlib.Flush(window.display)
+		return
+	}
+	if request.target == window.targets_atom {
+		targets := [3]xlib.Atom{window.targets_atom, window.utf8_atom, window.string_atom}
+		_ = xlib.ChangeProperty(
+			window.display,
+			request.requestor,
+			property,
+			window.atom_atom,
+			32,
+			xlib.PropModeReplace,
+			raw_data(targets[:]),
+			len(targets),
+		)
+		reply.xselection.property = property
+	} else if request.target == window.utf8_atom || request.target == window.string_atom {
+		_ = xlib.ChangeProperty(
+			window.display,
+			request.requestor,
+			property,
+			request.target,
+			8,
+			xlib.PropModeReplace,
+			raw_data(data),
+			i32(len(data)),
+		)
+		reply.xselection.property = property
+	}
+	_ = xlib.SendEvent(window.display, request.requestor, false, {}, &reply)
+	_ = xlib.Flush(window.display)
+}
+
+receive_selection :: proc(window: ^Window, event: ^xlib.XSelectionEvent) -> bool {
+	if event.property != window.selection_property do return false
+	if event.selection != window.primary_atom && event.selection != window.clipboard_atom do return false
+	if event.target != window.utf8_atom do return false
+	actual_type: xlib.Atom
+	actual_format: i32
+	item_count, bytes_after: uint
+	property: rawptr
+	status := xlib.GetWindowProperty(
+		window.display,
+		window.id,
+		event.property,
+		0,
+		MAX_SELECTION_BYTES/4,
+		true,
+		xlib.Atom(xlib.AnyPropertyType),
+		&actual_type,
+		&actual_format,
+		&item_count,
+		&bytes_after,
+		&property,
+	)
+	defer if property != nil do xlib.Free(property)
+	if status != 0 || property == nil || actual_format != 8 || bytes_after != 0 do return false
+	if actual_type != window.utf8_atom && actual_type != window.string_atom do return false
+	if item_count > MAX_SELECTION_BYTES do return false
+	clear(&window.paste_data)
+	append(&window.paste_data, ..(([^]byte)(property))[:int(item_count)])
+	return true
 }
 
 set_mouse_tracking :: proc(window: ^Window, tracking: int) {
@@ -235,6 +384,9 @@ key_from_keysym :: proc(keysym: xlib.KeySym) -> keyboard.Key {
 
 close :: proc(window: ^Window) {
 	if window.display == nil do return
+	delete(window.primary_data)
+	delete(window.clipboard_data)
+	delete(window.paste_data)
 	if window.gc != nil do xlib.FreeGC(window.display, window.gc)
 	if window.id != 0 do xlib.DestroyWindow(window.display, window.id)
 	xlib.CloseDisplay(window.display)
@@ -248,6 +400,7 @@ error_string :: proc(err: Error) -> string {
 	case .Create_Window: return "could not create X11 window"
 	case .Create_Renderer: return "could not initialize X11 text renderer"
 	case .WM_Protocol:   return "could not register WM_DELETE_WINDOW"
+	case .Selection_Atoms: return "could not initialize X11 selections"
 	}
 	return "unknown X11 error"
 }

@@ -3,6 +3,7 @@ package render
 import c "core:c"
 import libc "core:c/libc"
 import fonts "../font"
+import selection "../selection"
 import vt "../vt"
 import x11 "../x11"
 import xlib "vendor:x11/xlib"
@@ -76,12 +77,13 @@ cpu_render :: proc(
 	terminal: ^vt.Terminal,
 	ligatures: bool,
 	force: bool,
+	selection_state: ^selection.State = nil,
 ) -> bool {
 	if cpu.image == nil do return false
 	if !damage_rows(cpu, terminal, force) do return false
 	screen := vt.terminal_screen(terminal)
 	for dirty, row in cpu.dirty_rows {
-		if dirty do render_row(cpu, font, window, terminal, screen, row, ligatures)
+		if dirty do render_row(cpu, font, window, terminal, screen, row, ligatures, selection_state)
 	}
 	return true
 }
@@ -158,8 +160,9 @@ cpu_draw :: proc(
 	terminal: ^vt.Terminal,
 	ligatures: bool,
 	force: bool,
+	selection_state: ^selection.State = nil,
 ) {
-	if !cpu_render(cpu, font, window, terminal, ligatures, force) do return
+	if !cpu_render(cpu, font, window, terminal, ligatures, force, selection_state) do return
 	screen := vt.terminal_screen(terminal)
 	cpu_present(cpu, window, screen.columns)
 }
@@ -172,9 +175,10 @@ render_row :: proc(
 	screen: ^vt.Screen,
 	row: int,
 	ligatures: bool,
+	selection_state: ^selection.State,
 ) {
 	if row*window.cell_h >= cpu.height do return
-	build_row_commands(&cpu.commands, font, window, terminal, screen, row, ligatures)
+	build_row_commands(&cpu.commands, font, window, terminal, screen, row, ligatures, selection_state)
 	for command in cpu.commands {
 		switch command.kind {
 		case .Rectangle:

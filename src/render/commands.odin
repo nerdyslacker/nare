@@ -1,6 +1,7 @@
 package render
 
 import fonts "../font"
+import selection "../selection"
 import vt "../vt"
 import x11 "../x11"
 
@@ -24,13 +25,17 @@ build_row_commands :: proc(
 	screen: ^vt.Screen,
 	row: int,
 	ligatures: bool,
+	selection_state: ^selection.State = nil,
 ) {
 	clear(output)
 	y := row * window.cell_h
 	for column in 0..<screen.columns {
 		cell := vt.cell_at(screen, row, column)
-		foreground, background := cell_colors(cell)
-		if block_cursor(terminal, screen, row, column) do foreground, background = background, foreground
+		foreground, background := display_colors(
+			cell,
+			selection.contains(selection_state, screen, row, column),
+			block_cursor(terminal, screen, row, column),
+		)
 		append_rectangle(output, column*window.cell_w, y, window.cell_w, window.cell_h, background)
 		if cell.attributes.underline {
 			append_rectangle(output, column*window.cell_w, y+window.cell_h-1, window.cell_w, 1, foreground)
@@ -72,16 +77,16 @@ build_row_commands :: proc(
 		shaped: [dynamic]fonts.Shaped_Glyph
 		style := fonts.style_for_attributes(attributes.bold, attributes.italic)
 		if fonts.shape(font, text[:], ligatures, &shaped, style) {
-			foreground, _ := cell_colors(vt.cell_at(screen, row, run_start))
 			for shaped_glyph in shaped {
 				if shaped_glyph.cluster < 0 || shaped_glyph.cluster >= len(clusters) do continue
 				glyph := fonts.face_glyph(font, shaped_glyph.face_id, shaped_glyph.index)
 				if glyph == nil do continue
 				origin_column := clusters[shaped_glyph.cluster]
-				glyph_color := foreground
-				if block_cursor(terminal, screen, row, origin_column) {
-					_, glyph_color = cell_colors(vt.cell_at(screen, row, origin_column))
-				}
+				glyph_color, _ := display_colors(
+					vt.cell_at(screen, row, origin_column),
+					selection.contains(selection_state, screen, row, origin_column),
+					block_cursor(terminal, screen, row, origin_column),
+				)
 				append(output, Command{
 					kind = .Glyph,
 					x = origin_column*window.cell_w+glyph.left+shaped_glyph.x_offset/64,
@@ -102,6 +107,13 @@ build_row_commands :: proc(
 		delete(text)
 	}
 	append_cursor_commands(output, window, terminal, screen, row)
+}
+
+display_colors :: proc(cell: ^vt.Cell, selected, cursor: bool) -> (foreground, background: u32) {
+	foreground, background = cell_colors(cell)
+	if selected do foreground, background = background, foreground
+	if cursor do foreground, background = background, foreground
+	return
 }
 
 append_rectangle :: proc(output: ^[dynamic]Command, x, y, width, height: int, color: u32) {

@@ -7,6 +7,7 @@ import "core:sys/posix"
 import keyboard "input"
 import pty "pty"
 import drawing "render"
+import selection "selection"
 import vt "vt"
 import x11 "x11"
 
@@ -121,6 +122,7 @@ run :: proc(window: ^x11.Window, process: ^pty.Process, terminal: ^vt.Terminal, 
 	pending: [dynamic]byte
 	defer delete(pending)
 	pending_offset := 0
+	selection_state: selection.State
 	running := true
 	close_requested := false
 
@@ -134,8 +136,9 @@ run :: proc(window: ^x11.Window, process: ^pty.Process, terminal: ^vt.Terminal, 
 				close_requested = true
 				running = false
 			case .Redraw:
-				drawing.draw(renderer, window, terminal, true)
+				drawing.draw(renderer, window, terminal, true, &selection_state)
 			case .Resize:
+				selection.clear(&selection_state)
 				columns, rows := x11.grid_size(window)
 				if !drawing.resize(renderer, window) ||
 				   !vt.terminal_resize(terminal, columns, rows) ||
@@ -143,9 +146,21 @@ run :: proc(window: ^x11.Window, process: ^pty.Process, terminal: ^vt.Terminal, 
 					fmt.eprintln("could not resize PTY")
 					running = false
 				} else {
-					drawing.draw(renderer, window, terminal, true)
+					drawing.draw(renderer, window, terminal, true, &selection_state)
 				}
 			case .Input:
+				if copy_shortcut(event) {
+					copy_selection(window, terminal, &selection_state, .Clipboard)
+					continue
+				}
+				if paste_shortcut(event) {
+					x11.request_selection(window, .Clipboard)
+					continue
+				}
+				if event.key == .Insert && .Shift in event.modifiers {
+					x11.request_selection(window, .Primary)
+					continue
+				}
 				encoded: [16]byte
 				data := event.input[:event.input_size]
 				if event.key != .Text {
@@ -160,9 +175,19 @@ run :: proc(window: ^x11.Window, process: ^pty.Process, terminal: ^vt.Terminal, 
 					queue_input(&pending, pending_offset, transmute([]byte)sequence)
 				}
 			case .Mouse:
-				encoded: [32]byte
-				data := keyboard.encode_mouse(event.mouse, terminal.modes.mouse_tracking, terminal.modes.mouse_sgr, encoded[:])
-				queue_input(&pending, pending_offset, data)
+				if terminal.modes.mouse_tracking == 0 || .Shift in event.mouse.modifiers {
+					handle_selection_mouse(window, terminal, renderer, &selection_state, event.mouse)
+				} else {
+					encoded: [32]byte
+					data := keyboard.encode_mouse(event.mouse, terminal.modes.mouse_tracking, terminal.modes.mouse_sgr, encoded[:])
+					queue_input(&pending, pending_offset, data)
+				}
+			case .Paste:
+				paste: [dynamic]byte
+				keyboard.encode_paste(x11.take_paste(window), terminal.modes.bracketed_paste, &paste)
+				queue_input(&pending, pending_offset, paste[:])
+				delete(paste)
+				x11.consume_paste(window)
 			case:
 			}
 		}
@@ -188,7 +213,7 @@ run :: proc(window: ^x11.Window, process: ^pty.Process, terminal: ^vt.Terminal, 
 		}
 
 		if .IN in fds[1].revents || .HUP in fds[1].revents {
-			if !drain_pty(window, process, terminal, renderer) do running = false
+			if !drain_pty(window, process, terminal, renderer, &selection_state) do running = false
 			replies := vt.terminal_take_replies(terminal)
 			queue_input(&pending, pending_offset, replies)
 			vt.terminal_consume_replies(terminal, len(replies))
@@ -216,6 +241,48 @@ run :: proc(window: ^x11.Window, process: ^pty.Process, terminal: ^vt.Terminal, 
 	return pty.exit_code(process)
 }
 
+copy_shortcut :: proc(event: x11.Event) -> bool {
+	if event.key != .Text || .Control not_in event.modifiers || .Shift not_in event.modifiers do return false
+	return event.input_size == 1 && (event.input[0] == 0x03 || event.input[0] == 'c' || event.input[0] == 'C')
+}
+
+paste_shortcut :: proc(event: x11.Event) -> bool {
+	if event.key != .Text || .Control not_in event.modifiers || .Shift not_in event.modifiers do return false
+	return event.input_size == 1 && (event.input[0] == 0x16 || event.input[0] == 'v' || event.input[0] == 'V')
+}
+
+copy_selection :: proc(window: ^x11.Window, terminal: ^vt.Terminal, state: ^selection.State, kind: x11.Selection_Kind) {
+	text := selection.text(state, vt.terminal_screen(terminal))
+	defer delete(text)
+	if text != "" do _ = x11.own_selection(window, kind, transmute([]byte)text)
+}
+
+handle_selection_mouse :: proc(
+	window: ^x11.Window,
+	terminal: ^vt.Terminal,
+	renderer: ^drawing.Renderer,
+	state: ^selection.State,
+	event: keyboard.Mouse_Event,
+) {
+	if event.action == .Press && event.button == 2 {
+		x11.request_selection(window, .Primary)
+		return
+	}
+	if event.button != 1 do return
+	screen := vt.terminal_screen(terminal)
+	position := vt.screen_position(screen, event.row-1, event.column-1)
+	switch event.action {
+	case .Press:
+		selection.begin(state, screen, position)
+	case .Motion:
+		selection.update(state, screen, position)
+	case .Release:
+		selection.finish(state, screen, position)
+		copy_selection(window, terminal, state, .Primary)
+	}
+	drawing.draw(renderer, window, terminal, true, state)
+}
+
 queue_input :: proc(pending: ^[dynamic]byte, offset: int, data: []byte) {
 	if len(pending^) - offset + len(data) <= MAX_PENDING_INPUT do append(pending, ..data)
 }
@@ -225,6 +292,7 @@ drain_pty :: proc(
 	process: ^pty.Process,
 	terminal: ^vt.Terminal,
 	renderer: ^drawing.Renderer,
+	selection_state: ^selection.State,
 ) -> bool {
 	buffer: [16 * 1024]byte
 	dirty := false
@@ -232,16 +300,17 @@ drain_pty :: proc(
 		count, result := pty.read(process, buffer[:])
 		switch result {
 		case .Data:
+			selection.clear(selection_state)
 			vt.terminal_feed(terminal, buffer[:count])
 			dirty = true
 		case .Would_Block:
-			if dirty do drawing.draw(renderer, window, terminal)
+			if dirty do drawing.draw(renderer, window, terminal, false, selection_state)
 			return true
 		case .End:
-			if dirty do drawing.draw(renderer, window, terminal)
+			if dirty do drawing.draw(renderer, window, terminal, false, selection_state)
 			return false
 		case .Failed:
-			if dirty do drawing.draw(renderer, window, terminal)
+			if dirty do drawing.draw(renderer, window, terminal, false, selection_state)
 			fmt.eprintln("PTY read failed")
 			return false
 		}

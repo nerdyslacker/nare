@@ -1,6 +1,7 @@
 package render
 
 import fonts "../font"
+import selection "../selection"
 import vt "../vt"
 import x11 "../x11"
 
@@ -73,16 +74,22 @@ resize :: proc(renderer: ^Renderer, window: ^x11.Window) -> bool {
 	return true
 }
 
-draw :: proc(renderer: ^Renderer, window: ^x11.Window, terminal: ^vt.Terminal, force: bool = false) {
+draw :: proc(
+	renderer: ^Renderer,
+	window: ^x11.Window,
+	terminal: ^vt.Terminal,
+	force: bool = false,
+	selection_state: ^selection.State = nil,
+) {
 	if terminal.modes.synchronized_updates do return
 	if renderer.active == .CPU {
-		cpu_draw(&renderer.cpu, &renderer.font, window, terminal, renderer.ligatures, force)
+		cpu_draw(&renderer.cpu, &renderer.font, window, terminal, renderer.ligatures, force, selection_state)
 		return
 	}
-	if !gpu_draw(&renderer.gpu, &renderer.cpu, &renderer.font, window, terminal, renderer.ligatures, force) {
+	if !gpu_draw(&renderer.gpu, &renderer.cpu, &renderer.font, window, terminal, renderer.ligatures, force, selection_state) {
 		gpu_destroy(&renderer.gpu, window)
 		renderer.active = .CPU
-		_ = cpu_render(&renderer.cpu, &renderer.font, window, terminal, renderer.ligatures, true)
+		_ = cpu_render(&renderer.cpu, &renderer.font, window, terminal, renderer.ligatures, true, selection_state)
 		screen := vt.terminal_screen(terminal)
 		cpu_present(&renderer.cpu, window, screen.columns)
 	}
