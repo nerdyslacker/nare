@@ -5,6 +5,15 @@ import "core:unicode"
 
 MAX_REPLY_BYTES :: 256 * 1024
 
+Cursor_Style :: enum {
+	Blinking_Block,
+	Steady_Block,
+	Blinking_Underline,
+	Steady_Underline,
+	Blinking_Bar,
+	Steady_Bar,
+}
+
 Modes :: struct {
 	autowrap: bool,
 	origin: bool,
@@ -17,6 +26,7 @@ Modes :: struct {
 	synchronized_updates: bool,
 	mouse_tracking: int,
 	mouse_sgr: bool,
+	cursor_style: Cursor_Style,
 }
 
 Terminal :: struct {
@@ -25,6 +35,7 @@ Terminal :: struct {
 	alternate_screen: Screen,
 	using_alternate: bool,
 	attributes: Attributes,
+	saved_attributes: Attributes,
 	modes: Modes,
 	replies: [dynamic]byte,
 	reply_overflow: bool,
@@ -128,8 +139,10 @@ handle_escape :: proc(terminal: ^Terminal, event: Event) {
 	switch event.final {
 	case '7':
 		screen.saved_cursor = screen.cursor
+		terminal.saved_attributes = terminal.attributes
 	case '8':
 		screen.cursor = screen.saved_cursor
+		terminal.attributes = terminal.saved_attributes
 		screen.wrap_pending = false
 	case 'D':
 		line_feed(screen, terminal.attributes)
@@ -154,6 +167,7 @@ handle_csi :: proc(terminal: ^Terminal, event: Event) {
 	screen := terminal_screen(terminal)
 	if event.intermediate_count > 0 {
 		if event.intermediates[0] == '!' && event.final == 'p' do soft_reset(terminal)
+		if event.intermediates[0] == ' ' && event.final == 'q' do set_cursor_style(terminal, parameter_raw(event, 0, 0))
 		return
 	}
 	switch event.final {
@@ -189,7 +203,8 @@ handle_csi :: proc(terminal: ^Terminal, event: Event) {
 	case 'h': set_modes(terminal, event, true)
 	case 'l': set_modes(terminal, event, false)
 	case 'n': device_status(terminal, event)
-	case 'c': append_reply(terminal, transmute([]byte)string("\x1b[?62;4c"))
+	case 'c': device_attributes(terminal, event)
+	case 't': window_status(terminal, event)
 	case:
 	}
 }
@@ -234,6 +249,7 @@ erase_display :: proc(screen: ^Screen, mode: int, attributes: Attributes) {
 	case 3:
 		for row in screen.scrollback do delete(row)
 		clear(&screen.scrollback)
+		clear(&screen.scrollback_wrapped)
 	case:
 	}
 }
@@ -323,14 +339,43 @@ switch_alternate :: proc(terminal: ^Terminal, enabled, save_cursor: bool) {
 }
 
 device_status :: proc(terminal: ^Terminal, event: Event) {
-	if event.private_marker != 0 do return
 	switch parameter_raw(event, 0, 0) {
-	case 5: append_reply(terminal, transmute([]byte)string("\x1b[0n"))
+	case 5:
+		if event.private_marker == 0 do append_reply(terminal, transmute([]byte)string("\x1b[0n"))
 	case 6:
 		screen := terminal_screen(terminal)
-		response := fmt.aprintf("\x1b[%d;%dR", screen.cursor.row+1, screen.cursor.column+1)
+		prefix := "?" if event.private_marker == '?' else ""
+		response := fmt.aprintf("\x1b[%s%d;%dR", prefix, screen.cursor.row+1, screen.cursor.column+1)
 		append_reply(terminal, transmute([]byte)response)
 		delete(response)
+	case:
+	}
+}
+
+device_attributes :: proc(terminal: ^Terminal, event: Event) {
+	if event.private_marker == '>' {
+		append_reply(terminal, transmute([]byte)string("\x1b[>0;1;0c"))
+	} else if event.private_marker == 0 {
+		append_reply(terminal, transmute([]byte)string("\x1b[?62;4c"))
+	}
+}
+
+window_status :: proc(terminal: ^Terminal, event: Event) {
+	if parameter_raw(event, 0, 0) != 18 do return
+	screen := terminal_screen(terminal)
+	response := fmt.aprintf("\x1b[8;%d;%dt", screen.rows, screen.columns)
+	append_reply(terminal, transmute([]byte)response)
+	delete(response)
+}
+
+set_cursor_style :: proc(terminal: ^Terminal, value: int) {
+	switch value {
+	case 0, 1: terminal.modes.cursor_style = .Blinking_Block
+	case 2: terminal.modes.cursor_style = .Steady_Block
+	case 3: terminal.modes.cursor_style = .Blinking_Underline
+	case 4: terminal.modes.cursor_style = .Steady_Underline
+	case 5: terminal.modes.cursor_style = .Blinking_Bar
+	case 6: terminal.modes.cursor_style = .Steady_Bar
 	case:
 	}
 }

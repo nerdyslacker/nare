@@ -92,6 +92,7 @@ run :: proc(window: ^x11.Window, process: ^pty.Process, terminal: ^vt.Terminal) 
 	running := true
 
 	for running {
+		x11.set_mouse_tracking(window, terminal.modes.mouse_tracking)
 		for {
 			event, available := x11.next_event(window)
 			if !available do break
@@ -121,6 +122,10 @@ run :: proc(window: ^x11.Window, process: ^pty.Process, terminal: ^vt.Terminal) 
 					sequence := "\x1b[I" if event.focused else "\x1b[O"
 					queue_input(&pending, pending_offset, transmute([]byte)sequence)
 				}
+			case .Mouse:
+				encoded: [32]byte
+				data := keyboard.encode_mouse(event.mouse, terminal.modes.mouse_tracking, terminal.modes.mouse_sgr, encoded[:])
+				queue_input(&pending, pending_offset, data)
 			case:
 			}
 		}

@@ -8,7 +8,7 @@ DEFAULT_WIDTH  :: 800
 DEFAULT_HEIGHT :: 480
 
 Error :: enum { None, Open_Display, Create_Window, WM_Protocol }
-Event_Kind :: enum { None, Close, Redraw, Resize, Focus, Input }
+Event_Kind :: enum { None, Close, Redraw, Resize, Focus, Input, Mouse }
 
 Event :: struct {
 	kind:       Event_Kind,
@@ -19,6 +19,7 @@ Event :: struct {
 	input_size: int,
 	key:        keyboard.Key,
 	modifiers:  keyboard.Modifiers,
+	mouse:      keyboard.Mouse_Event,
 }
 
 Window :: struct {
@@ -31,6 +32,7 @@ Window :: struct {
 	cell_w:    int,
 	cell_h:    int,
 	focused:   bool,
+	mouse_tracking: int,
 }
 
 open :: proc(title: cstring = "nare") -> (window: Window, err: Error) {
@@ -60,7 +62,7 @@ open :: proc(title: cstring = "nare") -> (window: Window, err: Error) {
 	scale := max(window.dpi / 96, 0.75)
 	window.cell_w = max(1, int(math.round(8 * scale)))
 	window.cell_h = max(1, int(math.round(16 * scale)))
-	xlib.SelectInput(display, window.id, {.KeyPress, .Exposure, .StructureNotify, .FocusChange})
+	xlib.SelectInput(display, window.id, base_event_mask())
 	window.wm_delete = xlib.InternAtom(display, "WM_DELETE_WINDOW", false)
 	if window.wm_delete == 0 || xlib.SetWMProtocols(display, window.id, &window.wm_delete, 1) == .Success {
 		close(&window)
@@ -122,9 +124,54 @@ next_event :: proc(window: ^Window) -> (result: Event, available: bool) {
 			result.kind = .Input
 			result.input_size = int(count)
 		}
+	case .ButtonPress, .ButtonRelease:
+		result.kind = .Mouse
+		result.mouse.action = .Press if event.type == .ButtonPress else .Release
+		result.mouse.button = int(event.xbutton.button)
+		result.mouse.column = max(1, int(event.xbutton.x)/window.cell_w+1)
+		result.mouse.row = max(1, int(event.xbutton.y)/window.cell_h+1)
+		result.mouse.modifiers = modifiers_from_state(event.xbutton.state)
+	case .MotionNotify:
+		result.kind = .Mouse
+		result.mouse.action = .Motion
+		result.mouse.button = held_button(event.xmotion.state)
+		result.mouse.column = max(1, int(event.xmotion.x)/window.cell_w+1)
+		result.mouse.row = max(1, int(event.xmotion.y)/window.cell_h+1)
+		result.mouse.modifiers = modifiers_from_state(event.xmotion.state)
 	case:
 	}
 	return result, true
+}
+
+base_event_mask :: proc() -> xlib.EventMask {
+	return {.KeyPress, .ButtonPress, .ButtonRelease, .Exposure, .StructureNotify, .FocusChange}
+}
+
+set_mouse_tracking :: proc(window: ^Window, tracking: int) {
+	if tracking == window.mouse_tracking do return
+	mask := base_event_mask()
+	if tracking == 1002 {
+		mask += {.ButtonMotion}
+	} else if tracking == 1003 {
+		mask += {.PointerMotion}
+	}
+	xlib.SelectInput(window.display, window.id, mask)
+	window.mouse_tracking = tracking
+}
+
+modifiers_from_state :: proc(state: xlib.InputMask) -> keyboard.Modifiers {
+	result: keyboard.Modifiers
+	if .ShiftMask in state do result += {.Shift}
+	if .Mod1Mask in state do result += {.Alt}
+	if .ControlMask in state do result += {.Control}
+	return result
+}
+
+held_button :: proc(state: xlib.InputMask) -> int {
+	if .Button1Mask in state do return 1
+	if .Button2Mask in state do return 2
+	if .Button3Mask in state do return 3
+	return 0
 }
 
 key_from_keysym :: proc(keysym: xlib.KeySym) -> keyboard.Key {

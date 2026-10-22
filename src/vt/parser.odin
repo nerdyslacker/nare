@@ -87,6 +87,11 @@ consume :: proc(parser: ^Parser, value: byte, handler: Event_Handler, user_data:
 		parser.state = .Ground
 		return
 	}
+	if value == 0x9c &&
+	   (parser.state == .OSC_String || parser.state == .DCS_String || parser.state == .APC_String) {
+		emit_string(parser, .ST, handler, user_data)
+		return
+	}
 	if value == 0x1b && parser.state != .String_Escape {
 		if parser.state == .OSC_String || parser.state == .DCS_String || parser.state == .APC_String {
 			parser.string_state = parser.state
@@ -149,6 +154,15 @@ consume_ground :: proc(parser: ^Parser, value: byte, handler: Event_Handler, use
 
 	if value == 0x1b {
 		parser.state = .Escape
+	} else if value == 0x90 {
+		begin_string(parser, .DCS_String)
+	} else if value == 0x9b {
+		reset_control(parser)
+		parser.state = .CSI_Entry
+	} else if value == 0x9d {
+		begin_string(parser, .OSC_String)
+	} else if value == 0x9f {
+		begin_string(parser, .APC_String)
 	} else if value < 0x20 || value == 0x7f {
 		emit_execute(value, handler, user_data)
 	} else if value < 0x80 {

@@ -42,8 +42,16 @@ Screen :: struct {
 	scroll_bottom: int,
 	wrap_pending: bool,
 	tab_stops: []bool,
+	wrapped: []bool,
 	scrollback: [dynamic][]Cell,
+	scrollback_wrapped: [dynamic]bool,
 	scrollback_limit: int,
+}
+
+Logical_Line :: struct {
+	cells: [dynamic]Cell,
+	cursor_offset: int,
+	has_cursor: bool,
 }
 
 screen_init :: proc(screen: ^Screen, columns, rows: int, scrollback_limit: int = 0) -> bool {
@@ -52,6 +60,7 @@ screen_init :: proc(screen: ^Screen, columns, rows: int, scrollback_limit: int =
 	screen.rows = rows
 	screen.cells = make([]Cell, columns * rows)
 	screen.tab_stops = make([]bool, columns)
+	screen.wrapped = make([]bool, rows)
 	screen.scroll_top = 0
 	screen.scroll_bottom = rows - 1
 	screen.scrollback_limit = max(0, scrollback_limit)
@@ -63,14 +72,17 @@ screen_init :: proc(screen: ^Screen, columns, rows: int, scrollback_limit: int =
 screen_destroy :: proc(screen: ^Screen) {
 	delete(screen.cells)
 	delete(screen.tab_stops)
+	delete(screen.wrapped)
 	for row in screen.scrollback do delete(row)
 	delete(screen.scrollback)
+	delete(screen.scrollback_wrapped)
 	screen^ = {}
 }
 
 screen_clear :: proc(screen: ^Screen, attributes: Attributes) {
 	blank := blank_cell(attributes)
 	for &cell in screen.cells do cell = blank
+	for &wrapped in screen.wrapped do wrapped = false
 	screen.cursor = {}
 	screen.saved_cursor = {}
 	screen.scroll_top = 0
@@ -80,14 +92,40 @@ screen_clear :: proc(screen: ^Screen, attributes: Attributes) {
 
 screen_resize :: proc(screen: ^Screen, columns, rows: int, attributes: Attributes) -> bool {
 	if columns <= 0 || rows <= 0 do return false
+	if columns == screen.columns && rows == screen.rows do return true
+	lines := collect_logical_lines(screen)
+	defer destroy_logical_lines(&lines)
+	packed_rows: [dynamic][]Cell
+	packed_wrapped: [dynamic]bool
+	defer {
+		for row in packed_rows do delete(row)
+		delete(packed_rows)
+		delete(packed_wrapped)
+	}
+	cursor_row, cursor_column := pack_logical_lines(lines[:], columns, attributes, &packed_rows, &packed_wrapped)
+
 	new_cells := make([]Cell, columns * rows)
 	blank := blank_cell(attributes)
 	for &cell in new_cells do cell = blank
-	copy_rows := min(rows, screen.rows)
-	copy_columns := min(columns, screen.columns)
-	for row in 0..<copy_rows {
-		copy(new_cells[row*columns:row*columns+copy_columns], screen.cells[row*screen.columns:row*screen.columns+copy_columns])
+	new_wrapped := make([]bool, rows)
+	visible_start := max(0, len(packed_rows)-rows)
+	visible_count := min(rows, len(packed_rows)-visible_start)
+	for row in 0..<visible_count {
+		copy(new_cells[row*columns:(row+1)*columns], packed_rows[visible_start+row])
+		new_wrapped[row] = packed_wrapped[visible_start+row]
 	}
+
+	for row in screen.scrollback do delete(row)
+	clear(&screen.scrollback)
+	clear(&screen.scrollback_wrapped)
+	history_start := max(0, visible_start-screen.scrollback_limit)
+	for index in history_start..<visible_start {
+		row := make([]Cell, columns)
+		copy(row, packed_rows[index])
+		append(&screen.scrollback, row)
+		append(&screen.scrollback_wrapped, packed_wrapped[index])
+	}
+
 	new_tabs := make([]bool, columns)
 	copy(new_tabs, screen.tab_stops[:min(columns, len(screen.tab_stops))])
 	for column := 8; column < columns; column += 8 {
@@ -95,18 +133,124 @@ screen_resize :: proc(screen: ^Screen, columns, rows: int, attributes: Attribute
 	}
 	delete(screen.cells)
 	delete(screen.tab_stops)
+	delete(screen.wrapped)
 	screen.cells = new_cells
 	screen.tab_stops = new_tabs
+	screen.wrapped = new_wrapped
 	screen.columns = columns
 	screen.rows = rows
-	screen.cursor.row = clamp(screen.cursor.row, 0, rows-1)
-	screen.cursor.column = clamp(screen.cursor.column, 0, columns-1)
+	screen.cursor.row = clamp(cursor_row-visible_start, 0, rows-1)
+	screen.cursor.column = clamp(cursor_column, 0, columns-1)
 	screen.saved_cursor.row = clamp(screen.saved_cursor.row, 0, rows-1)
 	screen.saved_cursor.column = clamp(screen.saved_cursor.column, 0, columns-1)
 	screen.scroll_top = 0
 	screen.scroll_bottom = rows - 1
 	screen.wrap_pending = false
 	return true
+}
+
+collect_logical_lines :: proc(screen: ^Screen) -> [dynamic]Logical_Line {
+	lines: [dynamic]Logical_Line
+	current := Logical_Line{}
+	last_used_row := screen.cursor.row
+	for row in 0..<screen.rows {
+		cells := screen.cells[row*screen.columns:(row+1)*screen.columns]
+		if row_content_length(cells) > 0 || screen.wrapped[row] do last_used_row = max(last_used_row, row)
+	}
+	source_count := len(screen.scrollback) + last_used_row + 1
+	for source_index in 0..<source_count {
+		is_history := source_index < len(screen.scrollback)
+		row_index := source_index if is_history else source_index-len(screen.scrollback)
+		row := screen.scrollback[row_index] if is_history else screen.cells[row_index*screen.columns:(row_index+1)*screen.columns]
+		wrapped := screen.scrollback_wrapped[row_index] if is_history else screen.wrapped[row_index]
+		content_length := row_content_length(row)
+		if !is_history && row_index == screen.cursor.row {
+			current.has_cursor = true
+			current.cursor_offset = len(current.cells) + screen.cursor.column
+			content_length = max(content_length, screen.cursor.column+1)
+		}
+		append(&current.cells, ..row[:content_length])
+		if !wrapped {
+			append(&lines, current)
+			current = {}
+		}
+	}
+	if len(current.cells) > 0 || current.has_cursor do append(&lines, current)
+	if len(lines) == 0 do append(&lines, Logical_Line{})
+	return lines
+}
+
+row_content_length :: proc(row: []Cell) -> int {
+	for index := len(row)-1; index >= 0; index -= 1 {
+		cell := row[index]
+		if cell.codepoint != ' ' || cell.combining_count > 0 || cell.continuation || cell.attributes != {} do return index+1
+	}
+	return 0
+}
+
+pack_logical_lines :: proc(
+	lines: []Logical_Line,
+	columns: int,
+	attributes: Attributes,
+	packed_rows: ^[dynamic][]Cell,
+	packed_wrapped: ^[dynamic]bool,
+) -> (cursor_row, cursor_column: int) {
+	cursor_found := false
+	for &line in lines {
+		row := make_blank_row(columns, attributes)
+		column := 0
+		for index := 0; index < len(line.cells); index += 1 {
+			cell := line.cells[index]
+			if cell.continuation {
+				if line.has_cursor && line.cursor_offset == index && !cursor_found {
+					cursor_row, cursor_column, cursor_found = len(packed_rows^), max(0, column-1), true
+				}
+				continue
+			}
+			width := max(1, unicode.normalized_east_asian_width(cell.codepoint))
+			if width > columns do width = 1
+			if column+width > columns {
+				append(packed_rows, row)
+				append(packed_wrapped, true)
+				row = make_blank_row(columns, attributes)
+				column = 0
+			}
+			if line.has_cursor && line.cursor_offset == index && !cursor_found {
+				cursor_row, cursor_column, cursor_found = len(packed_rows^), column, true
+			}
+			cell.width = u8(width)
+			cell.continuation = false
+			row[column] = cell
+			if width == 2 {
+				row[column+1] = blank_cell(cell.attributes)
+				row[column+1].width = 0
+				row[column+1].continuation = true
+			}
+			column += width
+		}
+		if line.has_cursor && !cursor_found {
+			cursor_row, cursor_column, cursor_found = len(packed_rows^), min(column, columns-1), true
+		}
+		append(packed_rows, row)
+		append(packed_wrapped, false)
+	}
+	if !cursor_found {
+		cursor_row = max(0, len(packed_rows^)-1)
+		cursor_column = 0
+	}
+	return
+}
+
+make_blank_row :: proc(columns: int, attributes: Attributes) -> []Cell {
+	row := make([]Cell, columns)
+	blank := blank_cell(attributes)
+	for &cell in row do cell = blank
+	return row
+}
+
+destroy_logical_lines :: proc(lines: ^[dynamic]Logical_Line) {
+	for &line in lines^ do delete(line.cells)
+	delete(lines^)
 }
 
 cell_at :: proc(screen: ^Screen, row, column: int) -> ^Cell {
@@ -137,6 +281,7 @@ screen_put :: proc(screen: ^Screen, codepoint: rune, attributes: Attributes, aut
 	if width <= 0 do return
 	if screen.wrap_pending {
 		if autowrap {
+			screen.wrapped[screen.cursor.row] = true
 			screen.cursor.column = 0
 			line_feed(screen, attributes)
 		}
@@ -144,10 +289,12 @@ screen_put :: proc(screen: ^Screen, codepoint: rune, attributes: Attributes, aut
 	}
 	if width == 2 && screen.cursor.column == screen.columns - 1 {
 		if !autowrap do return
+		screen.wrapped[screen.cursor.row] = true
 		screen.cursor.column = 0
 		line_feed(screen, attributes)
 	}
 
+	erase_cells(screen, screen.cursor.row, screen.cursor.column, screen.cursor.column+width-1, attributes)
 	cell := cell_at(screen, screen.cursor.row, screen.cursor.column)
 	cell^ = Cell{codepoint = codepoint, width = u8(width), attributes = attributes}
 	if width == 2 {
@@ -189,13 +336,16 @@ scroll_up :: proc(screen: ^Screen, count: int, attributes: Attributes) {
 			row := make([]Cell, screen.columns)
 			copy(row, screen.cells[:screen.columns])
 			append(&screen.scrollback, row)
+			append(&screen.scrollback_wrapped, screen.wrapped[0])
 			if len(screen.scrollback) > screen.scrollback_limit {
 				delete(screen.scrollback[0])
 				ordered_remove(&screen.scrollback, 0)
+				ordered_remove(&screen.scrollback_wrapped, 0)
 			}
 		}
 		for row in screen.scroll_top..<screen.scroll_bottom {
 			copy(screen.cells[row*screen.columns:(row+1)*screen.columns], screen.cells[(row+1)*screen.columns:(row+2)*screen.columns])
+			screen.wrapped[row] = screen.wrapped[row+1]
 		}
 		clear_row(screen, screen.scroll_bottom, attributes)
 	}
@@ -206,6 +356,7 @@ scroll_down :: proc(screen: ^Screen, count: int, attributes: Attributes) {
 	for _ in 0..<amount {
 		for row := screen.scroll_bottom; row > screen.scroll_top; row -= 1 {
 			copy(screen.cells[row*screen.columns:(row+1)*screen.columns], screen.cells[(row-1)*screen.columns:row*screen.columns])
+			screen.wrapped[row] = screen.wrapped[row-1]
 		}
 		clear_row(screen, screen.scroll_top, attributes)
 	}
@@ -214,11 +365,14 @@ scroll_down :: proc(screen: ^Screen, count: int, attributes: Attributes) {
 clear_row :: proc(screen: ^Screen, row: int, attributes: Attributes) {
 	blank := blank_cell(attributes)
 	for &cell in screen.cells[row*screen.columns:(row+1)*screen.columns] do cell = blank
+	screen.wrapped[row] = false
 }
 
 erase_cells :: proc(screen: ^Screen, row, first, last: int, attributes: Attributes) {
 	first_column := clamp(first, 0, screen.columns-1)
 	last_column := clamp(last, first_column, screen.columns-1)
+	if cell_at(screen, row, first_column).continuation && first_column > 0 do first_column -= 1
+	if cell_at(screen, row, last_column).width == 2 && last_column+1 < screen.columns do last_column += 1
 	blank := blank_cell(attributes)
 	for column in first_column..=last_column do cell_at(screen, row, column)^ = blank
 }
@@ -230,6 +384,7 @@ insert_cells :: proc(screen: ^Screen, count: int, attributes: Attributes) {
 		screen.cells[row_start+column] = screen.cells[row_start+column-amount]
 	}
 	erase_cells(screen, screen.cursor.row, screen.cursor.column, screen.cursor.column+amount-1, attributes)
+	sanitize_row(screen, screen.cursor.row, attributes)
 }
 
 delete_cells :: proc(screen: ^Screen, count: int, attributes: Attributes) {
@@ -239,4 +394,24 @@ delete_cells :: proc(screen: ^Screen, count: int, attributes: Attributes) {
 		screen.cells[row_start+column] = screen.cells[row_start+column+amount]
 	}
 	erase_cells(screen, screen.cursor.row, screen.columns-amount, screen.columns-1, attributes)
+	sanitize_row(screen, screen.cursor.row, attributes)
+}
+
+sanitize_row :: proc(screen: ^Screen, row: int, attributes: Attributes) {
+	blank := blank_cell(attributes)
+	for column in 0..<screen.columns {
+		cell := cell_at(screen, row, column)
+		if cell.continuation {
+			if column == 0 || cell_at(screen, row, column-1).width != 2 do cell^ = blank
+		} else if cell.width == 2 {
+			if column+1 >= screen.columns {
+				cell^ = blank
+			} else {
+				next := cell_at(screen, row, column+1)
+				next^ = blank_cell(cell.attributes)
+				next.width = 0
+				next.continuation = true
+			}
+		}
+	}
 }

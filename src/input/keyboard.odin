@@ -33,6 +33,16 @@ Key :: enum {
 Modifiers :: bit_set[Modifier]
 Modifier :: enum { Shift, Alt, Control }
 
+Mouse_Action :: enum { Press, Release, Motion }
+
+Mouse_Event :: struct {
+	action: Mouse_Action,
+	button: int,
+	column: int,
+	row: int,
+	modifiers: Modifiers,
+}
+
 encode_key :: proc(key: Key, modifiers: Modifiers, application_cursor: bool, buffer: []byte) -> []byte {
 	if len(buffer) < 16 do return nil
 	modifier := 1
@@ -123,4 +133,67 @@ encode_paste :: proc(data: []byte, bracketed: bool, output: ^[dynamic]byte) {
 		if value != 0 do append(output, value)
 	}
 	if bracketed do append(output, ..transmute([]byte)string("\x1b[201~"))
+}
+
+encode_mouse :: proc(event: Mouse_Event, tracking: int, sgr: bool, buffer: []byte) -> []byte {
+	if tracking == 0 || len(buffer) < 32 do return nil
+	if event.action == .Motion && (tracking == 1000 || tracking == 1002 && event.button == 0) do return nil
+	if event.action == .Release && (event.button == 4 || event.button == 5) do return nil
+	code := mouse_button_code(event, sgr)
+	if code < 0 do return nil
+	if .Shift in event.modifiers do code += 4
+	if .Alt in event.modifiers do code += 8
+	if .Control in event.modifiers do code += 16
+	if event.action == .Motion do code += 32
+	column := max(1, event.column)
+	row := max(1, event.row)
+	if sgr {
+		index := 0
+		buffer[index], buffer[index+1], buffer[index+2] = 0x1b, '[', '<'
+		index += 3
+		index += append_decimal(buffer[index:], code)
+		buffer[index] = ';'
+		index += 1
+		index += append_decimal(buffer[index:], column)
+		buffer[index] = ';'
+		index += 1
+		index += append_decimal(buffer[index:], row)
+		buffer[index] = 'm' if event.action == .Release else 'M'
+		return buffer[:index+1]
+	}
+	if column > 223 || row > 223 do return nil
+	buffer[0], buffer[1], buffer[2] = 0x1b, '[', 'M'
+	buffer[3] = byte(code + 32)
+	buffer[4] = byte(column + 32)
+	buffer[5] = byte(row + 32)
+	return buffer[:6]
+}
+
+mouse_button_code :: proc(event: Mouse_Event, sgr: bool) -> int {
+	if event.action == .Release && !sgr do return 3
+	switch event.button {
+	case 1: return 0
+	case 2: return 1
+	case 3: return 2
+	case 4: return 64
+	case 5: return 65
+	case 0:
+		if event.action == .Motion do return 3
+	case:
+	}
+	return -1
+}
+
+append_decimal :: proc(buffer: []byte, value: int) -> int {
+	digits: [10]byte
+	count := 0
+	remaining := max(0, value)
+	for {
+		digits[count] = byte('0' + remaining%10)
+		count += 1
+		remaining /= 10
+		if remaining == 0 do break
+	}
+	for index in 0..<count do buffer[index] = digits[count-index-1]
+	return count
 }
