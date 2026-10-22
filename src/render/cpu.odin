@@ -137,6 +137,12 @@ render_row :: proc(
 		fill_rect(cpu, window, column*window.cell_w, y, window.cell_w, window.cell_h, background)
 		if cell.attributes.underline {
 			fill_rect(cpu, window, column*window.cell_w, y+window.cell_h-1, window.cell_w, 1, foreground)
+			if cell.attributes.double_underline {
+				fill_rect(cpu, window, column*window.cell_w, y+window.cell_h-3, window.cell_w, 1, foreground)
+			}
+		}
+		if cell.attributes.strikethrough {
+			fill_rect(cpu, window, column*window.cell_w, y+window.cell_h/2, window.cell_w, 1, foreground)
 		}
 	}
 
@@ -169,12 +175,12 @@ render_row :: proc(
 			column += max(1, int(current.width))
 		}
 		shaped: [dynamic]fonts.Shaped_Glyph
-		if fonts.shape(font, text[:], ligatures, &shaped) {
+		style := fonts.style_for_attributes(attributes.bold, attributes.italic)
+		if fonts.shape(font, text[:], ligatures, &shaped, style) {
 			foreground, _ := cell_colors(vt.cell_at(screen, row, run_start))
 			for shaped_glyph in shaped {
 				if shaped_glyph.cluster < 0 || shaped_glyph.cluster >= len(clusters) do continue
-				cached := fonts.glyph(font, shaped_glyph.index)
-				if shaped_glyph.index == 0 do cached = fonts.glyph_for_codepoint(font, text[shaped_glyph.cluster])
+				cached := fonts.face_glyph(font, shaped_glyph.face_id, shaped_glyph.index)
 				if cached == nil do continue
 				origin_column := clusters[shaped_glyph.cluster]
 				if block_cursor(terminal, screen, row, origin_column) {
@@ -254,8 +260,16 @@ cell_colors :: proc(cell: ^vt.Cell) -> (foreground, background: u32) {
 		foreground = ansi_color(int(cell.attributes.foreground.value)+8)
 	}
 	if cell.attributes.inverse do foreground, background = background, foreground
+	if cell.attributes.faint do foreground = mix_color(foreground, background)
 	if cell.attributes.hidden do foreground = background
 	return
+}
+
+mix_color :: proc(foreground, background: u32) -> u32 {
+	red := (((foreground>>16)&0xff)+((background>>16)&0xff))/2
+	green := (((foreground>>8)&0xff)+((background>>8)&0xff))/2
+	blue := ((foreground&0xff)+(background&0xff))/2
+	return red<<16|green<<8|blue
 }
 
 terminal_color :: proc(color: vt.Color, foreground: bool) -> u32 {

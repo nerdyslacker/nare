@@ -3,24 +3,25 @@ package font
 import c "core:c"
 import "core:fmt"
 import "core:strings"
+import "core:unicode"
 
 DEFAULT_FAMILY :: "monospace"
 DEFAULT_PIXEL_SIZE :: 16
 MAX_GLYPH_COUNT :: 2048
 MAX_GLYPH_BYTES :: 16 * 1024 * 1024
 MAX_FALLBACK_FACES :: 8
+PRIMARY_FACE_COUNT :: 4
 
-Error :: enum {
-	None,
-	Fontconfig,
-	No_Match,
-	FreeType,
-	Face,
-	Size,
-	HarfBuzz,
+Error :: enum { None, Fontconfig, No_Match, FreeType, Face, Size, HarfBuzz }
+Style :: enum { Regular, Bold, Italic, Bold_Italic }
+Bitmap_Kind :: enum { Coverage, BGRA }
+
+Font_Face :: struct {
+	face: FT_Face,
+	hb_font: ^HB_Font,
 }
 
-Bitmap_Kind :: enum { Coverage, BGRA }
+Fallback_Face :: struct { font: Font_Face }
 
 Glyph :: struct {
 	face_id: int,
@@ -33,12 +34,8 @@ Glyph :: struct {
 	last_use: u64,
 }
 
-Fallback_Face :: struct {
-	face: FT_Face,
-	hb_font: ^HB_Font,
-}
-
 Shaped_Glyph :: struct {
+	face_id: int,
 	index: u32,
 	cluster: int,
 	x_advance, y_advance: int,
@@ -48,8 +45,7 @@ Shaped_Glyph :: struct {
 Manager :: struct {
 	config: ^FcConfig,
 	library: FT_Library,
-	face: FT_Face,
-	hb_font: ^HB_Font,
+	faces: [PRIMARY_FACE_COUNT]Font_Face,
 	hb_buffer: ^HB_Buffer,
 	fallbacks: [dynamic]Fallback_Face,
 	glyphs: [dynamic]Glyph,
@@ -67,53 +63,37 @@ init :: proc(manager: ^Manager, family: string = DEFAULT_FAMILY, pixel_size: int
 	if manager.config == nil do return .Fontconfig
 	manager.pixel_size = pixel_size
 	manager.family = strings.clone(family)
-	name := strings.clone_to_cstring(family)
-	defer delete(name)
-	pattern := FcNameParse(([^]u8)(name))
-	if pattern == nil {
-		destroy(manager)
-		return .Fontconfig
-	}
-	defer FcPatternDestroy(pattern)
-	_ = FcConfigSubstitute(manager.config, pattern, .Pattern)
-	FcDefaultSubstitute(pattern)
-	match_result: FcResult
-	match := FcFontMatch(manager.config, pattern, &match_result)
-	if match == nil || match_result != .Match {
-		destroy(manager)
-		return .No_Match
-	}
-	defer FcPatternDestroy(match)
-	path: [^]u8
-	if FcPatternGetString(match, "file", 0, &path) != .Match {
-		destroy(manager)
-		return .No_Match
-	}
-	face_index: c.int
-	_ = FcPatternGetInteger(match, "index", 0, &face_index)
 	if FT_Init_FreeType(&manager.library) != 0 {
 		destroy(manager)
 		return .FreeType
 	}
-	if FT_New_Face(manager.library, cstring(path), c.long(face_index), &manager.face) != 0 {
+	regular, ok := load_face(manager, family)
+	if !ok {
 		destroy(manager)
 		return .Face
 	}
-	if FT_Set_Pixel_Sizes(manager.face, 0, c.uint(pixel_size)) != 0 {
-		destroy(manager)
-		return .Size
+	manager.faces[int(Style.Regular)] = regular
+	style_names := [3]string{"Bold", "Italic", "Bold Italic"}
+	for style_name, index in style_names {
+		query := fmt.aprintf("%s:style=%s", family, style_name)
+		face, loaded := load_face(manager, query)
+		delete(query)
+		if loaded do manager.faces[index+1] = face
 	}
-	manager.hb_font = hb_ft_font_create_referenced(manager.face)
 	manager.hb_buffer = hb_buffer_create()
-	if manager.hb_font == nil || manager.hb_buffer == nil {
+	if manager.hb_buffer == nil {
 		destroy(manager)
 		return .HarfBuzz
 	}
-	metrics := manager.face.size.metrics
+	metrics := regular.face.size.metrics
 	manager.ascent = max(1, int((metrics.ascender+63)/64))
 	manager.descent = max(0, int((-metrics.descender+63)/64))
 	manager.cell_height = max(manager.ascent+manager.descent, int((metrics.height+63)/64))
 	manager.cell_width = max(1, int((metrics.max_advance+63)/64))
+	reference_index := FT_Get_Char_Index(regular.face, c.ulong('M'))
+	if reference_index != 0 && FT_Load_Glyph(regular.face, reference_index, 0) == 0 {
+		manager.cell_width = max(1, int((regular.face.glyph.advance.x+32)/64))
+	}
 	return .None
 }
 
@@ -121,39 +101,109 @@ destroy :: proc(manager: ^Manager) {
 	for &glyph in manager.glyphs do delete(glyph.pixels)
 	delete(manager.glyphs)
 	if manager.hb_buffer != nil do hb_buffer_destroy(manager.hb_buffer)
-	for &fallback in manager.fallbacks {
-		if fallback.hb_font != nil do hb_font_destroy(fallback.hb_font)
-		if fallback.face != nil do _ = FT_Done_Face(fallback.face)
-	}
+	for &fallback in manager.fallbacks do destroy_face(&fallback.font)
 	delete(manager.fallbacks)
-	if manager.hb_font != nil do hb_font_destroy(manager.hb_font)
-	if manager.face != nil do _ = FT_Done_Face(manager.face)
+	for &face in manager.faces do destroy_face(&face)
 	if manager.library != nil do _ = FT_Done_FreeType(manager.library)
 	if manager.config != nil do FcConfigDestroy(manager.config)
 	delete(manager.family)
 	manager^ = {}
 }
 
-glyph_index :: proc(manager: ^Manager, codepoint: rune) -> u32 {
-	return u32(FT_Get_Char_Index(manager.face, c.ulong(codepoint)))
+destroy_face :: proc(face: ^Font_Face) {
+	if face.hb_font != nil do hb_font_destroy(face.hb_font)
+	if face.face != nil do _ = FT_Done_Face(face.face)
+	face^ = {}
 }
 
-glyph :: proc(manager: ^Manager, index: u32) -> ^Glyph {
-	return face_glyph(manager, 0, index)
-}
-
-glyph_for_codepoint :: proc(manager: ^Manager, codepoint: rune) -> ^Glyph {
-	index := u32(FT_Get_Char_Index(manager.face, c.ulong(codepoint)))
-	if index != 0 do return face_glyph(manager, 0, index)
-	for &fallback, fallback_index in manager.fallbacks {
-		index = u32(FT_Get_Char_Index(fallback.face, c.ulong(codepoint)))
-		if index != 0 do return face_glyph(manager, fallback_index+1, index)
+load_face :: proc(manager: ^Manager, query: string) -> (result: Font_Face, ok: bool) {
+	name := strings.clone_to_cstring(query)
+	defer delete(name)
+	pattern := FcNameParse(([^]u8)(name))
+	if pattern == nil do return
+	defer FcPatternDestroy(pattern)
+	_ = FcConfigSubstitute(manager.config, pattern, .Pattern)
+	FcDefaultSubstitute(pattern)
+	match_result: FcResult
+	match := FcFontMatch(manager.config, pattern, &match_result)
+	if match == nil || match_result != .Match do return
+	defer FcPatternDestroy(match)
+	path: [^]u8
+	if FcPatternGetString(match, "file", 0, &path) != .Match do return
+	face_index: c.int
+	_ = FcPatternGetInteger(match, "index", 0, &face_index)
+	if FT_New_Face(manager.library, cstring(path), c.long(face_index), &result.face) != 0 do return
+	if FT_Set_Pixel_Sizes(result.face, 0, c.uint(manager.pixel_size)) != 0 {
+		_ = FT_Done_Face(result.face)
+		result.face = nil
+		return
 	}
-	if len(manager.fallbacks) >= MAX_FALLBACK_FACES || !load_fallback(manager, codepoint) do return nil
-	face_id := len(manager.fallbacks)
-	index = u32(FT_Get_Char_Index(manager.fallbacks[face_id-1].face, c.ulong(codepoint)))
+	result.hb_font = hb_ft_font_create_referenced(result.face)
+	if result.hb_font == nil {
+		_ = FT_Done_Face(result.face)
+		result.face = nil
+		return
+	}
+	return result, true
+}
+
+style_for_attributes :: proc(bold, italic: bool) -> Style {
+	if bold && italic do return .Bold_Italic
+	if bold do return .Bold
+	if italic do return .Italic
+	return .Regular
+}
+
+primary_face_id :: proc(manager: ^Manager, style: Style) -> int {
+	id := int(style)
+	return id if manager.faces[id].face != nil else int(Style.Regular)
+}
+
+face_for_id :: proc(manager: ^Manager, face_id: int) -> ^Font_Face {
+	if face_id < PRIMARY_FACE_COUNT do return &manager.faces[face_id]
+	index := face_id-PRIMARY_FACE_COUNT
+	if index < 0 || index >= len(manager.fallbacks) do return nil
+	return &manager.fallbacks[index].font
+}
+
+glyph_index :: proc(manager: ^Manager, codepoint: rune, style: Style = .Regular) -> u32 {
+	face := face_for_id(manager, primary_face_id(manager, style))
+	return u32(FT_Get_Char_Index(face.face, c.ulong(codepoint)))
+}
+
+glyph :: proc(manager: ^Manager, index: u32, style: Style = .Regular) -> ^Glyph {
+	return face_glyph(manager, primary_face_id(manager, style), index)
+}
+
+glyph_for_codepoint :: proc(manager: ^Manager, codepoint: rune, style: Style = .Regular) -> ^Glyph {
+	face_id := resolve_face(manager, codepoint, style)
+	face := face_for_id(manager, face_id)
+	if face == nil do return nil
+	index := u32(FT_Get_Char_Index(face.face, c.ulong(codepoint)))
 	if index == 0 do return nil
 	return face_glyph(manager, face_id, index)
+}
+
+resolve_face :: proc(manager: ^Manager, codepoint: rune, style: Style) -> int {
+	face_id := primary_face_id(manager, style)
+	face := face_for_id(manager, face_id)
+	if FT_Get_Char_Index(face.face, c.ulong(codepoint)) != 0 do return face_id
+	for &fallback, index in manager.fallbacks {
+		if FT_Get_Char_Index(fallback.font.face, c.ulong(codepoint)) != 0 do return PRIMARY_FACE_COUNT+index
+	}
+	if len(manager.fallbacks) < MAX_FALLBACK_FACES && load_fallback(manager, codepoint) {
+		return PRIMARY_FACE_COUNT+len(manager.fallbacks)-1
+	}
+	return face_id
+}
+
+load_fallback :: proc(manager: ^Manager, codepoint: rune) -> bool {
+	query := fmt.aprintf(":charset=%x", codepoint)
+	defer delete(query)
+	face, ok := load_face(manager, query)
+	if !ok do return false
+	append(&manager.fallbacks, Fallback_Face{font = face})
+	return true
 }
 
 face_glyph :: proc(manager: ^Manager, face_id: int, index: u32) -> ^Glyph {
@@ -169,12 +219,12 @@ face_glyph :: proc(manager: ^Manager, face_id: int, index: u32) -> ^Glyph {
 }
 
 cache_glyph :: proc(manager: ^Manager, face_id: int, index: u32) -> bool {
-	face := manager.face if face_id == 0 else manager.fallbacks[face_id-1].face
-	if FT_Load_Glyph(face, c.uint(index), FT_LOAD_RENDER | FT_LOAD_COLOR) != 0 do return false
-	slot := face.glyph
+	font_face := face_for_id(manager, face_id)
+	if font_face == nil || FT_Load_Glyph(font_face.face, c.uint(index), FT_LOAD_RENDER | FT_LOAD_COLOR) != 0 do return false
+	slot := font_face.face.glyph
 	bitmap := &slot.bitmap
 	channels := 4 if bitmap.pixel_mode == FT_PIXEL_MODE_BGRA else 1
-	size := int(bitmap.width) * int(bitmap.rows) * channels
+	size := int(bitmap.width)*int(bitmap.rows)*channels
 	if size > MAX_GLYPH_BYTES do return false
 	for len(manager.glyphs) >= MAX_GLYPH_COUNT || manager.glyph_bytes+size > MAX_GLYPH_BYTES {
 		if len(manager.glyphs) == 0 do return false
@@ -199,50 +249,17 @@ cache_glyph :: proc(manager: ^Manager, face_id: int, index: u32) -> bool {
 			source := bitmap.buffer[source_row*abs(pitch):]
 			if bitmap.pixel_mode == FT_PIXEL_MODE_MONO {
 				for column in 0..<entry.width {
-					bit := u8(0x80 >> u32(column & 7))
-					entry.pixels[row*entry.width+column] = 255 if source[column/8] & bit != 0 else 0
+					bit := u8(0x80 >> u32(column&7))
+					entry.pixels[row*entry.width+column] = 255 if source[column/8]&bit != 0 else 0
 				}
 			} else {
-				row_bytes := entry.width * channels
+				row_bytes := entry.width*channels
 				copy(entry.pixels[row*row_bytes:(row+1)*row_bytes], source[:row_bytes])
 			}
 		}
 	}
 	manager.glyph_bytes += size
 	append(&manager.glyphs, entry)
-	return true
-}
-
-load_fallback :: proc(manager: ^Manager, codepoint: rune) -> bool {
-	query := fmt.aprintf(":charset=%x", codepoint)
-	defer delete(query)
-	name := strings.clone_to_cstring(query)
-	defer delete(name)
-	pattern := FcNameParse(([^]u8)(name))
-	if pattern == nil do return false
-	defer FcPatternDestroy(pattern)
-	_ = FcConfigSubstitute(manager.config, pattern, .Pattern)
-	FcDefaultSubstitute(pattern)
-	match_result: FcResult
-	match := FcFontMatch(manager.config, pattern, &match_result)
-	if match == nil || match_result != .Match do return false
-	defer FcPatternDestroy(match)
-	path: [^]u8
-	if FcPatternGetString(match, "file", 0, &path) != .Match do return false
-	face_index: c.int
-	_ = FcPatternGetInteger(match, "index", 0, &face_index)
-	face: FT_Face
-	if FT_New_Face(manager.library, cstring(path), c.long(face_index), &face) != 0 do return false
-	if FT_Set_Pixel_Sizes(face, 0, c.uint(manager.pixel_size)) != 0 {
-		_ = FT_Done_Face(face)
-		return false
-	}
-	hb_font := hb_ft_font_create_referenced(face)
-	if hb_font == nil {
-		_ = FT_Done_Face(face)
-		return false
-	}
-	append(&manager.fallbacks, Fallback_Face{face = face, hb_font = hb_font})
 	return true
 }
 
@@ -256,9 +273,44 @@ evict_oldest :: proc(manager: ^Manager) {
 	unordered_remove(&manager.glyphs, oldest)
 }
 
-shape :: proc(manager: ^Manager, text: []rune, ligatures: bool, output: ^[dynamic]Shaped_Glyph) -> bool {
+shape :: proc(
+	manager: ^Manager,
+	text: []rune,
+	ligatures: bool,
+	output: ^[dynamic]Shaped_Glyph,
+	style: Style = .Regular,
+) -> bool {
 	clear(output)
 	if len(text) == 0 do return true
+	run_start := 0
+	for run_start < len(text) {
+		face_id := resolve_face(manager, text[run_start], style)
+		face := face_for_id(manager, face_id)
+		run_end := run_start+1
+		for run_end < len(text) {
+			if unicode.is_combining(text[run_end]) && FT_Get_Char_Index(face.face, c.ulong(text[run_end])) != 0 {
+				run_end += 1
+				continue
+			}
+			if resolve_face(manager, text[run_end], style) != face_id do break
+			run_end += 1
+		}
+		if !shape_segment(manager, face_id, text[run_start:run_end], ligatures, run_start, output) do return false
+		run_start = run_end
+	}
+	return true
+}
+
+shape_segment :: proc(
+	manager: ^Manager,
+	face_id: int,
+	text: []rune,
+	ligatures: bool,
+	cluster_offset: int,
+	output: ^[dynamic]Shaped_Glyph,
+) -> bool {
+	face := face_for_id(manager, face_id)
+	if face == nil do return false
 	codepoints := make([]u32, len(text), context.temp_allocator)
 	for value, index in text do codepoints[index] = u32(value)
 	hb_buffer_reset(manager.hb_buffer)
@@ -268,15 +320,16 @@ shape :: proc(manager: ^Manager, text: []rune, ligatures: bool, output: ^[dynami
 		{tag = tag('l', 'i', 'g', 'a'), value = 1 if ligatures else 0, end = max(u32)},
 		{tag = tag('c', 'a', 'l', 't'), value = 1 if ligatures else 0, end = max(u32)},
 	}
-	hb_shape(manager.hb_font, manager.hb_buffer, &features[0], len(features))
+	hb_shape(face.hb_font, manager.hb_buffer, &features[0], len(features))
 	count: c.uint
 	infos := hb_buffer_get_glyph_infos(manager.hb_buffer, &count)
 	positions := hb_buffer_get_glyph_positions(manager.hb_buffer, &count)
 	if infos == nil || positions == nil do return false
 	for index in 0..<int(count) {
 		append(output, Shaped_Glyph{
+			face_id = face_id,
 			index = infos[index].codepoint,
-			cluster = int(infos[index].cluster),
+			cluster = cluster_offset+int(infos[index].cluster),
 			x_advance = int(positions[index].x_advance),
 			y_advance = int(positions[index].y_advance),
 			x_offset = int(positions[index].x_offset),

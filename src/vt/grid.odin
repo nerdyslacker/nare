@@ -15,6 +15,7 @@ Attributes :: struct {
 	faint: bool,
 	italic: bool,
 	underline: bool,
+	double_underline: bool,
 	blink: bool,
 	inverse: bool,
 	hidden: bool,

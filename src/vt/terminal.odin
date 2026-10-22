@@ -401,14 +401,21 @@ apply_sgr :: proc(terminal: ^Terminal, event: Event) {
 		case 1: terminal.attributes.bold = true
 		case 2: terminal.attributes.faint = true
 		case 3: terminal.attributes.italic = true
-		case 4, 21: terminal.attributes.underline = true
+		case 4:
+			terminal.attributes.underline = true
+			terminal.attributes.double_underline = false
+		case 21:
+			terminal.attributes.underline = true
+			terminal.attributes.double_underline = true
 		case 5, 6: terminal.attributes.blink = true
 		case 7: terminal.attributes.inverse = true
 		case 8: terminal.attributes.hidden = true
 		case 9: terminal.attributes.strikethrough = true
 		case 22: terminal.attributes.bold, terminal.attributes.faint = false, false
 		case 23: terminal.attributes.italic = false
-		case 24: terminal.attributes.underline = false
+		case 24:
+			terminal.attributes.underline = false
+			terminal.attributes.double_underline = false
 		case 25: terminal.attributes.blink = false
 		case 27: terminal.attributes.inverse = false
 		case 28: terminal.attributes.hidden = false
