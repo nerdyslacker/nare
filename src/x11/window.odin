@@ -1,6 +1,7 @@
 package x11
 
 import "core:math"
+import keyboard "../input"
 import xlib "vendor:x11/xlib"
 
 DEFAULT_WIDTH  :: 800
@@ -16,6 +17,8 @@ Event :: struct {
 	focused:    bool,
 	input:      [64]byte,
 	input_size: int,
+	key:        keyboard.Key,
+	modifiers:  keyboard.Modifiers,
 }
 
 Window :: struct {
@@ -111,13 +114,49 @@ next_event :: proc(window: ^Window) -> (result: Event, available: bool) {
 	case .KeyPress:
 		keysym: xlib.KeySym
 		count := xlib.LookupString(&event.xkey, &result.input[0], len(result.input), &keysym, nil)
-		if count > 0 {
+		result.key = key_from_keysym(keysym)
+		if .ShiftMask in event.xkey.state do result.modifiers += {.Shift}
+		if .Mod1Mask in event.xkey.state do result.modifiers += {.Alt}
+		if .ControlMask in event.xkey.state do result.modifiers += {.Control}
+		if result.key != .Text || count > 0 {
 			result.kind = .Input
 			result.input_size = int(count)
 		}
 	case:
 	}
 	return result, true
+}
+
+key_from_keysym :: proc(keysym: xlib.KeySym) -> keyboard.Key {
+	#partial switch keysym {
+	case .XK_Return: return .Enter
+	case .XK_BackSpace: return .Backspace
+	case .XK_Tab, .XK_ISO_Left_Tab: return .Tab
+	case .XK_Escape: return .Escape
+	case .XK_Up: return .Up
+	case .XK_Down: return .Down
+	case .XK_Left: return .Left
+	case .XK_Right: return .Right
+	case .XK_Home: return .Home
+	case .XK_End: return .End
+	case .XK_Insert: return .Insert
+	case .XK_Delete: return .Delete
+	case .XK_Prior: return .Page_Up
+	case .XK_Next: return .Page_Down
+	case .XK_F1: return .F1
+	case .XK_F2: return .F2
+	case .XK_F3: return .F3
+	case .XK_F4: return .F4
+	case .XK_F5: return .F5
+	case .XK_F6: return .F6
+	case .XK_F7: return .F7
+	case .XK_F8: return .F8
+	case .XK_F9: return .F9
+	case .XK_F10: return .F10
+	case .XK_F11: return .F11
+	case .XK_F12: return .F12
+	case: return .Text
+	}
 }
 
 redraw :: proc(window: ^Window) {

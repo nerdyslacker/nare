@@ -4,7 +4,7 @@ BUILD_DIR ?= build
 ODIN_VERSION := dev-2026-10
 SRC := $(shell find src -name '*.odin' -type f)
 
-.PHONY: all check check-version test fixtures clean
+.PHONY: all check check-version clean
 
 all: check-version $(BUILD_DIR)/nare
 

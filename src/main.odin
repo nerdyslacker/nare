@@ -5,7 +5,9 @@ import "core:fmt"
 import "core:os"
 import "core:strings"
 import "core:sys/posix"
+import keyboard "input"
 import pty "pty"
+import vt "vt"
 import x11 "x11"
 
 MAX_PENDING_INPUT :: 256 * 1024
@@ -36,7 +38,13 @@ app_main :: proc() -> int {
 		return 1
 	}
 	defer pty.shutdown(&process)
-	return run(&window, &process)
+	terminal: vt.Terminal
+	if !vt.terminal_init(&terminal, columns, rows) {
+		fmt.eprintln("could not initialize terminal")
+		return 1
+	}
+	defer vt.terminal_destroy(&terminal)
+	return run(&window, &process, &terminal)
 }
 
 command_from_args :: proc(args: []string) -> (command: [dynamic]cstring, err: string) {
@@ -77,7 +85,7 @@ pty_size :: proc(columns, rows, width, height: int) -> pty.Size {
 	}
 }
 
-run :: proc(window: ^x11.Window, process: ^pty.Process) -> int {
+run :: proc(window: ^x11.Window, process: ^pty.Process, terminal: ^vt.Terminal) -> int {
 	pending: [dynamic]byte
 	defer delete(pending)
 	pending_offset := 0
@@ -94,13 +102,24 @@ run :: proc(window: ^x11.Window, process: ^pty.Process) -> int {
 				x11.redraw(window)
 			case .Resize:
 				columns, rows := x11.grid_size(window)
-				if pty.resize(process, pty_size(columns, rows, event.width, event.height)) != .None {
+				if !vt.terminal_resize(terminal, columns, rows) ||
+				   pty.resize(process, pty_size(columns, rows, event.width, event.height)) != .None {
 					fmt.eprintln("could not resize PTY")
 					running = false
 				}
 			case .Input:
-				if len(pending) - pending_offset + event.input_size <= MAX_PENDING_INPUT {
-					append(&pending, ..event.input[:event.input_size])
+				encoded: [16]byte
+				data := event.input[:event.input_size]
+				if event.key != .Text {
+					data = keyboard.encode_key(event.key, event.modifiers, terminal.modes.application_cursor, encoded[:])
+				} else if .Alt in event.modifiers {
+					queue_input(&pending, pending_offset, {0x1b})
+				}
+				queue_input(&pending, pending_offset, data)
+			case .Focus:
+				if terminal.modes.focus_reporting {
+					sequence := "\x1b[I" if event.focused else "\x1b[O"
+					queue_input(&pending, pending_offset, transmute([]byte)sequence)
 				}
 			case:
 			}
@@ -127,7 +146,10 @@ run :: proc(window: ^x11.Window, process: ^pty.Process) -> int {
 		}
 
 		if .IN in fds[1].revents || .HUP in fds[1].revents {
-			if !drain_pty(process) do running = false
+			if !drain_pty(process, terminal) do running = false
+			replies := vt.terminal_take_replies(terminal)
+			queue_input(&pending, pending_offset, replies)
+			vt.terminal_consume_replies(terminal, len(replies))
 		}
 		if .OUT in fds[1].revents && pending_offset < len(pending) {
 			count, result := pty.write(process, pending[pending_offset:])
@@ -152,12 +174,17 @@ run :: proc(window: ^x11.Window, process: ^pty.Process) -> int {
 	return pty.exit_code(process)
 }
 
-drain_pty :: proc(process: ^pty.Process) -> bool {
+queue_input :: proc(pending: ^[dynamic]byte, offset: int, data: []byte) {
+	if len(pending^) - offset + len(data) <= MAX_PENDING_INPUT do append(pending, ..data)
+}
+
+drain_pty :: proc(process: ^pty.Process, terminal: ^vt.Terminal) -> bool {
 	buffer: [16 * 1024]byte
 	for {
 		count, result := pty.read(process, buffer[:])
 		switch result {
 		case .Data:
+			vt.terminal_feed(terminal, buffer[:count])
 			write_all_stdout(buffer[:count])
 		case .Would_Block:
 			return true
