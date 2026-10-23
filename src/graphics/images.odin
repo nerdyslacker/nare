@@ -89,6 +89,7 @@ Registry :: struct {
 	next_resource_id: u64,
 	next_placement_id: u64,
 	clock: u64,
+	generation: u64,
 }
 
 registry_init :: proc(registry: ^Registry, budget_bytes: int = MAX_CACHE_BYTES) -> Error {
@@ -185,6 +186,7 @@ add_placement :: proc(registry: ^Registry, request: Placement_Request) -> (u64, 
 	})
 	resource.placement_count += 1
 	touch(registry, resource)
+	registry.generation += 1
 	return id, .None
 }
 
@@ -235,10 +237,89 @@ clear_screen :: proc(registry: ^Registry, screen: Screen) {
 }
 
 registry_clear :: proc(registry: ^Registry) {
+	had_placements := len(registry.placements) > 0
 	for &resource in registry.resources do delete(resource.pixels)
 	clear(&registry.resources)
 	clear(&registry.placements)
 	registry.decoded_bytes = 0
+	if had_placements do registry.generation += 1
+}
+
+screen_has_placements :: proc(registry: ^Registry, screen: Screen) -> bool {
+	for placement in registry.placements {
+		if placement.screen == screen do return true
+	}
+	return false
+}
+
+scroll_up :: proc(
+	registry: ^Registry,
+	screen: Screen,
+	top, bottom, history_rows: int,
+	full_viewport, retain_history: bool,
+) {
+	changed := false
+	for index := len(registry.placements)-1; index >= 0; index -= 1 {
+		placement := &registry.placements[index]
+		entirely_inside := placement.row >= top && placement.row+placement.rows-1 <= bottom
+		in_full_viewport := full_viewport && placement.row <= bottom && placement.row+placement.rows > top
+		in_history := retain_history && placement.row < top
+		if placement.screen != screen || (!entirely_inside && !in_full_viewport && !in_history) do continue
+		placement.row -= 1
+		changed = true
+		if retain_history {
+			if placement.row+placement.rows <= -max(0, history_rows) do remove_placement_at(registry, index)
+		} else if placement.row < top {
+			clip_placement_top(placement, top-placement.row)
+			if placement.rows <= 0 do remove_placement_at(registry, index)
+		}
+	}
+	if changed do registry.generation += 1
+}
+
+scroll_down :: proc(registry: ^Registry, screen: Screen, top, bottom: int, full_viewport: bool) {
+	changed := false
+	for index := len(registry.placements)-1; index >= 0; index -= 1 {
+		placement := &registry.placements[index]
+		entirely_inside := placement.row >= top && placement.row+placement.rows-1 <= bottom
+		in_full_viewport := full_viewport && placement.row <= bottom && placement.row+placement.rows > top
+		if placement.screen != screen || (!entirely_inside && !in_full_viewport) do continue
+		placement.row += 1
+		changed = true
+		overflow := placement.row+placement.rows-1-bottom
+		if overflow > 0 {
+			clip_placement_bottom(placement, overflow)
+			if placement.rows <= 0 do remove_placement_at(registry, index)
+		}
+	}
+	if changed do registry.generation += 1
+}
+
+clip_placement_top :: proc(placement: ^Placement, cells: int) {
+	clipped := min(max(0, cells), placement.rows)
+	if clipped == 0 do return
+	pixels := (placement.source_height*clipped+placement.rows-1)/placement.rows
+	placement.source_y += pixels
+	placement.source_height = max(0, placement.source_height-pixels)
+	placement.row += clipped
+	placement.rows -= clipped
+}
+
+clip_placement_bottom :: proc(placement: ^Placement, cells: int) {
+	clipped := min(max(0, cells), placement.rows)
+	if clipped == 0 do return
+	pixels := (placement.source_height*clipped+placement.rows-1)/placement.rows
+	placement.source_height = max(0, placement.source_height-pixels)
+	placement.rows -= clipped
+}
+
+clear_visible :: proc(registry: ^Registry, screen: Screen, top, bottom: int) {
+	for index := len(registry.placements)-1; index >= 0; index -= 1 {
+		placement := registry.placements[index]
+		if placement.screen == screen && placement.row <= bottom && placement.row+placement.rows > top {
+			remove_placement_at(registry, index)
+		}
+	}
 }
 
 validate_image :: proc(image: ^Decoded_Image) -> (int, Error) {
@@ -295,14 +376,20 @@ remove_placement_at :: proc(registry: ^Registry, index: int) {
 	resource := find_image(registry, image_id)
 	if resource != nil do resource.placement_count = max(0, resource.placement_count-1)
 	ordered_remove(&registry.placements, index)
+	registry.generation += 1
 }
 
 delete_resource_at :: proc(registry: ^Registry, index: int) {
 	id := registry.resources[index].id
+	had_placements := false
 	for placement_index := len(registry.placements)-1; placement_index >= 0; placement_index -= 1 {
-		if registry.placements[placement_index].image_id == id do ordered_remove(&registry.placements, placement_index)
+		if registry.placements[placement_index].image_id == id {
+			ordered_remove(&registry.placements, placement_index)
+			had_placements = true
+		}
 	}
 	registry.decoded_bytes -= len(registry.resources[index].pixels)
 	delete(registry.resources[index].pixels)
 	ordered_remove(&registry.resources, index)
+	if had_placements do registry.generation += 1
 }

@@ -30,6 +30,10 @@ Kitty_Command :: struct {
 	image_id: u32,
 	placement_id: u32,
 	columns, rows: int,
+	source_x, source_y: int,
+	source_width, source_height: int,
+	z: i32,
+	no_cursor_move: bool,
 	more: bool,
 	quiet: int,
 }
@@ -44,6 +48,8 @@ kitty_decode_direct :: proc(data: []byte) -> (Kitty_Command, Decoded_Image, Kitt
 	seen_action, seen_format, seen_width, seen_height := false, false, false, false
 	seen_id, seen_placement, seen_columns, seen_rows := false, false, false, false
 	seen_medium, seen_more, seen_quiet := false, false, false
+	seen_source_x, seen_source_y, seen_source_width, seen_source_height := false, false, false, false
+	seen_z, seen_cursor_policy := false, false
 	unsupported := false
 	remaining := control
 	for len(remaining) > 0 {
@@ -115,6 +121,45 @@ kitty_decode_direct :: proc(data: []byte) -> (Kitty_Command, Decoded_Image, Kitt
 			rows, ok := parse_kitty_uint(value)
 			if !ok || rows > u64(MAX_PLACEMENT_CELLS) do return command, {}, .Malformed
 			command.rows = int(rows)
+		case 'x':
+			if seen_source_x do return command, {}, .Malformed
+			seen_source_x = true
+			parsed, ok := parse_kitty_uint(value)
+			if !ok || parsed > u64(max(int)) do return command, {}, .Malformed
+			command.source_x = int(parsed)
+		case 'y':
+			if seen_source_y do return command, {}, .Malformed
+			seen_source_y = true
+			parsed, ok := parse_kitty_uint(value)
+			if !ok || parsed > u64(max(int)) do return command, {}, .Malformed
+			command.source_y = int(parsed)
+		case 'w':
+			if seen_source_width do return command, {}, .Malformed
+			seen_source_width = true
+			parsed, ok := parse_kitty_uint(value)
+			if !ok || parsed > u64(max(int)) do return command, {}, .Malformed
+			command.source_width = int(parsed)
+		case 'h':
+			if seen_source_height do return command, {}, .Malformed
+			seen_source_height = true
+			parsed, ok := parse_kitty_uint(value)
+			if !ok || parsed > u64(max(int)) do return command, {}, .Malformed
+			command.source_height = int(parsed)
+		case 'z':
+			if seen_z do return command, {}, .Malformed
+			seen_z = true
+			parsed_bytes := 0
+			parsed, ok := strconv.parse_int(value, 10, &parsed_bytes)
+			if !ok || parsed_bytes != len(value) || parsed < int(min(i32)) || parsed > int(max(i32)) {
+				return command, {}, .Malformed
+			}
+			command.z = i32(parsed)
+		case 'C':
+			if seen_cursor_policy do return command, {}, .Malformed
+			seen_cursor_policy = true
+			parsed, ok := parse_kitty_uint(value)
+			if !ok || parsed > 1 do return command, {}, .Malformed
+			command.no_cursor_move = parsed == 1
 		case 't':
 			if seen_medium do return command, {}, .Malformed
 			seen_medium = true

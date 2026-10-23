@@ -1,11 +1,12 @@
 package render
 
 import fonts "../font"
+import graphics "../graphics"
 import selection "../selection"
 import vt "../vt"
 import x11 "../x11"
 
-Command_Kind :: enum { Rectangle, Glyph }
+Command_Kind :: enum { Rectangle, Image, Glyph }
 
 Command :: struct {
 	kind: Command_Kind,
@@ -15,6 +16,10 @@ Command :: struct {
 	glyph_index: u32,
 	glyph_kind: fonts.Bitmap_Kind,
 	clip_left, clip_right: int,
+	clip_top, clip_bottom: int,
+	image_id, placement_id: u64,
+	source_x, source_y, source_width, source_height: int,
+	z: i32,
 }
 
 build_row_commands :: proc(
@@ -31,12 +36,21 @@ build_row_commands :: proc(
 	y := row * window.cell_h
 	for column in 0..<screen.columns {
 		cell := vt.cell_at(screen, row, column)
-		foreground, background := display_colors(
+		_, background := display_colors(
 			cell,
 			selection.contains(selection_state, screen, row, column),
 			block_cursor(terminal, screen, row, column),
 		)
 		append_rectangle(output, column*window.cell_w, y, window.cell_w, window.cell_h, background)
+	}
+	append_image_commands(output, window, screen, row, false)
+	for column in 0..<screen.columns {
+		cell := vt.cell_at(screen, row, column)
+		foreground, _ := display_colors(
+			cell,
+			selection.contains(selection_state, screen, row, column),
+			block_cursor(terminal, screen, row, column),
+		)
 		if cell.attributes.underline {
 			append_rectangle(output, column*window.cell_w, y+window.cell_h-1, window.cell_w, 1, foreground)
 			if cell.attributes.double_underline {
@@ -106,7 +120,76 @@ build_row_commands :: proc(
 		delete(clusters)
 		delete(text)
 	}
+	append_image_commands(output, window, screen, row, true)
 	append_cursor_commands(output, window, terminal, screen, row)
+}
+
+append_image_commands :: proc(
+	output: ^[dynamic]Command,
+	window: ^x11.Window,
+	screen: ^vt.Screen,
+	row: int,
+	above_text: bool,
+) {
+	if screen.image_registry == nil do return
+	start := len(output^)
+	row_top, row_bottom := row*window.cell_h, (row+1)*window.cell_h
+	for placement in screen.image_registry.placements {
+		if placement.screen != screen.image_screen || (placement.z >= 0) != above_text do continue
+		x, y, width, height := image_destination(placement, window.cell_w, window.cell_h)
+		if x >= window.width || x+width <= 0 || y >= row_bottom || y+height <= row_top do continue
+		append(output, Command{
+			kind = .Image,
+			x = x,
+			y = y,
+			width = width,
+			height = height,
+			clip_left = max(0, x),
+			clip_right = min(window.width, x+width),
+			clip_top = max(row_top, y),
+			clip_bottom = min(row_bottom, y+height),
+			image_id = placement.image_id,
+			placement_id = placement.id,
+			source_x = placement.source_x,
+			source_y = placement.source_y,
+			source_width = placement.source_width,
+			source_height = placement.source_height,
+			z = placement.z,
+		})
+	}
+	for index := start+1; index < len(output^); index += 1 {
+		current := output^[index]
+		position := index
+		for position > start && image_command_after(output^[position-1], current) {
+			output^[position] = output^[position-1]
+			position -= 1
+		}
+		output^[position] = current
+	}
+}
+
+image_destination :: proc(placement: graphics.Placement, cell_width, cell_height: int) -> (x, y, width, height: int) {
+	x = placement.column*cell_width
+	y = placement.row*cell_height
+	width = placement.columns*cell_width
+	height = placement.rows*cell_height
+	if !placement.preserve_aspect || placement.source_width <= 0 || placement.source_height <= 0 do return
+	if i64(width)*i64(placement.source_height) > i64(height)*i64(placement.source_width) {
+		fitted := max(1, int(i64(height)*i64(placement.source_width)/i64(placement.source_height)))
+		x += (width-fitted)/2
+		width = fitted
+	} else {
+		fitted := max(1, int(i64(width)*i64(placement.source_height)/i64(placement.source_width)))
+		y += (height-fitted)/2
+		height = fitted
+	}
+	return
+}
+
+image_command_after :: proc(left, right: Command) -> bool {
+	if left.z != right.z do return left.z > right.z
+	if left.image_id != right.image_id do return left.image_id > right.image_id
+	return left.placement_id > right.placement_id
 }
 
 display_colors :: proc(cell: ^vt.Cell, selected, cursor: bool) -> (foreground, background: u32) {

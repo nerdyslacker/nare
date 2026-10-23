@@ -2,6 +2,7 @@ package vt
 
 import "core:unicode"
 import "core:unicode/utf8"
+import graphics "../graphics"
 
 MAX_COMBINING_RUNES :: 4
 DEFAULT_SCROLLBACK_LINES :: 10000
@@ -55,6 +56,8 @@ Screen :: struct {
 	scrollback: [dynamic][]Cell,
 	scrollback_wrapped: [dynamic]bool,
 	scrollback_limit: int,
+	image_registry: ^graphics.Registry,
+	image_screen: graphics.Screen,
 }
 
 Logical_Line :: struct {
@@ -63,7 +66,13 @@ Logical_Line :: struct {
 	has_cursor: bool,
 }
 
-screen_init :: proc(screen: ^Screen, columns, rows: int, scrollback_limit: int = 0) -> bool {
+screen_init :: proc(
+	screen: ^Screen,
+	columns, rows: int,
+	scrollback_limit: int = 0,
+	image_registry: ^graphics.Registry = nil,
+	image_screen: graphics.Screen = .Main,
+) -> bool {
 	if columns <= 0 || rows <= 0 do return false
 	screen.columns = columns
 	screen.rows = rows
@@ -73,12 +82,15 @@ screen_init :: proc(screen: ^Screen, columns, rows: int, scrollback_limit: int =
 	screen.scroll_top = 0
 	screen.scroll_bottom = rows - 1
 	screen.scrollback_limit = max(0, scrollback_limit)
+	screen.image_registry = image_registry
+	screen.image_screen = image_screen
 	for column := 8; column < columns; column += 8 do screen.tab_stops[column] = true
 	screen_clear(screen, {})
 	return true
 }
 
 screen_destroy :: proc(screen: ^Screen) {
+	if screen.image_registry != nil do graphics.clear_screen(screen.image_registry, screen.image_screen)
 	delete(screen.cells)
 	delete(screen.tab_stops)
 	delete(screen.wrapped)
@@ -88,7 +100,12 @@ screen_destroy :: proc(screen: ^Screen) {
 	screen^ = {}
 }
 
+screen_has_image_placements :: proc(screen: ^Screen) -> bool {
+	return screen.image_registry != nil && graphics.screen_has_placements(screen.image_registry, screen.image_screen)
+}
+
 screen_clear :: proc(screen: ^Screen, attributes: Attributes) {
+	if screen.image_registry != nil do graphics.clear_screen(screen.image_registry, screen.image_screen)
 	blank := blank_cell(attributes)
 	for &cell in screen.cells do cell = blank
 	for &wrapped in screen.wrapped do wrapped = false
@@ -474,6 +491,18 @@ scroll_up :: proc(screen: ^Screen, count: int, attributes: Attributes) {
 			screen.wrapped[row] = screen.wrapped[row+1]
 		}
 		clear_row(screen, screen.scroll_bottom, attributes)
+		if screen.image_registry != nil {
+			full_viewport := screen.scroll_top == 0 && screen.scroll_bottom == screen.rows-1
+			graphics.scroll_up(
+				screen.image_registry,
+				screen.image_screen,
+				screen.scroll_top,
+				screen.scroll_bottom,
+				len(screen.scrollback),
+				full_viewport,
+				full_viewport && screen.image_screen == .Main && screen.scrollback_limit > 0,
+			)
+		}
 	}
 }
 
@@ -485,6 +514,15 @@ scroll_down :: proc(screen: ^Screen, count: int, attributes: Attributes) {
 			screen.wrapped[row] = screen.wrapped[row-1]
 		}
 		clear_row(screen, screen.scroll_top, attributes)
+		if screen.image_registry != nil {
+			graphics.scroll_down(
+				screen.image_registry,
+				screen.image_screen,
+				screen.scroll_top,
+				screen.scroll_bottom,
+				screen.scroll_top == 0 && screen.scroll_bottom == screen.rows-1,
+			)
+		}
 	}
 }
 

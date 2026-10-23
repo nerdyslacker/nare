@@ -137,14 +137,14 @@ terminal_init :: proc(
 	scrollback_limit: int = DEFAULT_SCROLLBACK_LINES,
 	osc52_policy: OSC52_Policy = .Disabled,
 ) -> bool {
-	if !screen_init(&terminal.main_screen, columns, rows, scrollback_limit) do return false
-	if !screen_init(&terminal.alternate_screen, columns, rows) {
-		screen_destroy(&terminal.main_screen)
+	if graphics.registry_init(&terminal.images) != .None do return false
+	if !screen_init(&terminal.main_screen, columns, rows, scrollback_limit, &terminal.images, .Main) {
+		graphics.registry_destroy(&terminal.images)
 		return false
 	}
-	if graphics.registry_init(&terminal.images) != .None {
+	if !screen_init(&terminal.alternate_screen, columns, rows, 0, &terminal.images, .Alternate) {
 		screen_destroy(&terminal.main_screen)
-		screen_destroy(&terminal.alternate_screen)
+		graphics.registry_destroy(&terminal.images)
 		return false
 	}
 	terminal.modes.autowrap = true
@@ -232,15 +232,58 @@ handle_apc :: proc(terminal: ^Terminal, data: []byte) {
 		return
 	}
 	if command.action == .Transmit_And_Display {
-		graphics.decoded_image_destroy(&image)
-		kitty_reply(terminal, command, false, "ENOTSUP")
-		return
+		if command.columns <= 0 || command.rows <= 0 {
+			graphics.decoded_image_destroy(&image)
+			kitty_reply(terminal, command, false, "ENOTSUP")
+			return
+		}
 	}
-	_, image_error := graphics.add_image(&terminal.images, .Kitty, command.image_id, &image)
+	image_id, image_error := graphics.add_image(&terminal.images, .Kitty, command.image_id, &image)
 	if image_error != .None {
 		graphics.decoded_image_destroy(&image)
 		kitty_reply(terminal, command, false, "ENOSPC")
 		return
+	}
+	if command.action == .Transmit_And_Display {
+		resource := graphics.find_image(&terminal.images, image_id)
+		source_width := command.source_width
+		source_height := command.source_height
+		if resource == nil || command.source_x >= resource.width || command.source_y >= resource.height {
+			_ = graphics.delete_image(&terminal.images, image_id)
+			kitty_reply(terminal, command, false, "EINVAL")
+			return
+		}
+		if source_width == 0 do source_width = resource.width-command.source_x
+		if source_height == 0 do source_height = resource.height-command.source_y
+		source_width = min(source_width, resource.width-command.source_x)
+		source_height = min(source_height, resource.height-command.source_y)
+		screen := terminal_screen(terminal)
+		screen_kind := graphics.Screen.Alternate if terminal.using_alternate else graphics.Screen.Main
+		_, placement_error := graphics.add_placement(&terminal.images, {
+			image_id = image_id,
+			protocol_id = command.placement_id if command.image_id != 0 else 0,
+			screen = screen_kind,
+			row = screen.cursor.row,
+			column = screen.cursor.column,
+			rows = command.rows,
+			columns = command.columns,
+			source_x = command.source_x,
+			source_y = command.source_y,
+			source_width = source_width,
+			source_height = source_height,
+			z = command.z,
+			preserve_aspect = true,
+		})
+		if placement_error != .None {
+			_ = graphics.delete_image(&terminal.images, image_id)
+			kitty_reply(terminal, command, false, "EINVAL")
+			return
+		}
+		if !command.no_cursor_move {
+			screen.cursor.column = min(screen.columns-1, screen.cursor.column+command.columns)
+			screen.cursor.row = min(screen.scroll_bottom, screen.cursor.row+command.rows)
+			screen.wrap_pending = false
+		}
 	}
 	kitty_reply(terminal, command, true, "")
 }
@@ -711,6 +754,9 @@ erase_display :: proc(screen: ^Screen, mode: int, attributes: Attributes) {
 		erase_cells(screen, screen.cursor.row, 0, screen.cursor.column, attributes)
 	case 2:
 		for row in 0..<screen.rows do clear_row(screen, row, attributes)
+		if screen.image_registry != nil {
+			graphics.clear_visible(screen.image_registry, screen.image_screen, 0, screen.rows-1)
+		}
 	case 3:
 		for row in screen.scrollback do delete(row)
 		clear(&screen.scrollback)

@@ -3,6 +3,7 @@ package render
 import c "core:c"
 import libc "core:c/libc"
 import fonts "../font"
+import graphics "../graphics"
 import selection "../selection"
 import vt "../vt"
 import x11 "../x11"
@@ -20,6 +21,7 @@ CPU :: struct {
 	previous_cursor: vt.Cursor,
 	previous_cursor_visible: bool,
 	previous_alternate: bool,
+	previous_image_generation: u64,
 }
 
 cpu_resize :: proc(cpu: ^CPU, window: ^x11.Window) -> bool {
@@ -106,6 +108,9 @@ damage_rows :: proc(cpu: ^CPU, terminal: ^vt.Terminal, screen: ^vt.Screen, force
 		for index in 0..<len(cpu.dirty_rows) do cpu.dirty_rows[index] = false
 	}
 	if cpu.previous_alternate != terminal.using_alternate do full_redraw = true
+	image_generation := u64(0)
+	if screen.image_registry != nil do image_generation = screen.image_registry.generation
+	if cpu.previous_image_generation != image_generation do full_redraw = true
 	any_dirty := false
 	for row in 0..<screen.rows {
 		dirty := full_redraw || row == screen.cursor.row || row == cpu.previous_cursor.row
@@ -129,6 +134,7 @@ damage_rows :: proc(cpu: ^CPU, terminal: ^vt.Terminal, screen: ^vt.Screen, force
 	cpu.previous_cursor = screen.cursor
 	cpu.previous_cursor_visible = terminal.modes.cursor_visible
 	cpu.previous_alternate = terminal.using_alternate
+	cpu.previous_image_generation = image_generation
 	return any_dirty
 }
 
@@ -186,10 +192,42 @@ render_row :: proc(
 		switch command.kind {
 		case .Rectangle:
 			fill_rect(cpu, window, command.x, command.y, command.width, command.height, command.color)
+		case .Image:
+			if screen.image_registry == nil do continue
+			image := graphics.find_image(screen.image_registry, command.image_id)
+			if image != nil do draw_image(cpu, window, image, command)
 		case .Glyph:
 			glyph := fonts.face_glyph(font, command.face_id, command.glyph_index)
 			if glyph == nil do continue
 			draw_glyph(cpu, window, glyph, command.x, command.y, command.color, command.clip_left, command.clip_right)
+		}
+	}
+}
+
+draw_image :: proc(cpu: ^CPU, window: ^x11.Window, image: ^graphics.Resource, command: Command) {
+	left := max(0, command.clip_left)
+	right := min(cpu.width, command.clip_right)
+	top := max(0, command.clip_top)
+	bottom := min(cpu.height, command.clip_bottom)
+	if left >= right || top >= bottom || command.width <= 0 || command.height <= 0 do return
+	channels := graphics.bytes_per_pixel(image.format)
+	for destination_y in top..<bottom {
+		source_y := command.source_y+(destination_y-command.y)*command.source_height/command.height
+		source_y = clamp(source_y, command.source_y, command.source_y+command.source_height-1)
+		for destination_x in left..<right {
+			source_x := command.source_x+(destination_x-command.x)*command.source_width/command.width
+			source_x = clamp(source_x, command.source_x, command.source_x+command.source_width-1)
+			index := source_y*image.stride+source_x*channels
+			red := u32(image.pixels[index])
+			green := u32(image.pixels[index+1])
+			blue := u32(image.pixels[index+2])
+			color := red<<16|green<<8|blue
+			pixel := &cpu.pixels[destination_y*cpu.width+destination_x]
+			if image.format == .RGBA8 {
+				pixel^ = blend(window, pixel^, color, image.pixels[index+3])
+			} else {
+				pixel^ = rgb_to_pixel(window, color)
+			}
 		}
 	}
 }
