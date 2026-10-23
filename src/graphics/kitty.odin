@@ -38,6 +38,7 @@ Kitty_Command :: struct {
 	source_width, source_height: int,
 	z: i32,
 	no_cursor_move: bool,
+	png: bool,
 	compressed: bool,
 	more: bool,
 	quiet: int,
@@ -185,6 +186,9 @@ kitty_parse_direct_frame :: proc(data: []byte) -> (Kitty_Frame, Kitty_Error) {
 			switch format {
 			case 24: command.format = .RGB8
 			case 32: command.format = .RGBA8
+			case 100:
+				command.format = .RGBA8
+				command.png = true
 			case: unsupported = true
 			}
 		case 's':
@@ -301,6 +305,10 @@ kitty_parse_direct_frame :: proc(data: []byte) -> (Kitty_Frame, Kitty_Error) {
 }
 
 kitty_encoded_limit :: proc(command: Kitty_Command) -> (int, Kitty_Error) {
+	if command.png {
+		if command.compressed do return 0, .Unsupported
+		return ((MAX_PNG_BYTES+2)/3)*4, .None
+	}
 	_, byte_count, layout_error := image_layout(command.width, command.height, command.format)
 	if layout_error == .Invalid_Dimensions do return 0, .Malformed
 	if layout_error != .None do return 0, .Image_Limit
@@ -324,11 +332,26 @@ kitty_append_chunk :: proc(transfer: ^Kitty_Transfer, payload: []byte, more: boo
 }
 
 kitty_decode_payload :: proc(command: Kitty_Command, payload: []byte) -> (Decoded_Image, Kitty_Error) {
-	stride, byte_count, encoded_limit, limit_error := kitty_payload_layout(command)
+	encoded_limit, limit_error := kitty_encoded_limit(command)
 	if limit_error != .None do return {}, limit_error
 	if len(payload) == 0 || len(payload) > encoded_limit do return {}, .Image_Limit
 	decoded, decode_error := base64.decode(string(payload), options = {.Strict})
 	if decode_error != nil do return {}, .Invalid_Data
+	if command.png {
+		image, png_error := decode_png(decoded)
+		delete(decoded)
+		switch png_error {
+		case .None: return image, .None
+		case .Limit: return {}, .Image_Limit
+		case .Unsupported: return {}, .Unsupported
+		case .Invalid_Data: return {}, .Invalid_Data
+		}
+	}
+	stride, byte_count, _, layout_error := kitty_payload_layout(command)
+	if layout_error != .None {
+		delete(decoded)
+		return {}, layout_error
+	}
 	pixels := decoded
 	if command.compressed {
 		pixels = make([]byte, byte_count)
