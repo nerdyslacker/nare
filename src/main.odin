@@ -162,14 +162,14 @@ run :: proc(
 					running = false
 				} else {
 					if search_state.active do features.refresh(&search_state, vt.terminal_screen(terminal))
-					if url_state.active do features.url_refresh(&url_state, vt.terminal_screen(terminal))
+					if url_state.active do features.url_refresh(&url_state, terminal)
 					redraw(renderer, window, terminal, &selection_state, &search_state, &url_state, true)
 				}
 			case .Input:
 				if url_shortcut(event) {
 					if search_state.active do features.close(&search_state)
 					selection.clear(&selection_state)
-					features.url_open(&url_state, vt.terminal_screen(terminal))
+					features.url_open(&url_state, terminal)
 					update_url_title(window, &url_state)
 					redraw(renderer, window, terminal, &selection_state, &search_state, &url_state, true)
 					continue
@@ -465,7 +465,7 @@ drain_pty :: proc(
 					update_search_title(window, search_state)
 				}
 				if url_state.active {
-					features.url_refresh(url_state, vt.terminal_screen(terminal))
+					features.url_refresh(url_state, terminal)
 					update_url_title(window, url_state)
 				}
 				redraw(renderer, window, terminal, selection_state, search_state, url_state, search_state.active || url_state.active)
@@ -478,7 +478,7 @@ drain_pty :: proc(
 					update_search_title(window, search_state)
 				}
 				if url_state.active {
-					features.url_refresh(url_state, vt.terminal_screen(terminal))
+					features.url_refresh(url_state, terminal)
 					update_url_title(window, url_state)
 				}
 				redraw(renderer, window, terminal, selection_state, search_state, url_state, search_state.active || url_state.active)
@@ -491,7 +491,7 @@ drain_pty :: proc(
 					update_search_title(window, search_state)
 				}
 				if url_state.active {
-					features.url_refresh(url_state, vt.terminal_screen(terminal))
+					features.url_refresh(url_state, terminal)
 					update_url_title(window, url_state)
 				}
 				redraw(renderer, window, terminal, selection_state, search_state, url_state, search_state.active || url_state.active)

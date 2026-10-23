@@ -29,6 +29,7 @@ Cell :: struct {
 	combining_count: u8,
 	width: u8,
 	continuation: bool,
+	hyperlink_id: u32,
 	attributes: Attributes,
 }
 
@@ -185,7 +186,7 @@ collect_logical_lines :: proc(screen: ^Screen) -> [dynamic]Logical_Line {
 row_content_length :: proc(row: []Cell) -> int {
 	for index := len(row)-1; index >= 0; index -= 1 {
 		cell := row[index]
-		if cell.codepoint != ' ' || cell.combining_count > 0 || cell.continuation || cell.attributes != {} do return index+1
+		if cell.codepoint != ' ' || cell.combining_count > 0 || cell.continuation || cell.hyperlink_id != 0 || cell.attributes != {} do return index+1
 	}
 	return 0
 }
@@ -326,7 +327,7 @@ blank_cell :: proc(attributes: Attributes) -> Cell {
 	return Cell{codepoint = ' ', width = 1, attributes = attributes}
 }
 
-screen_put :: proc(screen: ^Screen, codepoint: rune, attributes: Attributes, autowrap: bool) {
+screen_put :: proc(screen: ^Screen, codepoint: rune, attributes: Attributes, autowrap: bool, hyperlink_id: u32 = 0) {
 	if unicode.is_combining(codepoint) {
 		column := screen.cursor.column - 1
 		row := screen.cursor.row
@@ -361,12 +362,13 @@ screen_put :: proc(screen: ^Screen, codepoint: rune, attributes: Attributes, aut
 
 	erase_cells(screen, screen.cursor.row, screen.cursor.column, screen.cursor.column+width-1, attributes)
 	cell := cell_at(screen, screen.cursor.row, screen.cursor.column)
-	cell^ = Cell{codepoint = codepoint, width = u8(width), attributes = attributes}
+	cell^ = Cell{codepoint = codepoint, width = u8(width), hyperlink_id = hyperlink_id, attributes = attributes}
 	if width == 2 {
 		continuation := cell_at(screen, screen.cursor.row, screen.cursor.column+1)
 		continuation^ = blank_cell(attributes)
 		continuation.continuation = true
 		continuation.width = 0
+		continuation.hyperlink_id = hyperlink_id
 	}
 	if screen.cursor.column + width >= screen.columns {
 		screen.cursor.column = screen.columns - 1

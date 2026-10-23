@@ -1,9 +1,13 @@
 package vt
 
 import "core:fmt"
+import "core:strings"
 import "core:unicode"
+import "core:unicode/utf8"
 
 MAX_REPLY_BYTES :: 256 * 1024
+MAX_HYPERLINKS :: 4096
+MAX_HYPERLINK_BYTES :: 8 * 1024
 
 Cursor_Style :: enum {
 	Blinking_Block,
@@ -39,6 +43,8 @@ Terminal :: struct {
 	modes: Modes,
 	replies: [dynamic]byte,
 	reply_overflow: bool,
+	hyperlinks: [dynamic]string,
+	active_hyperlink: u32,
 }
 
 terminal_init :: proc(terminal: ^Terminal, columns, rows: int, scrollback_limit: int = DEFAULT_SCROLLBACK_LINES) -> bool {
@@ -57,6 +63,8 @@ terminal_destroy :: proc(terminal: ^Terminal) {
 	screen_destroy(&terminal.main_screen)
 	screen_destroy(&terminal.alternate_screen)
 	delete(terminal.replies)
+	clear_hyperlinks(terminal)
+	delete(terminal.hyperlinks)
 	terminal^ = {}
 }
 
@@ -94,15 +102,70 @@ terminal_event :: proc(event: Event, user_data: rawptr) {
 	switch event.kind {
 	case .Print:
 		if terminal.modes.insert do insert_cells(screen, max(1, unicode.normalized_east_asian_width(event.codepoint)), terminal.attributes)
-		screen_put(screen, event.codepoint, terminal.attributes, terminal.modes.autowrap)
+		screen_put(screen, event.codepoint, terminal.attributes, terminal.modes.autowrap, terminal.active_hyperlink)
 	case .Execute:
 		handle_execute(terminal, event.control)
 	case .Escape:
 		handle_escape(terminal, event)
 	case .CSI:
 		handle_csi(terminal, event)
-	case .OSC, .DCS, .APC:
+	case .OSC:
+		handle_osc(terminal, event.data)
+	case .DCS, .APC:
 	}
+}
+
+handle_osc :: proc(terminal: ^Terminal, data: []byte) {
+	if len(data) < 3 || data[0] != '8' || data[1] != ';' do return
+	separator := -1
+	for index in 2..<len(data) {
+		if data[index] == ';' {
+			separator = index
+			break
+		}
+	}
+	if separator < 0 do return
+	uri := data[separator+1:]
+	if len(uri) == 0 {
+		terminal.active_hyperlink = 0
+		return
+	}
+	if !valid_hyperlink_uri(uri) {
+		terminal.active_hyperlink = 0
+		return
+	}
+	value := string(uri)
+	for link, index in terminal.hyperlinks {
+		if link == value {
+			terminal.active_hyperlink = u32(index+1)
+			return
+		}
+	}
+	if len(terminal.hyperlinks) >= MAX_HYPERLINKS {
+		terminal.active_hyperlink = 0
+		return
+	}
+	append(&terminal.hyperlinks, strings.clone(value))
+	terminal.active_hyperlink = u32(len(terminal.hyperlinks))
+}
+
+valid_hyperlink_uri :: proc(uri: []byte) -> bool {
+	if len(uri) == 0 || len(uri) > MAX_HYPERLINK_BYTES || !utf8.valid_string(string(uri)) do return false
+	for value in uri {
+		if value < 0x20 || value == 0x7f do return false
+	}
+	return true
+}
+
+terminal_hyperlink :: proc(terminal: ^Terminal, id: u32) -> string {
+	if id == 0 || int(id) > len(terminal.hyperlinks) do return ""
+	return terminal.hyperlinks[int(id)-1]
+}
+
+clear_hyperlinks :: proc(terminal: ^Terminal) {
+	for link in terminal.hyperlinks do delete(link)
+	clear(&terminal.hyperlinks)
+	terminal.active_hyperlink = 0
 }
 
 handle_execute :: proc(terminal: ^Terminal, control: byte) {
@@ -469,4 +532,5 @@ terminal_reset :: proc(terminal: ^Terminal) {
 	terminal.using_alternate = false
 	screen_clear(&terminal.main_screen, {})
 	screen_clear(&terminal.alternate_screen, {})
+	clear_hyperlinks(terminal)
 }
