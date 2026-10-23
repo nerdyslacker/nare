@@ -3,6 +3,8 @@ package graphics
 MAX_SIXEL_COLORS :: 256
 MAX_SIXEL_REPEAT :: MAX_IMAGE_DIMENSION
 
+Sixel_Palette :: [MAX_SIXEL_COLORS][4]byte
+
 Sixel_Error :: enum {
 	None,
 	Malformed,
@@ -19,18 +21,20 @@ Sixel_State :: struct {
 	max_x, max_y: int,
 	raster_width, raster_height: int,
 	current_color: int,
-	palette: [MAX_SIXEL_COLORS][4]byte,
+	palette: Sixel_Palette,
 	pixels: []byte,
 	width, height: int,
 	seen_raster: bool,
 	saw_data: bool,
 	pixel_aspect_height: int,
+	background_color: [4]byte,
+	background_set: bool,
 }
 
-decode_sixel_dcs :: proc(data: []byte) -> (Decoded_Image, Sixel_Info, Sixel_Error) {
+decode_sixel_dcs :: proc(data: []byte, shared_palette: ^Sixel_Palette = nil) -> (Decoded_Image, Sixel_Info, Sixel_Error) {
 	body, transparent, pixel_aspect_height, header_error := sixel_header(data)
 	if header_error != .None do return {}, {}, header_error
-	measured := sixel_state_init(pixel_aspect_height)
+	measured := sixel_state_init(pixel_aspect_height, nil)
 	if process_error := sixel_process(&measured, body); process_error != .None do return {}, {}, process_error
 	width := max(measured.raster_width, measured.max_x)
 	height := max(measured.raster_height, measured.max_y)
@@ -41,10 +45,7 @@ decode_sixel_dcs :: proc(data: []byte) -> (Decoded_Image, Sixel_Info, Sixel_Erro
 	}
 	stride := width*4
 	pixels := make([]byte, stride*height)
-	if !transparent {
-		for offset := 0; offset < len(pixels); offset += 4 do pixels[offset+3] = 255
-	}
-	state := sixel_state_init(pixel_aspect_height)
+	state := sixel_state_init(pixel_aspect_height, shared_palette)
 	state.pixels = pixels
 	state.width = width
 	state.height = height
@@ -52,6 +53,13 @@ decode_sixel_dcs :: proc(data: []byte) -> (Decoded_Image, Sixel_Info, Sixel_Erro
 		delete(pixels)
 		return {}, {}, process_error
 	}
+	if !transparent {
+		background := state.background_color if state.background_set else state.palette[0]
+		for offset := 0; offset < len(pixels); offset += 4 {
+			if pixels[offset+3] == 0 do copy(pixels[offset:offset+4], background[:])
+		}
+	}
+	if shared_palette != nil do shared_palette^ = state.palette
 	return Decoded_Image{
 		width = width,
 		height = height,
@@ -103,9 +111,8 @@ sixel_header_aspect :: proc(value: int) -> int {
 	}
 }
 
-sixel_state_init :: proc(pixel_aspect_height: int) -> Sixel_State {
-	state: Sixel_State
-	state.pixel_aspect_height = pixel_aspect_height
+sixel_palette_default :: proc() -> Sixel_Palette {
+	palette: Sixel_Palette
 	defaults := [16][3]byte{
 		{0, 0, 0}, {0, 0, 205}, {205, 0, 0}, {205, 0, 205},
 		{0, 205, 0}, {0, 205, 205}, {205, 205, 0}, {229, 229, 229},
@@ -113,9 +120,16 @@ sixel_state_init :: proc(pixel_aspect_height: int) -> Sixel_State {
 		{0, 255, 0}, {0, 255, 255}, {255, 255, 0}, {255, 255, 255},
 	}
 	for index in 0..<len(defaults) {
-		state.palette[index] = {defaults[index][0], defaults[index][1], defaults[index][2], 255}
+		palette[index] = {defaults[index][0], defaults[index][1], defaults[index][2], 255}
 	}
-	for index in len(defaults)..<len(state.palette) do state.palette[index][3] = 255
+	for index in len(defaults)..<len(palette) do palette[index][3] = 255
+	return palette
+}
+
+sixel_state_init :: proc(pixel_aspect_height: int, palette: ^Sixel_Palette) -> Sixel_State {
+	state: Sixel_State
+	state.pixel_aspect_height = pixel_aspect_height
+	state.palette = palette^ if palette != nil else sixel_palette_default()
 	return state
 }
 
@@ -157,6 +171,8 @@ sixel_process :: proc(state: ^Sixel_State, data: []byte) -> Sixel_Error {
 					return .Limit
 				}
 				state.raster_width, state.raster_height = values[2], values[3]
+				state.background_color = state.palette[0]
+				state.background_set = true
 			}
 			state.seen_raster = true
 			index = next
@@ -197,6 +213,10 @@ sixel_parameters :: proc(data: []byte, start, maximum: int) -> (values: [5]int, 
 
 sixel_draw :: proc(state: ^Sixel_State, pattern: byte, repeat: int) -> Sixel_Error {
 	if repeat <= 0 || state.x > MAX_IMAGE_DIMENSION-repeat || state.y > MAX_IMAGE_DIMENSION-6 do return .Limit
+	if !state.background_set {
+		state.background_color = state.palette[0]
+		state.background_set = true
+	}
 	state.saw_data = true
 	state.max_x = max(state.max_x, state.x+repeat)
 	state.max_y = max(state.max_y, state.y+6)

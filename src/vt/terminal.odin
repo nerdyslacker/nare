@@ -104,6 +104,7 @@ Modes :: struct {
 	cursor_visible: bool,
 	synchronized_updates: bool,
 	sixel_display: bool,
+	sixel_private_colors: bool,
 	mouse_tracking: int,
 	mouse_sgr: bool,
 	cursor_style: Cursor_Style,
@@ -132,6 +133,7 @@ Terminal :: struct {
 	osc52_queued_bytes: int,
 	cell_width, cell_height: int,
 	images: graphics.Registry,
+	sixel_palette: graphics.Sixel_Palette,
 	kitty_transfer: graphics.Kitty_Transfer,
 }
 
@@ -153,6 +155,8 @@ terminal_init :: proc(
 	}
 	terminal.modes.autowrap = true
 	terminal.modes.cursor_visible = true
+	terminal.modes.sixel_private_colors = true
+	terminal.sixel_palette = graphics.sixel_palette_default()
 	terminal.cell_width = 1
 	terminal.cell_height = 1
 	terminal.osc52_policy = osc52_policy
@@ -449,7 +453,8 @@ handle_dcs :: proc(terminal: ^Terminal, data: []byte) {
 		handle_xtgettcap(terminal, data[2:])
 		return
 	}
-	image, info, sixel_error := graphics.decode_sixel_dcs(data)
+	palette := &terminal.sixel_palette if !terminal.modes.sixel_private_colors else nil
+	image, info, sixel_error := graphics.decode_sixel_dcs(data, palette)
 	if sixel_error != .None do return
 	pixel_width_64 := i64(image.width)
 	pixel_height_64 := i64(image.height)*i64(info.pixel_aspect_height)
@@ -1043,6 +1048,7 @@ set_modes :: proc(terminal: ^Terminal, event: Event, enabled: bool) {
 			switch mode {
 			case 1: terminal.modes.application_cursor = enabled
 			case 80: terminal.modes.sixel_display = enabled
+			case 1070: terminal.modes.sixel_private_colors = enabled
 			case 6:
 				terminal.modes.origin = enabled
 				set_cursor(terminal, 1, 1)
@@ -1194,7 +1200,7 @@ extended_color :: proc(event: Event, start: int) -> (color: Color, consumed: int
 
 soft_reset :: proc(terminal: ^Terminal) {
 	terminal.attributes = {}
-	terminal.modes = Modes{autowrap = true, cursor_visible = true}
+	terminal.modes = Modes{autowrap = true, cursor_visible = true, sixel_private_colors = true}
 	screen := terminal_screen(terminal)
 	screen.scroll_top = 0
 	screen.scroll_bottom = screen.rows - 1
@@ -1204,11 +1210,12 @@ soft_reset :: proc(terminal: ^Terminal) {
 
 terminal_reset :: proc(terminal: ^Terminal) {
 	terminal.attributes = {}
-	terminal.modes = Modes{autowrap = true, cursor_visible = true}
+	terminal.modes = Modes{autowrap = true, cursor_visible = true, sixel_private_colors = true}
 	terminal.using_alternate = false
 	screen_clear(&terminal.main_screen, {})
 	screen_clear(&terminal.alternate_screen, {})
 	clear_hyperlinks(terminal)
 	graphics.kitty_transfer_reset(&terminal.kitty_transfer)
 	graphics.registry_clear(&terminal.images)
+	terminal.sixel_palette = graphics.sixel_palette_default()
 }
