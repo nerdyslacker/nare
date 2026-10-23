@@ -319,6 +319,44 @@ screen_extract :: proc(screen: ^Screen, first, last: Cursor) -> string {
 	return string(result[:])
 }
 
+screen_extract_source :: proc(screen: ^Screen, first, last_exclusive: Cursor, max_bytes: int) -> (string, bool) {
+	row_count := screen_source_row_count(screen)
+	if max_bytes < 0 || first.row < 0 || first.row >= row_count ||
+	   last_exclusive.row < first.row || last_exclusive.row >= row_count {
+		return "", false
+	}
+	start_column := clamp(first.column, 0, screen.columns)
+	end_column := clamp(last_exclusive.column, 0, screen.columns)
+	if first.row == last_exclusive.row && start_column > end_column do return "", false
+	result: [dynamic]byte
+	for row in first.row..=last_exclusive.row {
+		cells := screen_source_row(screen, row)
+		first_column := start_column if row == first.row else 0
+		last_column := end_column if row == last_exclusive.row else screen.columns
+		if row < last_exclusive.row && !screen_source_wrapped(screen, row) {
+			for last_column > first_column && copy_blank(&cells[last_column-1]) do last_column -= 1
+		}
+		for column in first_column..<last_column {
+			cell := &cells[column]
+			if cell.continuation do continue
+			append_rune(&result, cell.codepoint)
+			for index in 0..<int(cell.combining_count) do append_rune(&result, cell.combining[index])
+			if len(result) > max_bytes {
+				delete(result)
+				return "", false
+			}
+		}
+		if row < last_exclusive.row && !screen_source_wrapped(screen, row) {
+			if len(result) >= max_bytes {
+				delete(result)
+				return "", false
+			}
+			append(&result, '\n')
+		}
+	}
+	return string(result[:]), true
+}
+
 cursor_after :: proc(left, right: Cursor) -> bool {
 	return left.row > right.row || left.row == right.row && left.column > right.column
 }

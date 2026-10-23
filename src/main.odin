@@ -266,6 +266,12 @@ run :: proc(
 					handle_search_input(window, terminal, renderer, &selection_state, &search_state, &url_state, base_title, event)
 					continue
 				}
+				if shell_state.active && copy_output_shortcut(event) {
+					output, ok := features.shell_selected_output(&shell_state, vt.terminal_screen(terminal))
+					if ok do _ = x11.own_selection(window, .Clipboard, transmute([]byte)output)
+					delete(output)
+					continue
+				}
 				if shell_state.active {
 					features.shell_close(&shell_state)
 					redraw(renderer, window, terminal, &selection_state, &search_state, &url_state, true, &shell_state)
@@ -403,6 +409,11 @@ prompt_previous_shortcut :: proc(event: x11.Event) -> bool {
 
 prompt_next_shortcut :: proc(event: x11.Event) -> bool {
 	return event.key == .Down && .Control in event.modifiers && .Shift in event.modifiers
+}
+
+copy_output_shortcut :: proc(event: x11.Event) -> bool {
+	if event.key != .Text || .Control not_in event.modifiers || .Shift not_in event.modifiers do return false
+	return event.input_size == 1 && (event.input[0] == 0x0f || event.input[0] == 'o' || event.input[0] == 'O')
 }
 
 handle_url_input :: proc(
