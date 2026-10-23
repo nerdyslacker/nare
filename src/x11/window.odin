@@ -12,7 +12,7 @@ MAX_SELECTION_BYTES :: 16 * 1024 * 1024
 MAX_OUTGOING_TRANSFERS :: 4
 
 Error :: enum { None, Open_Display, Create_Window, Create_Renderer, WM_Protocol, Selection_Atoms }
-Event_Kind :: enum { None, Close, Redraw, Resize, Focus, Input, Mouse, Paste }
+Event_Kind :: enum { None, Close, Redraw, Resize, Focus, Input, Mouse, Paste, Paste_Failed }
 Selection_Kind :: enum { Primary, Clipboard }
 
 Outgoing_Selection :: struct {
@@ -225,7 +225,11 @@ next_event :: proc(window: ^Window) -> (result: Event, available: bool) {
 		if event.xselectionclear.selection == window.primary_atom do clear(&window.primary_data)
 		if event.xselectionclear.selection == window.clipboard_atom do clear(&window.clipboard_data)
 	case .SelectionNotify:
-		if receive_selection(window, &event.xselection) do result.kind = .Paste
+		if event.xselection.property == 0 {
+			result.kind = .Paste_Failed
+		} else if receive_selection(window, &event.xselection) {
+			result.kind = .Paste
+		}
 	case .PropertyNotify:
 		if event.xproperty.state == .PropertyDelete {
 			send_selection_chunk(window, &event.xproperty)

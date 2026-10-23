@@ -52,7 +52,7 @@ app_main :: proc() -> int {
 	}
 	defer pty.shutdown(&process)
 	terminal: vt.Terminal
-	if !vt.terminal_init(&terminal, columns, rows, options.scrollback_lines) {
+	if !vt.terminal_init(&terminal, columns, rows, options.scrollback_lines, options.osc52_policy) {
 		fmt.eprintln("could not initialize terminal")
 		return 1
 	}
@@ -149,12 +149,19 @@ apply_argument :: proc(options: ^config.Settings, argument: string) -> config.Er
 		return config.apply(options, "scrollback", "lines", argument[len("--scrollback-lines="):])
 	} else if strings.has_prefix(argument, "--url-opener=") {
 		return config.apply(options, "url", "opener", argument[len("--url-opener="):])
+	} else if strings.has_prefix(argument, "--osc52=") {
+		return config.apply(options, "security", "osc52", argument[len("--osc52="):])
 	}
 	return .Unknown_Key
 }
 
 usage :: proc() -> string {
-	return "usage: nare [--config=PATH|--no-config] [--renderer=cpu|gpu|auto] [--font=FAMILY] [--font-size=PIXELS] [--ligatures=true|false] [--title=TITLE] [--scrollback-lines=COUNT] [--url-opener=COMMAND] [-e COMMAND [ARG...]]"
+	return "usage: nare [--config=PATH|--no-config] [--renderer=cpu|gpu|auto] [--font=FAMILY] [--font-size=PIXELS] [--ligatures=true|false] [--title=TITLE] [--scrollback-lines=COUNT] [--url-opener=COMMAND] [--osc52=disabled|copy-enabled|paste-enabled|enabled] [-e COMMAND [ARG...]]"
+}
+
+OSC52_Request :: struct {
+	active: bool,
+	selection: vt.OSC52_Selection,
 }
 
 command_destroy :: proc(command: ^[dynamic]cstring) {
@@ -189,6 +196,7 @@ run :: proc(
 	defer features.destroy(&search_state)
 	url_state: features.URL_State
 	defer features.url_destroy(&url_state)
+	osc52_request: OSC52_Request
 	running := true
 	close_requested := false
 
@@ -246,11 +254,11 @@ run :: proc(
 					continue
 				}
 				if paste_shortcut(event) {
-					x11.request_selection(window, .Clipboard)
+					if !osc52_request.active do x11.request_selection(window, .Clipboard)
 					continue
 				}
 				if event.key == .Insert && .Shift in event.modifiers {
-					x11.request_selection(window, .Primary)
+					if !osc52_request.active do x11.request_selection(window, .Primary)
 					continue
 				}
 				encoded: [16]byte
@@ -285,15 +293,27 @@ run :: proc(
 					queue_input(&pending, pending_offset, data)
 				}
 			case .Paste:
-				paste: [dynamic]byte
-				keyboard.encode_paste(x11.take_paste(window), terminal.modes.bracketed_paste, &paste)
-				queue_input(&pending, pending_offset, paste[:])
-				delete(paste)
+				if osc52_request.active {
+					vt.terminal_reply_osc52(terminal, osc52_request.selection, x11.take_paste(window))
+					osc52_request.active = false
+					process_osc52_actions(window, terminal, &osc52_request)
+				} else {
+					paste: [dynamic]byte
+					keyboard.encode_paste(x11.take_paste(window), terminal.modes.bracketed_paste, &paste)
+					queue_input(&pending, pending_offset, paste[:])
+					delete(paste)
+				}
 				x11.consume_paste(window)
+			case .Paste_Failed:
+				if osc52_request.active {
+					osc52_request.active = false
+					process_osc52_actions(window, terminal, &osc52_request)
+				}
 			case:
 			}
 		}
 		if !running do break
+		queue_terminal_replies(&pending, pending_offset, terminal)
 
 		if done, reap_err := pty.reap(process); reap_err != .None {
 			fmt.eprintln(pty.error_string(reap_err))
@@ -315,10 +335,8 @@ run :: proc(
 		}
 
 		if .IN in fds[1].revents || .HUP in fds[1].revents {
-			if !drain_pty(window, process, terminal, renderer, &selection_state, &search_state, &url_state, base_title) do running = false
-			replies := vt.terminal_take_replies(terminal)
-			queue_input(&pending, pending_offset, replies)
-			vt.terminal_consume_replies(terminal, len(replies))
+			if !drain_pty(window, process, terminal, renderer, &selection_state, &search_state, &url_state, &osc52_request, base_title) do running = false
+			queue_terminal_replies(&pending, pending_offset, terminal)
 		}
 		if .OUT in fds[1].revents && pending_offset < len(pending) {
 			count, result := pty.write(process, pending[pending_offset:])
@@ -511,6 +529,7 @@ drain_pty :: proc(
 	selection_state: ^selection.State,
 	search_state: ^features.State,
 	url_state: ^features.URL_State,
+	osc52_request: ^OSC52_Request,
 	base_title: string,
 ) -> bool {
 	buffer: [16 * 1024]byte
@@ -521,6 +540,7 @@ drain_pty :: proc(
 		case .Data:
 			selection.clear(selection_state)
 			vt.terminal_feed(terminal, buffer[:count])
+			process_osc52_actions(window, terminal, osc52_request)
 			dirty = true
 		case .Would_Block:
 			if dirty {
@@ -540,6 +560,32 @@ drain_pty :: proc(
 			return false
 		}
 	}
+}
+
+process_osc52_actions :: proc(window: ^x11.Window, terminal: ^vt.Terminal, request: ^OSC52_Request) {
+	for {
+		action, ok := vt.terminal_osc52_action(terminal)
+		if !ok do return
+		selection_kind := x11.Selection_Kind.Clipboard
+		if action.selection == .Primary do selection_kind = .Primary
+		switch action.kind {
+		case .Write:
+			_ = x11.own_selection(window, selection_kind, action.data)
+			vt.terminal_consume_osc52_action(terminal)
+		case .Read:
+			if request.active do return
+			request.active = true
+			request.selection = action.selection
+			x11.request_selection(window, selection_kind)
+			vt.terminal_consume_osc52_action(terminal)
+		}
+	}
+}
+
+queue_terminal_replies :: proc(pending: ^[dynamic]byte, pending_offset: int, terminal: ^vt.Terminal) {
+	replies := vt.terminal_take_replies(terminal)
+	queue_input(pending, pending_offset, replies)
+	vt.terminal_consume_replies(terminal, len(replies))
 }
 
 refresh_after_pty :: proc(

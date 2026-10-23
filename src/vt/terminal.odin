@@ -1,6 +1,7 @@
 package vt
 
 import "core:fmt"
+import base64 "core:encoding/base64"
 import "core:net"
 import "core:strings"
 import "core:unicode"
@@ -11,6 +12,33 @@ MAX_HYPERLINKS :: 4096
 MAX_HYPERLINK_BYTES :: 8 * 1024
 MAX_TITLE_BYTES :: 4 * 1024
 MAX_CWD_URI_BYTES :: 8 * 1024
+MAX_OSC52_WRITE_BYTES :: 512 * 1024
+MAX_OSC52_READ_BYTES :: 128 * 1024
+MAX_OSC52_ACTIONS :: 8
+MAX_OSC52_QUEUED_BYTES :: 512 * 1024
+
+OSC52_Policy :: enum {
+	Disabled,
+	Copy,
+	Paste,
+	Enabled,
+}
+
+OSC52_Action_Kind :: enum {
+	Write,
+	Read,
+}
+
+OSC52_Selection :: enum {
+	Clipboard,
+	Primary,
+}
+
+OSC52_Action :: struct {
+	kind: OSC52_Action_Kind,
+	selection: OSC52_Selection,
+	data: []byte,
+}
 
 Cursor_Style :: enum {
 	Blinking_Block,
@@ -54,9 +82,17 @@ Terminal :: struct {
 	cwd_path: string,
 	cwd_local: bool,
 	cwd_changed: bool,
+	osc52_policy: OSC52_Policy,
+	osc52_actions: [dynamic]OSC52_Action,
+	osc52_queued_bytes: int,
 }
 
-terminal_init :: proc(terminal: ^Terminal, columns, rows: int, scrollback_limit: int = DEFAULT_SCROLLBACK_LINES) -> bool {
+terminal_init :: proc(
+	terminal: ^Terminal,
+	columns, rows: int,
+	scrollback_limit: int = DEFAULT_SCROLLBACK_LINES,
+	osc52_policy: OSC52_Policy = .Disabled,
+) -> bool {
 	if !screen_init(&terminal.main_screen, columns, rows, scrollback_limit) do return false
 	if !screen_init(&terminal.alternate_screen, columns, rows) {
 		screen_destroy(&terminal.main_screen)
@@ -64,6 +100,7 @@ terminal_init :: proc(terminal: ^Terminal, columns, rows: int, scrollback_limit:
 	}
 	terminal.modes.autowrap = true
 	terminal.modes.cursor_visible = true
+	terminal.osc52_policy = osc52_policy
 	return true
 }
 
@@ -77,6 +114,8 @@ terminal_destroy :: proc(terminal: ^Terminal) {
 	delete(terminal.title)
 	delete(terminal.cwd_uri)
 	delete(terminal.cwd_path)
+	for action in terminal.osc52_actions do delete(action.data)
+	delete(terminal.osc52_actions)
 	terminal^ = {}
 }
 
@@ -142,8 +181,84 @@ handle_osc :: proc(terminal: ^Terminal, data: []byte) {
 	case "0", "2": set_title_metadata(terminal, payload)
 	case "7": set_cwd_metadata(terminal, payload)
 	case "8": set_hyperlink(terminal, payload)
+	case "52": handle_osc52(terminal, payload)
 	case:
 	}
+}
+
+handle_osc52 :: proc(terminal: ^Terminal, payload: []byte) {
+	separator := -1
+	for index in 0..<len(payload) {
+		if payload[index] == ';' {
+			separator = index
+			break
+		}
+	}
+	if separator < 0 do return
+	selection, selection_ok := osc52_selection(payload[:separator])
+	if !selection_ok do return
+	data := payload[separator+1:]
+	if len(data) == 1 && data[0] == '?' {
+		if terminal.osc52_policy != .Paste && terminal.osc52_policy != .Enabled do return
+		enqueue_osc52_action(terminal, {kind = .Read, selection = selection})
+		return
+	}
+	if terminal.osc52_policy != .Copy && terminal.osc52_policy != .Enabled do return
+	if len(data) > ((MAX_OSC52_WRITE_BYTES+2)/3)*4 do return
+	decoded, err := base64.decode(string(data), options = {.Strict})
+	if err != nil do return
+	if len(decoded) > MAX_OSC52_WRITE_BYTES {
+		delete(decoded)
+		return
+	}
+	if !enqueue_osc52_action(terminal, {kind = .Write, selection = selection, data = decoded}) {
+		delete(decoded)
+	}
+}
+
+osc52_selection :: proc(value: []byte) -> (OSC52_Selection, bool) {
+	if len(value) == 0 || (len(value) == 1 && value[0] == 'c') do return .Clipboard, true
+	if len(value) == 1 && value[0] == 'p' do return .Primary, true
+	return .Clipboard, false
+}
+
+enqueue_osc52_action :: proc(terminal: ^Terminal, action: OSC52_Action) -> bool {
+	if len(terminal.osc52_actions) >= MAX_OSC52_ACTIONS ||
+	   terminal.osc52_queued_bytes + len(action.data) > MAX_OSC52_QUEUED_BYTES {
+		return false
+	}
+	append(&terminal.osc52_actions, action)
+	terminal.osc52_queued_bytes += len(action.data)
+	return true
+}
+
+terminal_osc52_action :: proc(terminal: ^Terminal) -> (OSC52_Action, bool) {
+	if len(terminal.osc52_actions) == 0 do return {}, false
+	return terminal.osc52_actions[0], true
+}
+
+terminal_consume_osc52_action :: proc(terminal: ^Terminal) {
+	if len(terminal.osc52_actions) == 0 do return
+	action := terminal.osc52_actions[0]
+	terminal.osc52_queued_bytes -= len(action.data)
+	delete(action.data)
+	copy(terminal.osc52_actions[:], terminal.osc52_actions[1:])
+	resize(&terminal.osc52_actions, len(terminal.osc52_actions)-1)
+}
+
+terminal_reply_osc52 :: proc(terminal: ^Terminal, selection: OSC52_Selection, data: []byte) {
+	if len(data) > MAX_OSC52_READ_BYTES do return
+	encoded, err := base64.encode(data)
+	if err != nil do return
+	defer delete(encoded)
+	response: [dynamic]byte
+	defer delete(response)
+	append(&response, ..transmute([]byte)string("\x1b]52;"))
+	append(&response, 'p' if selection == .Primary else 'c')
+	append(&response, ';')
+	append(&response, ..transmute([]byte)encoded)
+	append(&response, 0x1b, '\\')
+	append_reply(terminal, response[:])
 }
 
 set_title_metadata :: proc(terminal: ^Terminal, data: []byte) {

@@ -5,6 +5,7 @@ import "core:os"
 import "core:strconv"
 import "core:strings"
 import drawing "../render"
+import vt "../vt"
 
 MAX_CONFIG_BYTES :: 64 * 1024
 MIN_FONT_SIZE :: 6
@@ -34,6 +35,7 @@ Settings :: struct {
 	title: string,
 	url_opener: string,
 	scrollback_lines: int,
+	osc52_policy: vt.OSC52_Policy,
 }
 
 settings_init :: proc(settings: ^Settings) {
@@ -44,6 +46,7 @@ settings_init :: proc(settings: ^Settings) {
 	settings.title = strings.clone("nare")
 	settings.url_opener = strings.clone("xdg-open")
 	settings.scrollback_lines = 10000
+	settings.osc52_policy = .Disabled
 }
 
 settings_destroy :: proc(settings: ^Settings) {
@@ -87,7 +90,7 @@ parse :: proc(settings: ^Settings, contents: string) -> Result {
 		if line[0] == '[' {
 			if len(line) < 3 || line[len(line)-1] != ']' do return {error = .Syntax, line = line_number}
 			section = strings.trim_space(line[1:len(line)-1])
-			if section != "main" && section != "scrollback" && section != "url" {
+			if section != "main" && section != "scrollback" && section != "url" && section != "security" {
 				return {error = .Unknown_Section, line = line_number}
 			}
 			continue
@@ -139,6 +142,15 @@ apply :: proc(settings: ^Settings, section, key, value: string) -> Error {
 		if key != "opener" do return .Unknown_Key
 		if value == "" do return .Invalid_Value
 		replace_string(&settings.url_opener, value)
+	} else if section == "security" {
+		if key != "osc52" do return .Unknown_Key
+		switch value {
+		case "disabled": settings.osc52_policy = .Disabled
+		case "copy-enabled": settings.osc52_policy = .Copy
+		case "paste-enabled": settings.osc52_policy = .Paste
+		case "enabled": settings.osc52_policy = .Enabled
+		case: return .Invalid_Value
+		}
 	} else {
 		return .Unknown_Section
 	}
