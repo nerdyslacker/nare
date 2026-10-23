@@ -1,6 +1,7 @@
 package vt
 
 import "core:fmt"
+import "core:net"
 import "core:strings"
 import "core:unicode"
 import "core:unicode/utf8"
@@ -8,6 +9,8 @@ import "core:unicode/utf8"
 MAX_REPLY_BYTES :: 256 * 1024
 MAX_HYPERLINKS :: 4096
 MAX_HYPERLINK_BYTES :: 8 * 1024
+MAX_TITLE_BYTES :: 4 * 1024
+MAX_CWD_URI_BYTES :: 8 * 1024
 
 Cursor_Style :: enum {
 	Blinking_Block,
@@ -45,6 +48,12 @@ Terminal :: struct {
 	reply_overflow: bool,
 	hyperlinks: [dynamic]string,
 	active_hyperlink: u32,
+	title: string,
+	title_changed: bool,
+	cwd_uri: string,
+	cwd_path: string,
+	cwd_local: bool,
+	cwd_changed: bool,
 }
 
 terminal_init :: proc(terminal: ^Terminal, columns, rows: int, scrollback_limit: int = DEFAULT_SCROLLBACK_LINES) -> bool {
@@ -65,6 +74,9 @@ terminal_destroy :: proc(terminal: ^Terminal) {
 	delete(terminal.replies)
 	clear_hyperlinks(terminal)
 	delete(terminal.hyperlinks)
+	delete(terminal.title)
+	delete(terminal.cwd_uri)
+	delete(terminal.cwd_path)
 	terminal^ = {}
 }
 
@@ -116,9 +128,53 @@ terminal_event :: proc(event: Event, user_data: rawptr) {
 }
 
 handle_osc :: proc(terminal: ^Terminal, data: []byte) {
-	if len(data) < 3 || data[0] != '8' || data[1] != ';' do return
 	separator := -1
-	for index in 2..<len(data) {
+	for index in 0..<len(data) {
+		if data[index] == ';' {
+			separator = index
+			break
+		}
+	}
+	if separator < 0 do return
+	command := string(data[:separator])
+	payload := data[separator+1:]
+	switch command {
+	case "0", "2": set_title_metadata(terminal, payload)
+	case "7": set_cwd_metadata(terminal, payload)
+	case "8": set_hyperlink(terminal, payload)
+	case:
+	}
+}
+
+set_title_metadata :: proc(terminal: ^Terminal, data: []byte) {
+	if len(data) > MAX_TITLE_BYTES || !valid_osc_text(data, true) do return
+	replace_owned_string(&terminal.title, string(data))
+	terminal.title_changed = true
+}
+
+set_cwd_metadata :: proc(terminal: ^Terminal, data: []byte) {
+	if len(data) == 0 || len(data) > MAX_CWD_URI_BYTES || !valid_osc_text(data, false) do return
+	uri := string(data)
+	prefix :: "file://"
+	if !strings.has_prefix(uri, prefix) do return
+	remainder := uri[len(prefix):]
+	slash := strings.index_byte(remainder, '/')
+	if slash < 0 do return
+	authority := remainder[:slash]
+	encoded_path := remainder[slash:]
+	decoded_path, ok := net.percent_decode(encoded_path)
+	if !ok do return
+	defer delete(decoded_path)
+	if !strings.has_prefix(decoded_path, "/") || !valid_osc_text(transmute([]byte)decoded_path, false) do return
+	replace_owned_string(&terminal.cwd_uri, uri)
+	replace_owned_string(&terminal.cwd_path, decoded_path)
+	terminal.cwd_local = authority == "" || authority == "localhost"
+	terminal.cwd_changed = true
+}
+
+set_hyperlink :: proc(terminal: ^Terminal, data: []byte) {
+	separator := -1
+	for index in 0..<len(data) {
 		if data[index] == ';' {
 			separator = index
 			break
@@ -147,6 +203,21 @@ handle_osc :: proc(terminal: ^Terminal, data: []byte) {
 	}
 	append(&terminal.hyperlinks, strings.clone(value))
 	terminal.active_hyperlink = u32(len(terminal.hyperlinks))
+}
+
+valid_osc_text :: proc(data: []byte, allow_empty: bool) -> bool {
+	if !allow_empty && len(data) == 0 do return false
+	if !utf8.valid_string(string(data)) do return false
+	for value in data {
+		if value < 0x20 || value == 0x7f do return false
+	}
+	return true
+}
+
+replace_owned_string :: proc(target: ^string, value: string) {
+	replacement := strings.clone(value)
+	delete(target^)
+	target^ = replacement
 }
 
 valid_hyperlink_uri :: proc(uri: []byte) -> bool {

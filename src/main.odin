@@ -57,7 +57,7 @@ app_main :: proc() -> int {
 		return 1
 	}
 	defer vt.terminal_destroy(&terminal)
-	return run(&window, &process, &terminal, &renderer, options.url_opener)
+	return run(&window, &process, &terminal, &renderer, options.url_opener, options.title)
 }
 
 command_from_args :: proc(args: []string) -> (options: config.Settings, command: [dynamic]cstring, err: string) {
@@ -179,6 +179,7 @@ run :: proc(
 	terminal: ^vt.Terminal,
 	renderer: ^drawing.Renderer,
 	url_opener: string,
+	base_title: string,
 ) -> int {
 	pending: [dynamic]byte
 	defer delete(pending)
@@ -220,7 +221,7 @@ run :: proc(
 					if search_state.active do features.close(&search_state)
 					selection.clear(&selection_state)
 					features.url_open(&url_state, terminal)
-					update_url_title(window, &url_state)
+					update_url_title(window, terminal, base_title, &url_state)
 					redraw(renderer, window, terminal, &selection_state, &search_state, &url_state, true)
 					continue
 				}
@@ -228,16 +229,16 @@ run :: proc(
 					if url_state.active do features.url_close(&url_state)
 					selection.clear(&selection_state)
 					features.open(&search_state, vt.terminal_screen(terminal))
-					update_search_title(window, &search_state)
+					update_search_title(window, terminal, base_title, &search_state)
 					redraw(renderer, window, terminal, &selection_state, &search_state, &url_state, true)
 					continue
 				}
 				if url_state.active {
-					handle_url_input(window, terminal, renderer, &selection_state, &search_state, &url_state, url_opener, event)
+					handle_url_input(window, terminal, renderer, &selection_state, &search_state, &url_state, url_opener, base_title, event)
 					continue
 				}
 				if search_state.active {
-					handle_search_input(window, terminal, renderer, &selection_state, &search_state, &url_state, event)
+					handle_search_input(window, terminal, renderer, &selection_state, &search_state, &url_state, base_title, event)
 					continue
 				}
 				if copy_shortcut(event) {
@@ -266,14 +267,16 @@ run :: proc(
 					queue_input(&pending, pending_offset, transmute([]byte)sequence)
 				}
 			case .Mouse:
+				mode_closed := false
 				if search_state.active {
 					features.close(&search_state)
-					x11.set_title(window, "nare")
+					mode_closed = true
 				}
 				if url_state.active {
 					features.url_close(&url_state)
-					x11.set_title(window, "nare")
+					mode_closed = true
 				}
+				if mode_closed do restore_window_title(window, terminal, base_title)
 				if terminal.modes.mouse_tracking == 0 || .Shift in event.mouse.modifiers {
 					handle_selection_mouse(window, terminal, renderer, &selection_state, event.mouse)
 				} else {
@@ -312,7 +315,7 @@ run :: proc(
 		}
 
 		if .IN in fds[1].revents || .HUP in fds[1].revents {
-			if !drain_pty(window, process, terminal, renderer, &selection_state, &search_state, &url_state) do running = false
+			if !drain_pty(window, process, terminal, renderer, &selection_state, &search_state, &url_state, base_title) do running = false
 			replies := vt.terminal_take_replies(terminal)
 			queue_input(&pending, pending_offset, replies)
 			vt.terminal_consume_replies(terminal, len(replies))
@@ -358,11 +361,12 @@ handle_url_input :: proc(
 	search_state: ^features.State,
 	state: ^features.URL_State,
 	opener: string,
+	base_title: string,
 	event: x11.Event,
 ) {
 	if event.key == .Escape {
 		features.url_close(state)
-		x11.set_title(window, "nare")
+		restore_window_title(window, terminal, base_title)
 		redraw(renderer, window, terminal, selection_state, search_state, state, true)
 		return
 	}
@@ -375,12 +379,12 @@ handle_url_input :: proc(
 		fmt.eprintln("could not launch URL opener")
 	}
 	features.url_close(state)
-	x11.set_title(window, "nare")
+	restore_window_title(window, terminal, base_title)
 	redraw(renderer, window, terminal, selection_state, search_state, state, true)
 }
 
-update_url_title :: proc(window: ^x11.Window, state: ^features.URL_State) {
-	title := fmt.aprintf("nare - urls: %d (key opens, Shift+key copies)", len(state.links))
+update_url_title :: proc(window: ^x11.Window, terminal: ^vt.Terminal, base_title: string, state: ^features.URL_State) {
+	title := fmt.aprintf("%s - urls: %d (key opens, Shift+key copies)", current_window_title(terminal, base_title), len(state.links))
 	defer delete(title)
 	x11.set_title(window, title)
 }
@@ -392,13 +396,14 @@ handle_search_input :: proc(
 	selection_state: ^selection.State,
 	state: ^features.State,
 	url_state: ^features.URL_State,
+	base_title: string,
 	event: x11.Event,
 ) {
 	screen := vt.terminal_screen(terminal)
 	#partial switch event.key {
 	case .Escape:
 		features.close(state)
-		x11.set_title(window, "nare")
+		restore_window_title(window, terminal, base_title)
 	case .Enter:
 		if .Shift in event.modifiers {
 			features.previous(state, screen)
@@ -413,17 +418,25 @@ handle_search_input :: proc(
 		if len(data) > 0 && (data[0] >= 0x20 && data[0] != 0x7f) do features.append_query(state, screen, data)
 	case:
 	}
-	update_search_title(window, state)
+	update_search_title(window, terminal, base_title, state)
 	redraw(renderer, window, terminal, selection_state, state, url_state, true)
 }
 
-update_search_title :: proc(window: ^x11.Window, state: ^features.State) {
+update_search_title :: proc(window: ^x11.Window, terminal: ^vt.Terminal, base_title: string, state: ^features.State) {
 	if !state.active do return
 	match_index := 0
 	if len(state.matches) > 0 do match_index = state.current+1
-	title := fmt.aprintf("nare - search: %s (%d/%d)", features.query_text(state), match_index, len(state.matches))
+	title := fmt.aprintf("%s - search: %s (%d/%d)", current_window_title(terminal, base_title), features.query_text(state), match_index, len(state.matches))
 	defer delete(title)
 	x11.set_title(window, title)
+}
+
+current_window_title :: proc(terminal: ^vt.Terminal, base_title: string) -> string {
+	return terminal.title if terminal.title != "" else base_title
+}
+
+restore_window_title :: proc(window: ^x11.Window, terminal: ^vt.Terminal, base_title: string) {
+	x11.set_title(window, current_window_title(terminal, base_title))
 }
 
 redraw :: proc(
@@ -498,6 +511,7 @@ drain_pty :: proc(
 	selection_state: ^selection.State,
 	search_state: ^features.State,
 	url_state: ^features.URL_State,
+	base_title: string,
 ) -> bool {
 	buffer: [16 * 1024]byte
 	dirty := false
@@ -510,44 +524,42 @@ drain_pty :: proc(
 			dirty = true
 		case .Would_Block:
 			if dirty {
-				if search_state.active {
-					features.refresh(search_state, vt.terminal_screen(terminal))
-					update_search_title(window, search_state)
-				}
-				if url_state.active {
-					features.url_refresh(url_state, terminal)
-					update_url_title(window, url_state)
-				}
-				redraw(renderer, window, terminal, selection_state, search_state, url_state, search_state.active || url_state.active)
+				refresh_after_pty(window, terminal, renderer, selection_state, search_state, url_state, base_title)
 			}
 			return true
 		case .End:
 			if dirty {
-				if search_state.active {
-					features.refresh(search_state, vt.terminal_screen(terminal))
-					update_search_title(window, search_state)
-				}
-				if url_state.active {
-					features.url_refresh(url_state, terminal)
-					update_url_title(window, url_state)
-				}
-				redraw(renderer, window, terminal, selection_state, search_state, url_state, search_state.active || url_state.active)
+				refresh_after_pty(window, terminal, renderer, selection_state, search_state, url_state, base_title)
 			}
 			return false
 		case .Failed:
 			if dirty {
-				if search_state.active {
-					features.refresh(search_state, vt.terminal_screen(terminal))
-					update_search_title(window, search_state)
-				}
-				if url_state.active {
-					features.url_refresh(url_state, terminal)
-					update_url_title(window, url_state)
-				}
-				redraw(renderer, window, terminal, selection_state, search_state, url_state, search_state.active || url_state.active)
+				refresh_after_pty(window, terminal, renderer, selection_state, search_state, url_state, base_title)
 			}
 			fmt.eprintln("PTY read failed")
 			return false
 		}
 	}
+}
+
+refresh_after_pty :: proc(
+	window: ^x11.Window,
+	terminal: ^vt.Terminal,
+	renderer: ^drawing.Renderer,
+	selection_state: ^selection.State,
+	search_state: ^features.State,
+	url_state: ^features.URL_State,
+	base_title: string,
+) {
+	if search_state.active {
+		features.refresh(search_state, vt.terminal_screen(terminal))
+		update_search_title(window, terminal, base_title, search_state)
+	} else if url_state.active {
+		features.url_refresh(url_state, terminal)
+		update_url_title(window, terminal, base_title, url_state)
+	} else if terminal.title_changed {
+		restore_window_title(window, terminal, base_title)
+	}
+	terminal.title_changed = false
+	redraw(renderer, window, terminal, selection_state, search_state, url_state, search_state.active || url_state.active)
 }
