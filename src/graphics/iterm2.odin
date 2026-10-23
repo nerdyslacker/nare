@@ -90,15 +90,30 @@ decode_iterm2_inline :: proc(data: []byte) -> (ITerm2_Command, Decoded_Image, IT
 	if decode_error != nil do return command, {}, .Malformed
 	defer delete(decoded)
 	if declared_size >= 0 && declared_size != len(decoded) do return command, {}, .Malformed
-	if len(decoded) < 8 || string(decoded[:8]) != "\x89PNG\r\n\x1a\n" do return command, {}, .Unsupported
-	image, png_error := decode_png(decoded)
-	switch png_error {
-	case .None: return command, image, .None
-	case .Limit: return command, {}, .Limit
-	case .Unsupported: return command, {}, .Unsupported
-	case .Invalid_Data: return command, {}, .Malformed
+	if len(decoded) >= 8 && string(decoded[:8]) == "\x89PNG\r\n\x1a\n" {
+		image, png_error := decode_png(decoded)
+		switch png_error {
+		case .None: return command, image, .None
+		case .Limit: return command, {}, .Limit
+		case .Unsupported: return command, {}, .Unsupported
+		case .Invalid_Data: return command, {}, .Malformed
+		}
+	} else if len(decoded) >= 3 && decoded[0] == 0xff && decoded[1] == 0xd8 && decoded[2] == 0xff {
+		image, jpeg_error := decode_jpeg(decoded)
+		switch jpeg_error {
+		case .None: return command, image, .None
+		case .Limit: return command, {}, .Limit
+		case .Invalid_Data: return command, {}, .Malformed
+		}
+	} else if len(decoded) >= 6 && (string(decoded[:6]) == "GIF87a" || string(decoded[:6]) == "GIF89a") {
+		image, gif_error := decode_gif(decoded)
+		switch gif_error {
+		case .None: return command, image, .None
+		case .Limit: return command, {}, .Limit
+		case .Invalid_Data: return command, {}, .Malformed
+		}
 	}
-	return command, {}, .Malformed
+	return command, {}, .Unsupported
 }
 
 iterm2_size :: proc(value: string) -> (ITerm2_Size, bool) {
