@@ -22,8 +22,9 @@ init :: proc(
 	kind: Kind,
 	ligatures: bool = true,
 	family: string = fonts.DEFAULT_FAMILY,
+	pixel_size: int = fonts.DEFAULT_PIXEL_SIZE,
 ) -> Error {
-	font_error := fonts.init(&renderer.font, family)
+	font_error := fonts.init(&renderer.font, family, pixel_size)
 	if font_error != .None do return .Font
 	x11.set_cell_size(window, renderer.font.cell_width, renderer.font.cell_height)
 	if !cpu_resize(&renderer.cpu, window) {

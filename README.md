@@ -20,3 +20,5 @@ Build and run:
 make
 ./build/nare
 ```
+
+Configuration is loaded from `$XDG_CONFIG_HOME/nare/nare.conf`, or `~/.config/nare/nare.conf`. Copy [nare.conf](nare.conf) as a starting point; command-line options override it.

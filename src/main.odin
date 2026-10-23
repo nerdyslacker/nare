@@ -4,6 +4,7 @@ import "core:fmt"
 import "core:os"
 import "core:strings"
 import "core:sys/posix"
+import config "config"
 import features "features"
 import keyboard "input"
 import pty "pty"
@@ -14,33 +15,30 @@ import x11 "x11"
 
 MAX_PENDING_INPUT :: x11.MAX_SELECTION_BYTES + 64 * 1024
 
-Options :: struct {
-	renderer: drawing.Kind,
-	ligatures: bool,
-	font: string,
-	url_opener: string,
-}
-
 main :: proc() {
 	os.exit(app_main())
 }
 
 app_main :: proc() -> int {
 	options, command, command_err := command_from_args(os.args[1:])
+	defer config.settings_destroy(&options)
 	if command_err != "" {
 		fmt.eprintln(command_err)
+		delete(command_err)
 		return 2
 	}
 	defer command_destroy(&command)
 
-	window, window_err := x11.open()
+	title := strings.clone_to_cstring(options.title)
+	defer delete(title)
+	window, window_err := x11.open(title)
 	if window_err != .None {
 		fmt.eprintln(x11.error_string(window_err))
 		return 1
 	}
 	defer x11.close(&window)
 	renderer: drawing.Renderer
-	if render_error := drawing.init(&renderer, &window, options.renderer, options.ligatures, options.font); render_error != .None {
+	if render_error := drawing.init(&renderer, &window, options.renderer, options.ligatures, options.font, options.font_size); render_error != .None {
 		fmt.eprintln(drawing.error_string(render_error))
 		return 1
 	}
@@ -54,7 +52,7 @@ app_main :: proc() -> int {
 	}
 	defer pty.shutdown(&process)
 	terminal: vt.Terminal
-	if !vt.terminal_init(&terminal, columns, rows) {
+	if !vt.terminal_init(&terminal, columns, rows, options.scrollback_lines) {
 		fmt.eprintln("could not initialize terminal")
 		return 1
 	}
@@ -62,34 +60,42 @@ app_main :: proc() -> int {
 	return run(&window, &process, &terminal, &renderer, options.url_opener)
 }
 
-command_from_args :: proc(args: []string) -> (options: Options, command: [dynamic]cstring, err: string) {
-	options.renderer = .CPU
-	options.ligatures = true
-	options.font = "monospace"
-	options.url_opener = "xdg-open"
+command_from_args :: proc(args: []string) -> (options: config.Settings, command: [dynamic]cstring, err: string) {
+	config.settings_init(&options)
+	for argument in args {
+		if argument == "-e" do break
+		if argument == "-h" || argument == "--help" do return options, command, strings.clone(usage())
+	}
+	config_path, explicit_config, no_config, config_arg_ok := config_argument(args)
+	if !config_arg_ok do return options, command, strings.clone(usage())
+	if !no_config {
+		path := strings.clone(config_path) if explicit_config else config.default_path()
+		defer if path != "" do delete(path)
+		if path != "" {
+			result := config.load(&options, path, !explicit_config)
+			if result.error != .None {
+				if result.line > 0 {
+					return options, command, fmt.aprintf("%s:%d: %s", path, result.line, config.error_string(result.error))
+				}
+				return options, command, fmt.aprintf("%s: %s", path, config.error_string(result.error))
+			}
+		}
+	}
 	command_args: []string
 	for index := 0; index < len(args); index += 1 {
 		argument := args[index]
 		switch argument {
-		case "-h", "--help":
-			return options, command, usage()
-		case "--renderer=cpu": options.renderer = .CPU
-		case "--renderer=gpu": options.renderer = .GPU
-		case "--renderer=auto": options.renderer = .Auto
-		case "--ligatures=true": options.ligatures = true
-		case "--ligatures=false": options.ligatures = false
+		case "-h", "--help": return options, command, strings.clone(usage())
+		case "--config": index += 1
+		case "--no-config":
 		case "-e":
-			if index+1 >= len(args) do return options, command, usage()
+			if index+1 >= len(args) do return options, command, strings.clone(usage())
 			command_args = args[index+1:]
 			index = len(args)
 		case:
-			if strings.has_prefix(argument, "--font=") && len(argument) > len("--font=") {
-				options.font = argument[len("--font="):]
-			} else if strings.has_prefix(argument, "--url-opener=") {
-				options.url_opener = argument[len("--url-opener="):]
-			} else {
-				return options, command, usage()
-			}
+			config_result := apply_argument(&options, argument)
+			if config_result == .Unknown_Key && strings.has_prefix(argument, "--config=") do continue
+			if config_result != .None do return options, command, strings.clone(usage())
 		}
 	}
 	if len(command_args) == 0 {
@@ -103,8 +109,52 @@ command_from_args :: proc(args: []string) -> (options: Options, command: [dynami
 	return options, command, ""
 }
 
+config_argument :: proc(args: []string) -> (path: string, explicit, disabled, ok: bool) {
+	ok = true
+	for index := 0; index < len(args); index += 1 {
+		argument := args[index]
+		if argument == "-e" do break
+		if argument == "--no-config" {
+			disabled = true
+			explicit = false
+			path = ""
+		} else if argument == "--config" {
+			if index+1 >= len(args) || args[index+1] == "" do return "", false, false, false
+			index += 1
+			path = args[index]
+			explicit = true
+			disabled = false
+		} else if strings.has_prefix(argument, "--config=") {
+			path = argument[len("--config="):]
+			if path == "" do return "", false, false, false
+			explicit = true
+			disabled = false
+		}
+	}
+	return
+}
+
+apply_argument :: proc(options: ^config.Settings, argument: string) -> config.Error {
+	if strings.has_prefix(argument, "--renderer=") {
+		return config.apply(options, "main", "renderer", argument[len("--renderer="):])
+	} else if strings.has_prefix(argument, "--font=") {
+		return config.apply(options, "main", "font", argument[len("--font="):])
+	} else if strings.has_prefix(argument, "--font-size=") {
+		return config.apply(options, "main", "font-size", argument[len("--font-size="):])
+	} else if strings.has_prefix(argument, "--ligatures=") {
+		return config.apply(options, "main", "ligatures", argument[len("--ligatures="):])
+	} else if strings.has_prefix(argument, "--title=") {
+		return config.apply(options, "main", "title", argument[len("--title="):])
+	} else if strings.has_prefix(argument, "--scrollback-lines=") {
+		return config.apply(options, "scrollback", "lines", argument[len("--scrollback-lines="):])
+	} else if strings.has_prefix(argument, "--url-opener=") {
+		return config.apply(options, "url", "opener", argument[len("--url-opener="):])
+	}
+	return .Unknown_Key
+}
+
 usage :: proc() -> string {
-	return "usage: nare [--renderer=cpu|gpu|auto] [--font=FAMILY] [--ligatures=true|false] [--url-opener=COMMAND] [-e COMMAND [ARG...]]"
+	return "usage: nare [--config=PATH|--no-config] [--renderer=cpu|gpu|auto] [--font=FAMILY] [--font-size=PIXELS] [--ligatures=true|false] [--title=TITLE] [--scrollback-lines=COUNT] [--url-opener=COMMAND] [-e COMMAND [ARG...]]"
 }
 
 command_destroy :: proc(command: ^[dynamic]cstring) {
