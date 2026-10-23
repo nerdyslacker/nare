@@ -35,6 +35,7 @@ Event :: struct {
 	intermediate_count: int,
 	data: []byte,
 	terminator: String_Terminator,
+	discarded: bool,
 }
 
 Event_Handler :: #type proc(event: Event, user_data: rawptr)
@@ -83,6 +84,11 @@ consume :: proc(parser: ^Parser, value: byte, handler: Event_Handler, user_data:
 		return
 	}
 	if value == 0x18 || value == 0x1a {
+		if parser.state == .APC_String || parser.state == .String_Escape && parser.string_state == .APC_String {
+			handler(Event{kind = .APC, discarded = true}, user_data)
+		}
+		clear(&parser.string_data)
+		parser.string_discarded = false
 		emit_execute(value, handler, user_data)
 		parser.state = .Ground
 		return
@@ -299,15 +305,17 @@ append_string_byte :: proc(parser: ^Parser, value: byte) {
 }
 
 emit_string :: proc(parser: ^Parser, terminator: String_Terminator, handler: Event_Handler, user_data: rawptr) {
+	kind: Event_Kind
+	#partial switch parser.string_state if parser.state == .String_Escape else parser.state {
+	case .OSC_String: kind = .OSC
+	case .DCS_String: kind = .DCS
+	case .APC_String: kind = .APC
+	case: unreachable()
+	}
 	if !parser.string_discarded {
-		kind: Event_Kind
-		#partial switch parser.string_state if parser.state == .String_Escape else parser.state {
-		case .OSC_String: kind = .OSC
-		case .DCS_String: kind = .DCS
-		case .APC_String: kind = .APC
-		case: unreachable()
-		}
 		handler(Event{kind = kind, data = parser.string_data[:], terminator = terminator}, user_data)
+	} else if kind == .APC {
+		handler(Event{kind = kind, terminator = terminator, discarded = true}, user_data)
 	}
 	clear(&parser.string_data)
 	parser.string_discarded = false

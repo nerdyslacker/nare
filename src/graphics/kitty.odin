@@ -5,6 +5,8 @@ import "core:strconv"
 import "core:strings"
 
 MAX_KITTY_ENCODED_BYTES :: ((MAX_IMAGE_BYTES+2)/3)*4
+MAX_KITTY_CHUNKS :: 32_768
+MAX_KITTY_CHUNK_BYTES :: 4096
 
 Kitty_Action :: enum {
 	Transmit,
@@ -38,11 +40,106 @@ Kitty_Command :: struct {
 	quiet: int,
 }
 
+Kitty_Transfer :: struct {
+	active: bool,
+	command: Kitty_Command,
+	encoded: [dynamic]byte,
+	encoded_limit: int,
+	chunk_count: int,
+}
+
+Kitty_Frame :: struct {
+	command: Kitty_Command,
+	payload: []byte,
+	more_present: bool,
+	quiet_present: bool,
+	continuation_controls: bool,
+}
+
+kitty_transfer_destroy :: proc(transfer: ^Kitty_Transfer) {
+	delete(transfer.encoded)
+	transfer^ = {}
+}
+
+kitty_transfer_reset :: proc(transfer: ^Kitty_Transfer) {
+	delete(transfer.encoded)
+	transfer.encoded = nil
+	transfer.active = false
+	transfer.command = {}
+	transfer.encoded_limit = 0
+	transfer.chunk_count = 0
+}
+
+kitty_receive_direct :: proc(
+	transfer: ^Kitty_Transfer,
+	data: []byte,
+) -> (command: Kitty_Command, image: Decoded_Image, complete: bool, err: Kitty_Error) {
+	frame, frame_error := kitty_parse_direct_frame(data)
+	if frame_error != .None {
+		command = frame.command
+		if transfer.active {
+			command = transfer.command
+			kitty_transfer_reset(transfer)
+		}
+		return command, {}, true, frame_error
+	}
+
+	if transfer.active {
+		command = transfer.command
+		if !frame.more_present || !frame.continuation_controls {
+			kitty_transfer_reset(transfer)
+			return command, {}, true, .Malformed
+		}
+		if frame.quiet_present {
+			command.quiet = frame.command.quiet
+			transfer.command.quiet = command.quiet
+		}
+		if chunk_error := kitty_append_chunk(transfer, frame.payload, frame.command.more); chunk_error != .None {
+			kitty_transfer_reset(transfer)
+			return command, {}, true, chunk_error
+		}
+		if frame.command.more do return command, {}, false, .None
+		command.more = false
+		image, err = kitty_decode_payload(command, transfer.encoded[:])
+		kitty_transfer_reset(transfer)
+		return command, image, true, err
+	}
+
+	command = frame.command
+	encoded_limit, limit_error := kitty_encoded_limit(command)
+	if limit_error != .None do return command, {}, true, limit_error
+	if command.more {
+		if command.action == .Query do return command, {}, true, .Unsupported
+		transfer.active = true
+		transfer.command = command
+		transfer.encoded_limit = encoded_limit
+		if chunk_error := kitty_append_chunk(transfer, frame.payload, true); chunk_error != .None {
+			kitty_transfer_reset(transfer)
+			return command, {}, true, chunk_error
+		}
+		return command, {}, false, .None
+	}
+	if frame.more_present && len(frame.payload) > MAX_KITTY_CHUNK_BYTES {
+		return command, {}, true, .Image_Limit
+	}
+	image, err = kitty_decode_payload(command, frame.payload)
+	return command, image, true, err
+}
+
 kitty_decode_direct :: proc(data: []byte) -> (Kitty_Command, Decoded_Image, Kitty_Error) {
+	transfer: Kitty_Transfer
+	defer kitty_transfer_destroy(&transfer)
+	command, image, complete, err := kitty_receive_direct(&transfer, data)
+	if !complete do return command, {}, .Unsupported
+	return command, image, err
+}
+
+kitty_parse_direct_frame :: proc(data: []byte) -> (Kitty_Frame, Kitty_Error) {
 	command := Kitty_Command{action = .Transmit, format = .RGBA8}
-	if len(data) < 3 || data[0] != 'G' do return command, {}, .Malformed
+	frame := Kitty_Frame{command = command}
+	if len(data) < 3 || data[0] != 'G' do return frame, .Malformed
 	separator := strings.index_byte(string(data), ';')
-	if separator < 1 do return command, {}, .Malformed
+	if separator < 1 do return frame, .Malformed
 	control := string(data[1:separator])
 	payload := data[separator+1:]
 	seen_action, seen_format, seen_width, seen_height := false, false, false, false
@@ -51,6 +148,7 @@ kitty_decode_direct :: proc(data: []byte) -> (Kitty_Command, Decoded_Image, Kitt
 	seen_source_x, seen_source_y, seen_source_width, seen_source_height := false, false, false, false
 	seen_z, seen_cursor_policy := false, false
 	unsupported := false
+	key_count := 0
 	remaining := control
 	for len(remaining) > 0 {
 		part := remaining
@@ -60,12 +158,13 @@ kitty_decode_direct :: proc(data: []byte) -> (Kitty_Command, Decoded_Image, Kitt
 		} else {
 			remaining = ""
 		}
-		if len(part) < 3 || part[1] != '=' do return command, {}, .Malformed
+		if len(part) < 3 || part[1] != '=' do return Kitty_Frame{command = command}, .Malformed
+		key_count += 1
 		key, value := part[0], part[2:]
-		if value == "" do return command, {}, .Malformed
+		if value == "" do return Kitty_Frame{command = command}, .Malformed
 		switch key {
 		case 'a':
-			if seen_action || len(value) != 1 do return command, {}, .Malformed
+			if seen_action || len(value) != 1 do return Kitty_Frame{command = command}, .Malformed
 			seen_action = true
 			switch value[0] {
 			case 't': command.action = .Transmit
@@ -76,123 +175,148 @@ kitty_decode_direct :: proc(data: []byte) -> (Kitty_Command, Decoded_Image, Kitt
 			case: command.action = .Unsupported
 			}
 		case 'f':
-			if seen_format do return command, {}, .Malformed
+			if seen_format do return Kitty_Frame{command = command}, .Malformed
 			seen_format = true
 			format, ok := parse_kitty_uint(value)
-			if !ok do return command, {}, .Malformed
+			if !ok do return Kitty_Frame{command = command}, .Malformed
 			switch format {
 			case 24: command.format = .RGB8
 			case 32: command.format = .RGBA8
 			case: unsupported = true
 			}
 		case 's':
-			if seen_width do return command, {}, .Malformed
+			if seen_width do return Kitty_Frame{command = command}, .Malformed
 			seen_width = true
 			width, ok := parse_kitty_uint(value)
-			if !ok || width > u64(max(int)) do return command, {}, .Malformed
+			if !ok || width > u64(max(int)) do return Kitty_Frame{command = command}, .Malformed
 			command.width = int(width)
 		case 'v':
-			if seen_height do return command, {}, .Malformed
+			if seen_height do return Kitty_Frame{command = command}, .Malformed
 			seen_height = true
 			height, ok := parse_kitty_uint(value)
-			if !ok || height > u64(max(int)) do return command, {}, .Malformed
+			if !ok || height > u64(max(int)) do return Kitty_Frame{command = command}, .Malformed
 			command.height = int(height)
 		case 'i':
-			if seen_id do return command, {}, .Malformed
+			if seen_id do return Kitty_Frame{command = command}, .Malformed
 			seen_id = true
 			id, ok := parse_kitty_uint(value)
-			if !ok || id > u64(max(u32)) do return command, {}, .Malformed
+			if !ok || id > u64(max(u32)) do return Kitty_Frame{command = command}, .Malformed
 			command.image_id = u32(id)
 		case 'p':
-			if seen_placement do return command, {}, .Malformed
+			if seen_placement do return Kitty_Frame{command = command}, .Malformed
 			seen_placement = true
 			id, ok := parse_kitty_uint(value)
-			if !ok || id > u64(max(u32)) do return command, {}, .Malformed
+			if !ok || id > u64(max(u32)) do return Kitty_Frame{command = command}, .Malformed
 			command.placement_id = u32(id)
 		case 'c':
-			if seen_columns do return command, {}, .Malformed
+			if seen_columns do return Kitty_Frame{command = command}, .Malformed
 			seen_columns = true
 			columns, ok := parse_kitty_uint(value)
-			if !ok || columns > u64(MAX_PLACEMENT_CELLS) do return command, {}, .Malformed
+			if !ok || columns > u64(MAX_PLACEMENT_CELLS) do return Kitty_Frame{command = command}, .Malformed
 			command.columns = int(columns)
 		case 'r':
-			if seen_rows do return command, {}, .Malformed
+			if seen_rows do return Kitty_Frame{command = command}, .Malformed
 			seen_rows = true
 			rows, ok := parse_kitty_uint(value)
-			if !ok || rows > u64(MAX_PLACEMENT_CELLS) do return command, {}, .Malformed
+			if !ok || rows > u64(MAX_PLACEMENT_CELLS) do return Kitty_Frame{command = command}, .Malformed
 			command.rows = int(rows)
 		case 'x':
-			if seen_source_x do return command, {}, .Malformed
+			if seen_source_x do return Kitty_Frame{command = command}, .Malformed
 			seen_source_x = true
 			parsed, ok := parse_kitty_uint(value)
-			if !ok || parsed > u64(max(int)) do return command, {}, .Malformed
+			if !ok || parsed > u64(max(int)) do return Kitty_Frame{command = command}, .Malformed
 			command.source_x = int(parsed)
 		case 'y':
-			if seen_source_y do return command, {}, .Malformed
+			if seen_source_y do return Kitty_Frame{command = command}, .Malformed
 			seen_source_y = true
 			parsed, ok := parse_kitty_uint(value)
-			if !ok || parsed > u64(max(int)) do return command, {}, .Malformed
+			if !ok || parsed > u64(max(int)) do return Kitty_Frame{command = command}, .Malformed
 			command.source_y = int(parsed)
 		case 'w':
-			if seen_source_width do return command, {}, .Malformed
+			if seen_source_width do return Kitty_Frame{command = command}, .Malformed
 			seen_source_width = true
 			parsed, ok := parse_kitty_uint(value)
-			if !ok || parsed > u64(max(int)) do return command, {}, .Malformed
+			if !ok || parsed > u64(max(int)) do return Kitty_Frame{command = command}, .Malformed
 			command.source_width = int(parsed)
 		case 'h':
-			if seen_source_height do return command, {}, .Malformed
+			if seen_source_height do return Kitty_Frame{command = command}, .Malformed
 			seen_source_height = true
 			parsed, ok := parse_kitty_uint(value)
-			if !ok || parsed > u64(max(int)) do return command, {}, .Malformed
+			if !ok || parsed > u64(max(int)) do return Kitty_Frame{command = command}, .Malformed
 			command.source_height = int(parsed)
 		case 'z':
-			if seen_z do return command, {}, .Malformed
+			if seen_z do return Kitty_Frame{command = command}, .Malformed
 			seen_z = true
 			parsed_bytes := 0
 			parsed, ok := strconv.parse_int(value, 10, &parsed_bytes)
 			if !ok || parsed_bytes != len(value) || parsed < int(min(i32)) || parsed > int(max(i32)) {
-				return command, {}, .Malformed
+				return Kitty_Frame{command = command}, .Malformed
 			}
 			command.z = i32(parsed)
 		case 'C':
-			if seen_cursor_policy do return command, {}, .Malformed
+			if seen_cursor_policy do return Kitty_Frame{command = command}, .Malformed
 			seen_cursor_policy = true
 			parsed, ok := parse_kitty_uint(value)
-			if !ok || parsed > 1 do return command, {}, .Malformed
+			if !ok || parsed > 1 do return Kitty_Frame{command = command}, .Malformed
 			command.no_cursor_move = parsed == 1
 		case 't':
-			if seen_medium do return command, {}, .Malformed
+			if seen_medium do return Kitty_Frame{command = command}, .Malformed
 			seen_medium = true
 			if value != "d" do unsupported = true
 		case 'm':
-			if seen_more do return command, {}, .Malformed
+			if seen_more do return Kitty_Frame{command = command}, .Malformed
 			seen_more = true
 			more, ok := parse_kitty_uint(value)
-			if !ok || more > 1 do return command, {}, .Malformed
+			if !ok || more > 1 do return Kitty_Frame{command = command}, .Malformed
 			command.more = more == 1
 		case 'q':
-			if seen_quiet do return command, {}, .Malformed
+			if seen_quiet do return Kitty_Frame{command = command}, .Malformed
 			seen_quiet = true
 			quiet, ok := parse_kitty_uint(value)
-			if !ok || quiet > 2 do return command, {}, .Malformed
+			if !ok || quiet > 2 do return Kitty_Frame{command = command}, .Malformed
 			command.quiet = int(quiet)
 		case 'o': unsupported = true
 		case: unsupported = true
 		}
 	}
 	if unsupported || command.action != .Transmit && command.action != .Transmit_And_Display && command.action != .Query {
-		return command, {}, .Unsupported
+		return Kitty_Frame{command = command}, .Unsupported
 	}
-	if command.more do return command, {}, .Unsupported
-	stride, byte_count, layout_error := image_layout(command.width, command.height, command.format)
-	if layout_error == .Invalid_Dimensions do return command, {}, .Malformed
-	if layout_error != .None do return command, {}, .Image_Limit
+	frame.command = command
+	frame.payload = payload
+	frame.more_present = seen_more
+	frame.quiet_present = seen_quiet
+	frame.continuation_controls = seen_more && key_count == 1+int(seen_quiet)
+	return frame, .None
+}
+
+kitty_encoded_limit :: proc(command: Kitty_Command) -> (int, Kitty_Error) {
+	_, byte_count, layout_error := image_layout(command.width, command.height, command.format)
+	if layout_error == .Invalid_Dimensions do return 0, .Malformed
+	if layout_error != .None do return 0, .Image_Limit
 	encoded_limit := ((byte_count+2)/3)*4
-	if len(payload) == 0 || len(payload) > encoded_limit || len(payload) > MAX_KITTY_ENCODED_BYTES {
-		return command, {}, .Image_Limit
+	if encoded_limit > MAX_KITTY_ENCODED_BYTES do return 0, .Image_Limit
+	return encoded_limit, .None
+}
+
+kitty_append_chunk :: proc(transfer: ^Kitty_Transfer, payload: []byte, more: bool) -> Kitty_Error {
+	if len(payload) > MAX_KITTY_CHUNK_BYTES ||
+	   transfer.chunk_count >= MAX_KITTY_CHUNKS ||
+	   len(payload) > transfer.encoded_limit-len(transfer.encoded) {
+		return .Image_Limit
 	}
+	if more && (len(payload) == 0 || len(payload)%4 != 0) do return .Invalid_Data
+	append(&transfer.encoded, ..payload)
+	transfer.chunk_count += 1
+	return .None
+}
+
+kitty_decode_payload :: proc(command: Kitty_Command, payload: []byte) -> (Decoded_Image, Kitty_Error) {
+	stride, encoded_limit, limit_error := kitty_payload_layout(command)
+	if limit_error != .None do return {}, limit_error
+	if len(payload) == 0 || len(payload) > encoded_limit do return {}, .Image_Limit
 	decoded, decode_error := base64.decode(string(payload), options = {.Strict})
-	if decode_error != nil do return command, {}, .Invalid_Data
+	if decode_error != nil do return {}, .Invalid_Data
 	image := Decoded_Image{
 		width = command.width,
 		height = command.height,
@@ -203,10 +327,21 @@ kitty_decode_direct :: proc(data: []byte) -> (Kitty_Command, Decoded_Image, Kitt
 	_, image_error := validate_image(&image)
 	if image_error != .None {
 		decoded_image_destroy(&image)
-		if image_error == .Invalid_Pixel_Data do return command, {}, .Invalid_Data
-		return command, {}, .Image_Limit
+		if image_error == .Invalid_Pixel_Data do return {}, .Invalid_Data
+		return {}, .Image_Limit
 	}
-	return command, image, .None
+	return image, .None
+}
+
+kitty_payload_layout :: proc(command: Kitty_Command) -> (stride, encoded_limit: int, err: Kitty_Error) {
+	byte_count: int
+	layout_error: Error
+	stride, byte_count, layout_error = image_layout(command.width, command.height, command.format)
+	if layout_error == .Invalid_Dimensions do return 0, 0, .Malformed
+	if layout_error != .None do return 0, 0, .Image_Limit
+	encoded_limit = ((byte_count+2)/3)*4
+	if encoded_limit > MAX_KITTY_ENCODED_BYTES do return 0, 0, .Image_Limit
+	return stride, encoded_limit, .None
 }
 
 parse_kitty_uint :: proc(value: string) -> (u64, bool) {

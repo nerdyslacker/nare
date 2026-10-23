@@ -129,6 +129,7 @@ Terminal :: struct {
 	osc52_actions: [dynamic]OSC52_Action,
 	osc52_queued_bytes: int,
 	images: graphics.Registry,
+	kitty_transfer: graphics.Kitty_Transfer,
 }
 
 terminal_init :: proc(
@@ -165,6 +166,7 @@ terminal_destroy :: proc(terminal: ^Terminal) {
 	delete(terminal.cwd_path)
 	for action in terminal.osc52_actions do delete(action.data)
 	delete(terminal.osc52_actions)
+	graphics.kitty_transfer_destroy(&terminal.kitty_transfer)
 	graphics.registry_destroy(&terminal.images)
 	terminal^ = {}
 }
@@ -215,13 +217,18 @@ terminal_event :: proc(event: Event, user_data: rawptr) {
 	case .DCS:
 		handle_dcs(terminal, event.data)
 	case .APC:
-		handle_apc(terminal, event.data)
+		handle_apc(terminal, event.data, event.discarded)
 	}
 }
 
-handle_apc :: proc(terminal: ^Terminal, data: []byte) {
+handle_apc :: proc(terminal: ^Terminal, data: []byte, discarded: bool = false) {
+	if discarded {
+		graphics.kitty_transfer_reset(&terminal.kitty_transfer)
+		return
+	}
 	if len(data) == 0 || data[0] != 'G' do return
-	command, image, decode_error := graphics.kitty_decode_direct(data)
+	command, image, complete, decode_error := graphics.kitty_receive_direct(&terminal.kitty_transfer, data)
+	if !complete do return
 	if decode_error != .None {
 		kitty_reply(terminal, command, false, kitty_error_text(decode_error))
 		return
@@ -981,5 +988,6 @@ terminal_reset :: proc(terminal: ^Terminal) {
 	screen_clear(&terminal.main_screen, {})
 	screen_clear(&terminal.alternate_screen, {})
 	clear_hyperlinks(terminal)
+	graphics.kitty_transfer_reset(&terminal.kitty_transfer)
 	graphics.registry_clear(&terminal.images)
 }
