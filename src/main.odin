@@ -4,7 +4,7 @@ import "core:fmt"
 import "core:os"
 import "core:strings"
 import "core:sys/posix"
-import search "features"
+import features "features"
 import keyboard "input"
 import pty "pty"
 import drawing "render"
@@ -18,6 +18,7 @@ Options :: struct {
 	renderer: drawing.Kind,
 	ligatures: bool,
 	font: string,
+	url_opener: string,
 }
 
 main :: proc() {
@@ -58,13 +59,14 @@ app_main :: proc() -> int {
 		return 1
 	}
 	defer vt.terminal_destroy(&terminal)
-	return run(&window, &process, &terminal, &renderer)
+	return run(&window, &process, &terminal, &renderer, options.url_opener)
 }
 
 command_from_args :: proc(args: []string) -> (options: Options, command: [dynamic]cstring, err: string) {
 	options.renderer = .CPU
 	options.ligatures = true
 	options.font = "monospace"
+	options.url_opener = "xdg-open"
 	command_args: []string
 	for index := 0; index < len(args); index += 1 {
 		argument := args[index]
@@ -83,6 +85,8 @@ command_from_args :: proc(args: []string) -> (options: Options, command: [dynami
 		case:
 			if strings.has_prefix(argument, "--font=") && len(argument) > len("--font=") {
 				options.font = argument[len("--font="):]
+			} else if strings.has_prefix(argument, "--url-opener=") {
+				options.url_opener = argument[len("--url-opener="):]
 			} else {
 				return options, command, usage()
 			}
@@ -100,7 +104,7 @@ command_from_args :: proc(args: []string) -> (options: Options, command: [dynami
 }
 
 usage :: proc() -> string {
-	return "usage: nare [--renderer=cpu|gpu|auto] [--font=FAMILY] [--ligatures=true|false] [-e COMMAND [ARG...]]"
+	return "usage: nare [--renderer=cpu|gpu|auto] [--font=FAMILY] [--ligatures=true|false] [--url-opener=COMMAND] [-e COMMAND [ARG...]]"
 }
 
 command_destroy :: proc(command: ^[dynamic]cstring) {
@@ -119,13 +123,21 @@ pty_size :: proc(columns, rows, width, height: int) -> pty.Size {
 	}
 }
 
-run :: proc(window: ^x11.Window, process: ^pty.Process, terminal: ^vt.Terminal, renderer: ^drawing.Renderer) -> int {
+run :: proc(
+	window: ^x11.Window,
+	process: ^pty.Process,
+	terminal: ^vt.Terminal,
+	renderer: ^drawing.Renderer,
+	url_opener: string,
+) -> int {
 	pending: [dynamic]byte
 	defer delete(pending)
 	pending_offset := 0
 	selection_state: selection.State
-	search_state: search.State
-	defer search.destroy(&search_state)
+	search_state: features.State
+	defer features.destroy(&search_state)
+	url_state: features.URL_State
+	defer features.url_destroy(&url_state)
 	running := true
 	close_requested := false
 
@@ -139,7 +151,7 @@ run :: proc(window: ^x11.Window, process: ^pty.Process, terminal: ^vt.Terminal, 
 				close_requested = true
 				running = false
 			case .Redraw:
-				redraw(renderer, window, terminal, &selection_state, &search_state, true)
+				redraw(renderer, window, terminal, &selection_state, &search_state, &url_state, true)
 			case .Resize:
 				selection.clear(&selection_state)
 				columns, rows := x11.grid_size(window)
@@ -149,19 +161,33 @@ run :: proc(window: ^x11.Window, process: ^pty.Process, terminal: ^vt.Terminal, 
 					fmt.eprintln("could not resize PTY")
 					running = false
 				} else {
-					if search_state.active do search.refresh(&search_state, vt.terminal_screen(terminal))
-					redraw(renderer, window, terminal, &selection_state, &search_state, true)
+					if search_state.active do features.refresh(&search_state, vt.terminal_screen(terminal))
+					if url_state.active do features.url_refresh(&url_state, vt.terminal_screen(terminal))
+					redraw(renderer, window, terminal, &selection_state, &search_state, &url_state, true)
 				}
 			case .Input:
-				if search_shortcut(event) {
+				if url_shortcut(event) {
+					if search_state.active do features.close(&search_state)
 					selection.clear(&selection_state)
-					search.open(&search_state, vt.terminal_screen(terminal))
+					features.url_open(&url_state, vt.terminal_screen(terminal))
+					update_url_title(window, &url_state)
+					redraw(renderer, window, terminal, &selection_state, &search_state, &url_state, true)
+					continue
+				}
+				if search_shortcut(event) {
+					if url_state.active do features.url_close(&url_state)
+					selection.clear(&selection_state)
+					features.open(&search_state, vt.terminal_screen(terminal))
 					update_search_title(window, &search_state)
-					redraw(renderer, window, terminal, &selection_state, &search_state, true)
+					redraw(renderer, window, terminal, &selection_state, &search_state, &url_state, true)
+					continue
+				}
+				if url_state.active {
+					handle_url_input(window, terminal, renderer, &selection_state, &search_state, &url_state, url_opener, event)
 					continue
 				}
 				if search_state.active {
-					handle_search_input(window, terminal, renderer, &selection_state, &search_state, event)
+					handle_search_input(window, terminal, renderer, &selection_state, &search_state, &url_state, event)
 					continue
 				}
 				if copy_shortcut(event) {
@@ -191,7 +217,11 @@ run :: proc(window: ^x11.Window, process: ^pty.Process, terminal: ^vt.Terminal, 
 				}
 			case .Mouse:
 				if search_state.active {
-					search.close(&search_state)
+					features.close(&search_state)
+					x11.set_title(window, "nare")
+				}
+				if url_state.active {
+					features.url_close(&url_state)
 					x11.set_title(window, "nare")
 				}
 				if terminal.modes.mouse_tracking == 0 || .Shift in event.mouse.modifiers {
@@ -232,7 +262,7 @@ run :: proc(window: ^x11.Window, process: ^pty.Process, terminal: ^vt.Terminal, 
 		}
 
 		if .IN in fds[1].revents || .HUP in fds[1].revents {
-			if !drain_pty(window, process, terminal, renderer, &selection_state, &search_state) do running = false
+			if !drain_pty(window, process, terminal, renderer, &selection_state, &search_state, &url_state) do running = false
 			replies := vt.terminal_take_replies(terminal)
 			queue_input(&pending, pending_offset, replies)
 			vt.terminal_consume_replies(terminal, len(replies))
@@ -265,42 +295,83 @@ search_shortcut :: proc(event: x11.Event) -> bool {
 	return event.input_size == 1 && (event.input[0] == 0x06 || event.input[0] == 'f' || event.input[0] == 'F')
 }
 
+url_shortcut :: proc(event: x11.Event) -> bool {
+	if event.key != .Text || .Control not_in event.modifiers || .Shift not_in event.modifiers do return false
+	return event.input_size == 1 && (event.input[0] == 0x15 || event.input[0] == 'u' || event.input[0] == 'U')
+}
+
+handle_url_input :: proc(
+	window: ^x11.Window,
+	terminal: ^vt.Terminal,
+	renderer: ^drawing.Renderer,
+	selection_state: ^selection.State,
+	search_state: ^features.State,
+	state: ^features.URL_State,
+	opener: string,
+	event: x11.Event,
+) {
+	if event.key == .Escape {
+		features.url_close(state)
+		x11.set_title(window, "nare")
+		redraw(renderer, window, terminal, selection_state, search_state, state, true)
+		return
+	}
+	if event.key != .Text || event.input_size != 1 do return
+	url := features.url_for_hint(state, event.input[0])
+	if url == "" do return
+	if .Shift in event.modifiers {
+		_ = x11.own_selection(window, .Clipboard, transmute([]byte)url)
+	} else if !features.open_url(opener, url) {
+		fmt.eprintln("could not launch URL opener")
+	}
+	features.url_close(state)
+	x11.set_title(window, "nare")
+	redraw(renderer, window, terminal, selection_state, search_state, state, true)
+}
+
+update_url_title :: proc(window: ^x11.Window, state: ^features.URL_State) {
+	title := fmt.aprintf("nare - urls: %d (key opens, Shift+key copies)", len(state.links))
+	defer delete(title)
+	x11.set_title(window, title)
+}
+
 handle_search_input :: proc(
 	window: ^x11.Window,
 	terminal: ^vt.Terminal,
 	renderer: ^drawing.Renderer,
 	selection_state: ^selection.State,
-	state: ^search.State,
+	state: ^features.State,
+	url_state: ^features.URL_State,
 	event: x11.Event,
 ) {
 	screen := vt.terminal_screen(terminal)
 	#partial switch event.key {
 	case .Escape:
-		search.close(state)
+		features.close(state)
 		x11.set_title(window, "nare")
 	case .Enter:
 		if .Shift in event.modifiers {
-			search.previous(state, screen)
+			features.previous(state, screen)
 		} else {
-			search.next(state, screen)
+			features.next(state, screen)
 		}
 	case .Backspace:
-		search.backspace(state, screen)
+		features.backspace(state, screen)
 	case .Text:
 		input := event.input
 		data := input[:event.input_size]
-		if len(data) > 0 && (data[0] >= 0x20 && data[0] != 0x7f) do search.append_query(state, screen, data)
+		if len(data) > 0 && (data[0] >= 0x20 && data[0] != 0x7f) do features.append_query(state, screen, data)
 	case:
 	}
 	update_search_title(window, state)
-	redraw(renderer, window, terminal, selection_state, state, true)
+	redraw(renderer, window, terminal, selection_state, state, url_state, true)
 }
 
-update_search_title :: proc(window: ^x11.Window, state: ^search.State) {
+update_search_title :: proc(window: ^x11.Window, state: ^features.State) {
 	if !state.active do return
 	match_index := 0
 	if len(state.matches) > 0 do match_index = state.current+1
-	title := fmt.aprintf("nare - search: %s (%d/%d)", search.query_text(state), match_index, len(state.matches))
+	title := fmt.aprintf("nare - search: %s (%d/%d)", features.query_text(state), match_index, len(state.matches))
 	defer delete(title)
 	x11.set_title(window, title)
 }
@@ -310,11 +381,14 @@ redraw :: proc(
 	window: ^x11.Window,
 	terminal: ^vt.Terminal,
 	selection_state: ^selection.State,
-	search_state: ^search.State,
+	search_state: ^features.State,
+	url_state: ^features.URL_State,
 	force: bool,
 ) {
-	if search_state.active {
-		drawing.draw(renderer, window, terminal, force, &search_state.highlight, search.view_screen(search_state))
+	if url_state.active {
+		drawing.draw(renderer, window, terminal, force, nil, features.url_view_screen(url_state))
+	} else if search_state.active {
+		drawing.draw(renderer, window, terminal, force, &search_state.highlight, features.view_screen(search_state))
 	} else {
 		drawing.draw(renderer, window, terminal, force, selection_state)
 	}
@@ -372,7 +446,8 @@ drain_pty :: proc(
 	terminal: ^vt.Terminal,
 	renderer: ^drawing.Renderer,
 	selection_state: ^selection.State,
-	search_state: ^search.State,
+	search_state: ^features.State,
+	url_state: ^features.URL_State,
 ) -> bool {
 	buffer: [16 * 1024]byte
 	dirty := false
@@ -386,28 +461,40 @@ drain_pty :: proc(
 		case .Would_Block:
 			if dirty {
 				if search_state.active {
-					search.refresh(search_state, vt.terminal_screen(terminal))
+					features.refresh(search_state, vt.terminal_screen(terminal))
 					update_search_title(window, search_state)
 				}
-				redraw(renderer, window, terminal, selection_state, search_state, search_state.active)
+				if url_state.active {
+					features.url_refresh(url_state, vt.terminal_screen(terminal))
+					update_url_title(window, url_state)
+				}
+				redraw(renderer, window, terminal, selection_state, search_state, url_state, search_state.active || url_state.active)
 			}
 			return true
 		case .End:
 			if dirty {
 				if search_state.active {
-					search.refresh(search_state, vt.terminal_screen(terminal))
+					features.refresh(search_state, vt.terminal_screen(terminal))
 					update_search_title(window, search_state)
 				}
-				redraw(renderer, window, terminal, selection_state, search_state, search_state.active)
+				if url_state.active {
+					features.url_refresh(url_state, vt.terminal_screen(terminal))
+					update_url_title(window, url_state)
+				}
+				redraw(renderer, window, terminal, selection_state, search_state, url_state, search_state.active || url_state.active)
 			}
 			return false
 		case .Failed:
 			if dirty {
 				if search_state.active {
-					search.refresh(search_state, vt.terminal_screen(terminal))
+					features.refresh(search_state, vt.terminal_screen(terminal))
 					update_search_title(window, search_state)
 				}
-				redraw(renderer, window, terminal, selection_state, search_state, search_state.active)
+				if url_state.active {
+					features.url_refresh(url_state, vt.terminal_screen(terminal))
+					update_url_title(window, url_state)
+				}
+				redraw(renderer, window, terminal, selection_state, search_state, url_state, search_state.active || url_state.active)
 			}
 			fmt.eprintln("PTY read failed")
 			return false
