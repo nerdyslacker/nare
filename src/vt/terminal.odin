@@ -103,6 +103,7 @@ Modes :: struct {
 	focus_reporting: bool,
 	cursor_visible: bool,
 	synchronized_updates: bool,
+	sixel_display: bool,
 	mouse_tracking: int,
 	mouse_sgr: bool,
 	cursor_style: Cursor_Style,
@@ -448,8 +449,16 @@ handle_dcs :: proc(terminal: ^Terminal, data: []byte) {
 		handle_xtgettcap(terminal, data[2:])
 		return
 	}
-	image, _, sixel_error := graphics.decode_sixel_dcs(data)
+	image, info, sixel_error := graphics.decode_sixel_dcs(data)
 	if sixel_error != .None do return
+	pixel_width_64 := i64(image.width)
+	pixel_height_64 := i64(image.height)*i64(info.pixel_aspect_height)
+	if pixel_width_64 <= 0 || pixel_height_64 <= 0 ||
+	   pixel_width_64 > graphics.MAX_PLACEMENT_PIXELS || pixel_height_64 > graphics.MAX_PLACEMENT_PIXELS {
+		graphics.decoded_image_destroy(&image)
+		return
+	}
+	pixel_width, pixel_height := int(pixel_width_64), int(pixel_height_64)
 	image_id, image_error := graphics.add_image(&terminal.images, .Sixel, 0, &image)
 	if image_error != .None {
 		graphics.decoded_image_destroy(&image)
@@ -460,25 +469,31 @@ handle_dcs :: proc(terminal: ^Terminal, data: []byte) {
 		_ = graphics.delete_image(&terminal.images, image_id)
 		return
 	}
-	columns := max(1, (resource.width+terminal.cell_width-1)/terminal.cell_width)
-	rows := max(1, (resource.height+terminal.cell_height-1)/terminal.cell_height)
+	columns := max(1, (pixel_width+terminal.cell_width-1)/terminal.cell_width)
+	rows := max(1, (pixel_height+terminal.cell_height-1)/terminal.cell_height)
+	if columns > graphics.MAX_PLACEMENT_CELLS || rows > graphics.MAX_PLACEMENT_CELLS {
+		_ = graphics.delete_image(&terminal.images, image_id)
+		return
+	}
 	screen := terminal_screen(terminal)
 	screen_kind := graphics.Screen.Alternate if terminal.using_alternate else graphics.Screen.Main
+	row, column := screen.cursor.row, screen.cursor.column
+	if terminal.modes.sixel_display do row, column = 0, 0
 	_, placement_error := graphics.add_placement(&terminal.images, {
 		image_id = image_id,
 		screen = screen_kind,
-		row = screen.cursor.row,
-		column = screen.cursor.column,
+		row = row,
+		column = column,
 		rows = rows,
 		columns = columns,
-		pixel_width = resource.width,
-		pixel_height = resource.height,
+		pixel_width = pixel_width,
+		pixel_height = pixel_height,
 	})
 	if placement_error != .None {
 		_ = graphics.delete_image(&terminal.images, image_id)
 		return
 	}
-	screen.cursor.column = 0
+	if terminal.modes.sixel_display do return
 	for _ in 0..<rows do line_feed(screen, terminal.attributes)
 }
 
@@ -1027,6 +1042,7 @@ set_modes :: proc(terminal: ^Terminal, event: Event, enabled: bool) {
 		if event.private_marker == '?' {
 			switch mode {
 			case 1: terminal.modes.application_cursor = enabled
+			case 80: terminal.modes.sixel_display = enabled
 			case 6:
 				terminal.modes.origin = enabled
 				set_cursor(terminal, 1, 1)

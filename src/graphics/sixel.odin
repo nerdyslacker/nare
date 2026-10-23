@@ -11,6 +11,7 @@ Sixel_Error :: enum {
 
 Sixel_Info :: struct {
 	transparent: bool,
+	pixel_aspect_height: int,
 }
 
 Sixel_State :: struct {
@@ -23,12 +24,13 @@ Sixel_State :: struct {
 	width, height: int,
 	seen_raster: bool,
 	saw_data: bool,
+	pixel_aspect_height: int,
 }
 
 decode_sixel_dcs :: proc(data: []byte) -> (Decoded_Image, Sixel_Info, Sixel_Error) {
-	body, transparent, header_error := sixel_header(data)
+	body, transparent, pixel_aspect_height, header_error := sixel_header(data)
 	if header_error != .None do return {}, {}, header_error
-	measured := sixel_state_init()
+	measured := sixel_state_init(pixel_aspect_height)
 	if process_error := sixel_process(&measured, body); process_error != .None do return {}, {}, process_error
 	width := max(measured.raster_width, measured.max_x)
 	height := max(measured.raster_height, measured.max_y)
@@ -42,7 +44,7 @@ decode_sixel_dcs :: proc(data: []byte) -> (Decoded_Image, Sixel_Info, Sixel_Erro
 	if !transparent {
 		for offset := 0; offset < len(pixels); offset += 4 do pixels[offset+3] = 255
 	}
-	state := sixel_state_init()
+	state := sixel_state_init(pixel_aspect_height)
 	state.pixels = pixels
 	state.width = width
 	state.height = height
@@ -56,10 +58,13 @@ decode_sixel_dcs :: proc(data: []byte) -> (Decoded_Image, Sixel_Info, Sixel_Erro
 		stride = stride,
 		format = .RGBA8,
 		pixels = pixels,
-	}, Sixel_Info{transparent = transparent}, .None
+	}, Sixel_Info{
+		transparent = transparent,
+		pixel_aspect_height = state.pixel_aspect_height,
+	}, .None
 }
 
-sixel_header :: proc(data: []byte) -> (body: []byte, transparent: bool, err: Sixel_Error) {
+sixel_header :: proc(data: []byte) -> (body: []byte, transparent: bool, pixel_aspect_height: int, err: Sixel_Error) {
 	values := [3]int{}
 	value_index := 0
 	value := 0
@@ -69,28 +74,38 @@ sixel_header :: proc(data: []byte) -> (body: []byte, transparent: bool, err: Six
 		if character >= '0' && character <= '9' {
 			active = true
 			digit := int(character-'0')
-			if value > 100_000 do return nil, false, .Malformed
+			if value > 100_000 do return nil, false, 0, .Malformed
 			value = value*10+digit
 			continue
 		}
 		if character == ';' {
-			if value_index >= len(values) do return nil, false, .Malformed
+			if value_index >= len(values) do return nil, false, 0, .Malformed
 			values[value_index] = value if active else 0
 			value_index += 1
 			value = 0
 			active = false
 			continue
 		}
-		if character != 'q' || value_index >= len(values) do return nil, false, .Malformed
+		if character != 'q' || value_index >= len(values) do return nil, false, 0, .Malformed
 		values[value_index] = value if active else 0
-		if values[0] < 0 || values[0] > 9 || values[1] < 0 || values[1] > 2 do return nil, false, .Malformed
-		return data[index+1:], values[1] == 1, .None
+		if values[0] < 0 || values[0] > 9 || values[1] < 0 || values[1] > 2 do return nil, false, 0, .Malformed
+		return data[index+1:], values[1] == 1, sixel_header_aspect(values[0]), .None
 	}
-	return nil, false, .Malformed
+	return nil, false, 0, .Malformed
 }
 
-sixel_state_init :: proc() -> Sixel_State {
+sixel_header_aspect :: proc(value: int) -> int {
+	switch value {
+	case 2: return 5
+	case 3, 4: return 3
+	case 7, 8, 9: return 1
+	case: return 2
+	}
+}
+
+sixel_state_init :: proc(pixel_aspect_height: int) -> Sixel_State {
 	state: Sixel_State
+	state.pixel_aspect_height = pixel_aspect_height
 	defaults := [16][3]byte{
 		{0, 0, 0}, {0, 0, 205}, {205, 0, 0}, {205, 0, 205},
 		{0, 205, 0}, {0, 205, 205}, {205, 205, 0}, {229, 229, 229},
@@ -134,6 +149,8 @@ sixel_process :: proc(state: ^Sixel_State, data: []byte) -> Sixel_Error {
 			if state.seen_raster || state.saw_data do return .Malformed
 			values, count, next, ok := sixel_parameters(data, index+1, 4)
 			if !ok || (count != 2 && count != 4) || values[0] <= 0 || values[1] <= 0 do return .Malformed
+			state.pixel_aspect_height = max(1, (values[0]+values[1]/2)/values[1])
+			if state.pixel_aspect_height > MAX_IMAGE_DIMENSION do return .Limit
 			if count == 4 {
 				if values[2] <= 0 || values[3] <= 0 || values[2] > MAX_IMAGE_DIMENSION || values[3] > MAX_IMAGE_DIMENSION ||
 				   values[2] > MAX_IMAGE_PIXELS/values[3] {
