@@ -444,8 +444,42 @@ kitty_reply :: proc(terminal: ^Terminal, command: graphics.Kitty_Command, succes
 }
 
 handle_dcs :: proc(terminal: ^Terminal, data: []byte) {
-	if len(data) < 2 || data[0] != '+' || data[1] != 'q' do return
-	handle_xtgettcap(terminal, data[2:])
+	if len(data) >= 2 && data[0] == '+' && data[1] == 'q' {
+		handle_xtgettcap(terminal, data[2:])
+		return
+	}
+	image, _, sixel_error := graphics.decode_sixel_dcs(data)
+	if sixel_error != .None do return
+	image_id, image_error := graphics.add_image(&terminal.images, .Sixel, 0, &image)
+	if image_error != .None {
+		graphics.decoded_image_destroy(&image)
+		return
+	}
+	resource := graphics.find_image(&terminal.images, image_id)
+	if resource == nil {
+		_ = graphics.delete_image(&terminal.images, image_id)
+		return
+	}
+	columns := max(1, (resource.width+terminal.cell_width-1)/terminal.cell_width)
+	rows := max(1, (resource.height+terminal.cell_height-1)/terminal.cell_height)
+	screen := terminal_screen(terminal)
+	screen_kind := graphics.Screen.Alternate if terminal.using_alternate else graphics.Screen.Main
+	_, placement_error := graphics.add_placement(&terminal.images, {
+		image_id = image_id,
+		screen = screen_kind,
+		row = screen.cursor.row,
+		column = screen.cursor.column,
+		rows = rows,
+		columns = columns,
+		pixel_width = resource.width,
+		pixel_height = resource.height,
+	})
+	if placement_error != .None {
+		_ = graphics.delete_image(&terminal.images, image_id)
+		return
+	}
+	screen.cursor.column = 0
+	for _ in 0..<rows do line_feed(screen, terminal.attributes)
 }
 
 handle_xtgettcap :: proc(terminal: ^Terminal, query: []byte) {
@@ -534,8 +568,68 @@ handle_osc :: proc(terminal: ^Terminal, data: []byte) {
 	case "8": set_hyperlink(terminal, payload)
 	case "52": handle_osc52(terminal, payload)
 	case "133": handle_osc133(terminal, payload)
+	case "1337": handle_osc1337(terminal, payload)
 	case:
 	}
+}
+
+handle_osc1337 :: proc(terminal: ^Terminal, payload: []byte) {
+	prefix := "File="
+	if len(payload) < len(prefix) || string(payload[:len(prefix)]) != prefix do return
+	command, image, decode_error := graphics.decode_iterm2_inline(payload[len(prefix):])
+	if decode_error != .None do return
+	image_id, image_error := graphics.add_image(&terminal.images, .ITerm2, 0, &image)
+	if image_error != .None {
+		graphics.decoded_image_destroy(&image)
+		return
+	}
+	resource := graphics.find_image(&terminal.images, image_id)
+	if resource == nil {
+		_ = graphics.delete_image(&terminal.images, image_id)
+		return
+	}
+	screen := terminal_screen(terminal)
+	pixel_width := iterm2_pixels(command.width, resource.width, terminal.cell_width, screen.columns*terminal.cell_width)
+	pixel_height := iterm2_pixels(command.height, resource.height, terminal.cell_height, screen.rows*terminal.cell_height)
+	if command.width.kind == .Auto && command.height.kind != .Auto {
+		pixel_width = max(1, int(i64(pixel_height)*i64(resource.width)/i64(resource.height)))
+	} else if command.height.kind == .Auto && command.width.kind != .Auto {
+		pixel_height = max(1, int(i64(pixel_width)*i64(resource.height)/i64(resource.width)))
+	}
+	if pixel_width <= 0 || pixel_height <= 0 || pixel_width > graphics.MAX_PLACEMENT_PIXELS || pixel_height > graphics.MAX_PLACEMENT_PIXELS {
+		_ = graphics.delete_image(&terminal.images, image_id)
+		return
+	}
+	columns := max(1, (pixel_width+terminal.cell_width-1)/terminal.cell_width)
+	rows := max(1, (pixel_height+terminal.cell_height-1)/terminal.cell_height)
+	screen_kind := graphics.Screen.Alternate if terminal.using_alternate else graphics.Screen.Main
+	_, placement_error := graphics.add_placement(&terminal.images, {
+		image_id = image_id,
+		screen = screen_kind,
+		row = screen.cursor.row,
+		column = screen.cursor.column,
+		rows = rows,
+		columns = columns,
+		pixel_width = pixel_width,
+		pixel_height = pixel_height,
+		preserve_aspect = command.preserve_aspect,
+	})
+	if placement_error != .None {
+		_ = graphics.delete_image(&terminal.images, image_id)
+		return
+	}
+	screen.cursor.column = 0
+	for _ in 0..<rows do line_feed(screen, terminal.attributes)
+}
+
+iterm2_pixels :: proc(size: graphics.ITerm2_Size, natural, cell, viewport: int) -> int {
+	switch size.kind {
+	case .Auto: return natural
+	case .Cells: return size.value*cell
+	case .Pixels: return size.value
+	case .Percent: return max(1, viewport*size.value/100)
+	}
+	return natural
 }
 
 handle_osc133 :: proc(terminal: ^Terminal, payload: []byte) {
