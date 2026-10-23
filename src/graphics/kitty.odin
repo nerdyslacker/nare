@@ -3,12 +3,14 @@ package graphics
 import base64 "core:encoding/base64"
 import "core:strconv"
 import "core:strings"
+import "core:time"
 import zlib "vendor:zlib"
 
 MAX_KITTY_COMPRESSED_BYTES :: MAX_IMAGE_BYTES+(MAX_IMAGE_BYTES>>12)+(MAX_IMAGE_BYTES>>14)+(MAX_IMAGE_BYTES>>25)+13
 MAX_KITTY_ENCODED_BYTES :: ((MAX_KITTY_COMPRESSED_BYTES+2)/3)*4
 MAX_KITTY_CHUNKS :: 32_768
 MAX_KITTY_CHUNK_BYTES :: 4096
+KITTY_TRANSFER_TIMEOUT :: 10*time.Second
 
 Kitty_Action :: enum {
 	Transmit,
@@ -30,6 +32,13 @@ Kitty_Error :: enum {
 Kitty_Delete_Target :: enum {
 	Visible,
 	Image,
+	Cursor,
+	Cell,
+	Cell_Z,
+	ID_Range,
+	Column,
+	Row,
+	Z_Index,
 }
 
 Kitty_Command :: struct {
@@ -58,6 +67,7 @@ Kitty_Transfer :: struct {
 	encoded: [dynamic]byte,
 	encoded_limit: int,
 	chunk_count: int,
+	last_activity: time.Tick,
 }
 
 Kitty_Frame :: struct {
@@ -80,6 +90,20 @@ kitty_transfer_reset :: proc(transfer: ^Kitty_Transfer) {
 	transfer.command = {}
 	transfer.encoded_limit = 0
 	transfer.chunk_count = 0
+	transfer.last_activity = {}
+}
+
+kitty_transfer_expire :: proc(transfer: ^Kitty_Transfer, now: time.Tick) -> bool {
+	if !transfer.active || time.tick_diff(transfer.last_activity, now) < KITTY_TRANSFER_TIMEOUT do return false
+	kitty_transfer_reset(transfer)
+	return true
+}
+
+kitty_transfer_timeout_ms :: proc(transfer: ^Kitty_Transfer, now: time.Tick) -> int {
+	if !transfer.active do return -1
+	remaining := KITTY_TRANSFER_TIMEOUT-time.tick_diff(transfer.last_activity, now)
+	if remaining <= 0 do return 0
+	return max(1, int((remaining+time.Millisecond-time.Nanosecond)/time.Millisecond))
 }
 
 kitty_receive_direct :: proc(
@@ -114,6 +138,7 @@ kitty_receive_direct :: proc(
 			kitty_transfer_reset(transfer)
 			return command, {}, true, chunk_error
 		}
+		transfer.last_activity = time.tick_now()
 		if frame.command.more do return command, {}, false, .None
 		command.more = false
 		image, err = kitty_decode_payload(command, transfer.encoded[:])
@@ -130,6 +155,7 @@ kitty_receive_direct :: proc(
 		transfer.active = true
 		transfer.command = command
 		transfer.encoded_limit = encoded_limit
+		transfer.last_activity = time.tick_now()
 		if chunk_error := kitty_append_chunk(transfer, frame.payload, true); chunk_error != .None {
 			kitty_transfer_reset(transfer)
 			return command, {}, true, chunk_error
@@ -328,6 +354,34 @@ kitty_parse_direct_frame :: proc(data: []byte) -> (Kitty_Frame, Kitty_Error) {
 			case 'I':
 				command.delete_target = .Image
 				command.delete_data = true
+			case 'c': command.delete_target = .Cursor
+			case 'C':
+				command.delete_target = .Cursor
+				command.delete_data = true
+			case 'p': command.delete_target = .Cell
+			case 'P':
+				command.delete_target = .Cell
+				command.delete_data = true
+			case 'q': command.delete_target = .Cell_Z
+			case 'Q':
+				command.delete_target = .Cell_Z
+				command.delete_data = true
+			case 'r': command.delete_target = .ID_Range
+			case 'R':
+				command.delete_target = .ID_Range
+				command.delete_data = true
+			case 'x': command.delete_target = .Column
+			case 'X':
+				command.delete_target = .Column
+				command.delete_data = true
+			case 'y': command.delete_target = .Row
+			case 'Y':
+				command.delete_target = .Row
+				command.delete_data = true
+			case 'z': command.delete_target = .Z_Index
+			case 'Z':
+				command.delete_target = .Z_Index
+				command.delete_data = true
 			case: unsupported = true
 			}
 		case: unsupported = true
@@ -344,13 +398,36 @@ kitty_parse_direct_frame :: proc(data: []byte) -> (Kitty_Frame, Kitty_Error) {
 		}
 	} else if command.action == .Delete {
 		if len(payload) != 0 || seen_format || seen_width || seen_height || seen_medium ||
-		   seen_compression || seen_more || seen_columns || seen_rows || seen_source_x ||
-		   seen_source_y || seen_source_width || seen_source_height || seen_destination_x ||
-		   seen_destination_y || seen_z || seen_cursor_policy {
+		   seen_compression || seen_more || seen_columns || seen_rows || seen_source_width ||
+		   seen_source_height || seen_destination_x || seen_destination_y || seen_cursor_policy {
 			return Kitty_Frame{command = command}, .Malformed
 		}
-		if command.delete_target == .Image && command.image_id == 0 do return Kitty_Frame{command = command}, .Malformed
-		if command.delete_target == .Visible && seen_placement do return Kitty_Frame{command = command}, .Malformed
+		switch command.delete_target {
+		case .Visible, .Cursor:
+			if seen_id || seen_placement || seen_source_x || seen_source_y || seen_z do return Kitty_Frame{command = command}, .Malformed
+		case .Image:
+			if command.image_id == 0 || seen_source_x || seen_source_y || seen_z do return Kitty_Frame{command = command}, .Malformed
+		case .Cell:
+			if seen_id || seen_placement || !seen_source_x || !seen_source_y || command.source_x == 0 || command.source_y == 0 || seen_z {
+				return Kitty_Frame{command = command}, .Malformed
+			}
+		case .Cell_Z:
+			if seen_id || seen_placement || !seen_source_x || !seen_source_y || command.source_x == 0 || command.source_y == 0 || !seen_z {
+				return Kitty_Frame{command = command}, .Malformed
+			}
+		case .ID_Range:
+			if seen_id || seen_placement || !seen_source_x || !seen_source_y || command.source_x == 0 ||
+			   command.source_y == 0 || command.source_x > command.source_y ||
+			   u64(command.source_y) > u64(max(u32)) || seen_z {
+				return Kitty_Frame{command = command}, .Malformed
+			}
+		case .Column:
+			if seen_id || seen_placement || !seen_source_x || command.source_x == 0 || seen_source_y || seen_z do return Kitty_Frame{command = command}, .Malformed
+		case .Row:
+			if seen_id || seen_placement || seen_source_x || !seen_source_y || command.source_y == 0 || seen_z do return Kitty_Frame{command = command}, .Malformed
+		case .Z_Index:
+			if seen_id || seen_placement || seen_source_x || seen_source_y || !seen_z do return Kitty_Frame{command = command}, .Malformed
+		}
 	}
 	frame.command = command
 	frame.payload = payload

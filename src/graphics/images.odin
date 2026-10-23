@@ -24,6 +24,14 @@ Screen :: enum {
 	Alternate,
 }
 
+Placement_Delete_Target :: enum {
+	Cell,
+	Cell_Z,
+	Column,
+	Row,
+	Z_Index,
+}
+
 Error :: enum {
 	None,
 	Invalid_Limit,
@@ -289,6 +297,61 @@ delete_visible_placements :: proc(registry: ^Registry, screen: Screen, top, bott
 		if delete_data && affected && registry.resources[resource_index].placement_count == 0 {
 			delete_resource_at(registry, resource_index)
 		}
+	}
+}
+
+delete_matching_placements :: proc(
+	registry: ^Registry,
+	screen: Screen,
+	target: Placement_Delete_Target,
+	row, column: int,
+	z: i32,
+	delete_data: bool,
+) {
+	for resource_index := len(registry.resources)-1; resource_index >= 0; resource_index -= 1 {
+		resource_id := registry.resources[resource_index].id
+		affected := false
+		for placement_index := len(registry.placements)-1; placement_index >= 0; placement_index -= 1 {
+			placement := registry.placements[placement_index]
+			if placement.image_id != resource_id || placement.screen != screen do continue
+			matches := false
+			switch target {
+			case .Cell, .Cell_Z:
+				matches = row >= placement.row && row < placement.row+placement.rows &&
+				          column >= placement.column && column < placement.column+placement.columns
+				if target == .Cell_Z do matches = matches && placement.z == z
+			case .Column:
+				matches = column >= placement.column && column < placement.column+placement.columns
+			case .Row:
+				matches = row >= placement.row && row < placement.row+placement.rows
+			case .Z_Index:
+				matches = placement.z == z
+			}
+			if !matches do continue
+			remove_placement_at(registry, placement_index)
+			affected = true
+		}
+		if delete_data && affected && registry.resources[resource_index].placement_count == 0 {
+			delete_resource_at(registry, resource_index)
+		}
+	}
+}
+
+delete_protocol_range :: proc(
+	registry: ^Registry,
+	protocol: Protocol,
+	first, last: u32,
+	delete_data: bool,
+) {
+	for resource_index := len(registry.resources)-1; resource_index >= 0; resource_index -= 1 {
+		resource := registry.resources[resource_index]
+		if resource.protocol != protocol || resource.protocol_id < first || resource.protocol_id > last do continue
+		for placement_index := len(registry.placements)-1; placement_index >= 0; placement_index -= 1 {
+			if registry.placements[placement_index].image_id == resource.id {
+				remove_placement_at(registry, placement_index)
+			}
+		}
+		if delete_data do delete_resource_at(registry, resource_index)
 	}
 }
 

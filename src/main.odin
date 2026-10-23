@@ -374,11 +374,14 @@ run :: proc(
 			{fd = posix.FD(x11.connection_fd(window)), events = {.IN}},
 			{fd = process.master, events = pty_events},
 		}
-		if posix.poll(&fds[0], len(fds), -1) < 0 {
+		_ = vt.terminal_expire_kitty_transfer(terminal)
+		poll_timeout := vt.terminal_kitty_timeout_ms(terminal)
+		if posix.poll(&fds[0], len(fds), i32(poll_timeout)) < 0 {
 			if posix.errno() == .EINTR do continue
 			fmt.eprintln("poll failed")
 			return 1
 		}
+		_ = vt.terminal_expire_kitty_transfer(terminal)
 
 		if .IN in fds[1].revents || .HUP in fds[1].revents {
 			if !drain_pty(window, process, terminal, renderer, &selection_state, &search_state, &url_state, &shell_state, &osc52_request, base_title) do running = false

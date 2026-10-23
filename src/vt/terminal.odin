@@ -5,6 +5,7 @@ import base64 "core:encoding/base64"
 import "core:net"
 import "core:strconv"
 import "core:strings"
+import "core:time"
 import "core:unicode"
 import "core:unicode/utf8"
 import graphics "../graphics"
@@ -244,7 +245,8 @@ handle_apc :: proc(terminal: ^Terminal, data: []byte, discarded: bool = false) {
 	if command.action == .Delete {
 		screen := terminal_screen(terminal)
 		screen_kind := graphics.Screen.Alternate if terminal.using_alternate else graphics.Screen.Main
-		if command.delete_target == .Image {
+		switch command.delete_target {
+		case .Image:
 			_ = graphics.delete_protocol_image(
 				&terminal.images,
 				.Kitty,
@@ -252,7 +254,7 @@ handle_apc :: proc(terminal: ^Terminal, data: []byte, discarded: bool = false) {
 				command.placement_id,
 				command.delete_data,
 			)
-		} else {
+		case .Visible:
 			graphics.delete_visible_placements(
 				&terminal.images,
 				screen_kind,
@@ -260,6 +262,20 @@ handle_apc :: proc(terminal: ^Terminal, data: []byte, discarded: bool = false) {
 				screen.rows-1,
 				command.delete_data,
 			)
+		case .Cursor:
+			graphics.delete_matching_placements(&terminal.images, screen_kind, .Cell, screen.cursor.row, screen.cursor.column, 0, command.delete_data)
+		case .Cell:
+			graphics.delete_matching_placements(&terminal.images, screen_kind, .Cell, command.source_y-1, command.source_x-1, 0, command.delete_data)
+		case .Cell_Z:
+			graphics.delete_matching_placements(&terminal.images, screen_kind, .Cell_Z, command.source_y-1, command.source_x-1, command.z, command.delete_data)
+		case .ID_Range:
+			graphics.delete_protocol_range(&terminal.images, .Kitty, u32(command.source_x), u32(command.source_y), command.delete_data)
+		case .Column:
+			graphics.delete_matching_placements(&terminal.images, screen_kind, .Column, 0, command.source_x-1, 0, command.delete_data)
+		case .Row:
+			graphics.delete_matching_placements(&terminal.images, screen_kind, .Row, command.source_y-1, 0, 0, command.delete_data)
+		case .Z_Index:
+			graphics.delete_matching_placements(&terminal.images, screen_kind, .Z_Index, 0, 0, command.z, command.delete_data)
 		}
 		kitty_reply(terminal, command, true, "")
 		return
@@ -300,6 +316,14 @@ handle_apc :: proc(terminal: ^Terminal, data: []byte, discarded: bool = false) {
 		}
 	}
 	kitty_reply(terminal, command, true, "")
+}
+
+terminal_expire_kitty_transfer :: proc(terminal: ^Terminal) -> bool {
+	return graphics.kitty_transfer_expire(&terminal.kitty_transfer, time.tick_now())
+}
+
+terminal_kitty_timeout_ms :: proc(terminal: ^Terminal) -> int {
+	return graphics.kitty_transfer_timeout_ms(&terminal.kitty_transfer, time.tick_now())
 }
 
 kitty_place_image :: proc(terminal: ^Terminal, command: graphics.Kitty_Command, image_id: u64) -> string {
