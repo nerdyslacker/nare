@@ -259,6 +259,23 @@ cell_at :: proc(screen: ^Screen, row, column: int) -> ^Cell {
 	return &screen.cells[row * screen.columns + column]
 }
 
+screen_source_row_count :: proc(screen: ^Screen) -> int {
+	return len(screen.scrollback) + screen.rows
+}
+
+screen_source_row :: proc(screen: ^Screen, row: int) -> []Cell {
+	if row < 0 || row >= screen_source_row_count(screen) do return nil
+	if row < len(screen.scrollback) do return screen.scrollback[row]
+	visible_row := row-len(screen.scrollback)
+	return screen.cells[visible_row*screen.columns:(visible_row+1)*screen.columns]
+}
+
+screen_source_wrapped :: proc(screen: ^Screen, row: int) -> bool {
+	if row < 0 || row >= screen_source_row_count(screen) do return false
+	if row < len(screen.scrollback) do return screen.scrollback_wrapped[row]
+	return screen.wrapped[row-len(screen.scrollback)]
+}
+
 screen_position :: proc(screen: ^Screen, row, column: int) -> Cursor {
 	position := Cursor{
 		row = clamp(row, 0, screen.rows-1),

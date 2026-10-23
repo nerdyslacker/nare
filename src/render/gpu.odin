@@ -185,17 +185,19 @@ gpu_draw :: proc(
 	ligatures: bool,
 	force: bool,
 	selection_state: ^selection.State = nil,
+	screen_override: ^vt.Screen = nil,
 ) -> bool {
 	when !GPU_ENABLED {
 		return false
 	} else {
 		if gpu.ctx == nil || gpu.width != damage.width || gpu.height != damage.height do return false
-		if !damage_rows(damage, terminal, force) do return true
+		screen := screen_override
+		if screen == nil do screen = vt.terminal_screen(terminal)
+		if !damage_rows(damage, terminal, screen, force) do return true
 		if MakeCurrent(window.display, xlib.XID(window.id), gpu.ctx) == false do return false
 		BindFramebuffer(GL_FRAMEBUFFER, gpu.framebuffer)
 		Viewport(0, 0, i32(gpu.width), i32(gpu.height))
 		Enable(GL_SCISSOR_TEST)
-		screen := vt.terminal_screen(terminal)
 		for dirty, row in damage.dirty_rows {
 			if !dirty do continue
 			y := row * window.cell_h

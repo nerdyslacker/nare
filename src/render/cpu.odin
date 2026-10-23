@@ -78,19 +78,20 @@ cpu_render :: proc(
 	ligatures: bool,
 	force: bool,
 	selection_state: ^selection.State = nil,
+	screen_override: ^vt.Screen = nil,
 ) -> bool {
 	if cpu.image == nil do return false
-	if !damage_rows(cpu, terminal, force) do return false
-	screen := vt.terminal_screen(terminal)
+	screen := screen_override
+	if screen == nil do screen = vt.terminal_screen(terminal)
+	if !damage_rows(cpu, terminal, screen, force) do return false
 	for dirty, row in cpu.dirty_rows {
 		if dirty do render_row(cpu, font, window, terminal, screen, row, ligatures, selection_state)
 	}
 	return true
 }
 
-damage_rows :: proc(cpu: ^CPU, terminal: ^vt.Terminal, force: bool) -> bool {
+damage_rows :: proc(cpu: ^CPU, terminal: ^vt.Terminal, screen: ^vt.Screen, force: bool) -> bool {
 	if cpu.image == nil do return false
-	screen := vt.terminal_screen(terminal)
 	full_redraw := force
 	if len(cpu.previous) != len(screen.cells) {
 		delete(cpu.previous)
@@ -161,9 +162,11 @@ cpu_draw :: proc(
 	ligatures: bool,
 	force: bool,
 	selection_state: ^selection.State = nil,
+	screen_override: ^vt.Screen = nil,
 ) {
-	if !cpu_render(cpu, font, window, terminal, ligatures, force, selection_state) do return
-	screen := vt.terminal_screen(terminal)
+	if !cpu_render(cpu, font, window, terminal, ligatures, force, selection_state, screen_override) do return
+	screen := screen_override
+	if screen == nil do screen = vt.terminal_screen(terminal)
 	cpu_present(cpu, window, screen.columns)
 }
 

@@ -1,5 +1,6 @@
 package x11
 
+import "core:strings"
 import keyboard "../input"
 import xlib "vendor:x11/xlib"
 
@@ -139,6 +140,13 @@ grid_size :: proc(window: ^Window) -> (columns, rows: int) {
 set_cell_size :: proc(window: ^Window, width, height: int) {
 	window.cell_w = max(1, width)
 	window.cell_h = max(1, height)
+}
+
+set_title :: proc(window: ^Window, title: string) {
+	owned := strings.clone_to_cstring(title)
+	defer delete(owned)
+	xlib.StoreName(window.display, window.id, owned)
+	_ = xlib.Flush(window.display)
 }
 
 next_event :: proc(window: ^Window) -> (result: Event, available: bool) {

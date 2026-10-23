@@ -4,6 +4,7 @@ import "core:fmt"
 import "core:os"
 import "core:strings"
 import "core:sys/posix"
+import search "features"
 import keyboard "input"
 import pty "pty"
 import drawing "render"
@@ -123,6 +124,8 @@ run :: proc(window: ^x11.Window, process: ^pty.Process, terminal: ^vt.Terminal, 
 	defer delete(pending)
 	pending_offset := 0
 	selection_state: selection.State
+	search_state: search.State
+	defer search.destroy(&search_state)
 	running := true
 	close_requested := false
 
@@ -136,7 +139,7 @@ run :: proc(window: ^x11.Window, process: ^pty.Process, terminal: ^vt.Terminal, 
 				close_requested = true
 				running = false
 			case .Redraw:
-				drawing.draw(renderer, window, terminal, true, &selection_state)
+				redraw(renderer, window, terminal, &selection_state, &search_state, true)
 			case .Resize:
 				selection.clear(&selection_state)
 				columns, rows := x11.grid_size(window)
@@ -146,9 +149,21 @@ run :: proc(window: ^x11.Window, process: ^pty.Process, terminal: ^vt.Terminal, 
 					fmt.eprintln("could not resize PTY")
 					running = false
 				} else {
-					drawing.draw(renderer, window, terminal, true, &selection_state)
+					if search_state.active do search.refresh(&search_state, vt.terminal_screen(terminal))
+					redraw(renderer, window, terminal, &selection_state, &search_state, true)
 				}
 			case .Input:
+				if search_shortcut(event) {
+					selection.clear(&selection_state)
+					search.open(&search_state, vt.terminal_screen(terminal))
+					update_search_title(window, &search_state)
+					redraw(renderer, window, terminal, &selection_state, &search_state, true)
+					continue
+				}
+				if search_state.active {
+					handle_search_input(window, terminal, renderer, &selection_state, &search_state, event)
+					continue
+				}
 				if copy_shortcut(event) {
 					copy_selection(window, terminal, &selection_state, .Clipboard)
 					continue
@@ -175,6 +190,10 @@ run :: proc(window: ^x11.Window, process: ^pty.Process, terminal: ^vt.Terminal, 
 					queue_input(&pending, pending_offset, transmute([]byte)sequence)
 				}
 			case .Mouse:
+				if search_state.active {
+					search.close(&search_state)
+					x11.set_title(window, "nare")
+				}
 				if terminal.modes.mouse_tracking == 0 || .Shift in event.mouse.modifiers {
 					handle_selection_mouse(window, terminal, renderer, &selection_state, event.mouse)
 				} else {
@@ -213,7 +232,7 @@ run :: proc(window: ^x11.Window, process: ^pty.Process, terminal: ^vt.Terminal, 
 		}
 
 		if .IN in fds[1].revents || .HUP in fds[1].revents {
-			if !drain_pty(window, process, terminal, renderer, &selection_state) do running = false
+			if !drain_pty(window, process, terminal, renderer, &selection_state, &search_state) do running = false
 			replies := vt.terminal_take_replies(terminal)
 			queue_input(&pending, pending_offset, replies)
 			vt.terminal_consume_replies(terminal, len(replies))
@@ -239,6 +258,66 @@ run :: proc(window: ^x11.Window, process: ^pty.Process, terminal: ^vt.Terminal, 
 	pty.shutdown(process)
 	if close_requested do return 0
 	return pty.exit_code(process)
+}
+
+search_shortcut :: proc(event: x11.Event) -> bool {
+	if event.key != .Text || .Control not_in event.modifiers || .Shift not_in event.modifiers do return false
+	return event.input_size == 1 && (event.input[0] == 0x06 || event.input[0] == 'f' || event.input[0] == 'F')
+}
+
+handle_search_input :: proc(
+	window: ^x11.Window,
+	terminal: ^vt.Terminal,
+	renderer: ^drawing.Renderer,
+	selection_state: ^selection.State,
+	state: ^search.State,
+	event: x11.Event,
+) {
+	screen := vt.terminal_screen(terminal)
+	#partial switch event.key {
+	case .Escape:
+		search.close(state)
+		x11.set_title(window, "nare")
+	case .Enter:
+		if .Shift in event.modifiers {
+			search.previous(state, screen)
+		} else {
+			search.next(state, screen)
+		}
+	case .Backspace:
+		search.backspace(state, screen)
+	case .Text:
+		input := event.input
+		data := input[:event.input_size]
+		if len(data) > 0 && (data[0] >= 0x20 && data[0] != 0x7f) do search.append_query(state, screen, data)
+	case:
+	}
+	update_search_title(window, state)
+	redraw(renderer, window, terminal, selection_state, state, true)
+}
+
+update_search_title :: proc(window: ^x11.Window, state: ^search.State) {
+	if !state.active do return
+	match_index := 0
+	if len(state.matches) > 0 do match_index = state.current+1
+	title := fmt.aprintf("nare - search: %s (%d/%d)", search.query_text(state), match_index, len(state.matches))
+	defer delete(title)
+	x11.set_title(window, title)
+}
+
+redraw :: proc(
+	renderer: ^drawing.Renderer,
+	window: ^x11.Window,
+	terminal: ^vt.Terminal,
+	selection_state: ^selection.State,
+	search_state: ^search.State,
+	force: bool,
+) {
+	if search_state.active {
+		drawing.draw(renderer, window, terminal, force, &search_state.highlight, search.view_screen(search_state))
+	} else {
+		drawing.draw(renderer, window, terminal, force, selection_state)
+	}
 }
 
 copy_shortcut :: proc(event: x11.Event) -> bool {
@@ -293,6 +372,7 @@ drain_pty :: proc(
 	terminal: ^vt.Terminal,
 	renderer: ^drawing.Renderer,
 	selection_state: ^selection.State,
+	search_state: ^search.State,
 ) -> bool {
 	buffer: [16 * 1024]byte
 	dirty := false
@@ -304,13 +384,31 @@ drain_pty :: proc(
 			vt.terminal_feed(terminal, buffer[:count])
 			dirty = true
 		case .Would_Block:
-			if dirty do drawing.draw(renderer, window, terminal, false, selection_state)
+			if dirty {
+				if search_state.active {
+					search.refresh(search_state, vt.terminal_screen(terminal))
+					update_search_title(window, search_state)
+				}
+				redraw(renderer, window, terminal, selection_state, search_state, search_state.active)
+			}
 			return true
 		case .End:
-			if dirty do drawing.draw(renderer, window, terminal, false, selection_state)
+			if dirty {
+				if search_state.active {
+					search.refresh(search_state, vt.terminal_screen(terminal))
+					update_search_title(window, search_state)
+				}
+				redraw(renderer, window, terminal, selection_state, search_state, search_state.active)
+			}
 			return false
 		case .Failed:
-			if dirty do drawing.draw(renderer, window, terminal, false, selection_state)
+			if dirty {
+				if search_state.active {
+					search.refresh(search_state, vt.terminal_screen(terminal))
+					update_search_title(window, search_state)
+				}
+				redraw(renderer, window, terminal, selection_state, search_state, search_state.active)
+			}
 			fmt.eprintln("PTY read failed")
 			return false
 		}
