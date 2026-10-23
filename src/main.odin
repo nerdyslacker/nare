@@ -12,7 +12,7 @@ import selection "selection"
 import vt "vt"
 import x11 "x11"
 
-MAX_PENDING_INPUT :: 256 * 1024
+MAX_PENDING_INPUT :: x11.MAX_SELECTION_BYTES + 64 * 1024
 
 Options :: struct {
 	renderer: drawing.Kind,

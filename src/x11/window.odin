@@ -6,11 +6,28 @@ import xlib "vendor:x11/xlib"
 
 DEFAULT_WIDTH  :: 800
 DEFAULT_HEIGHT :: 480
-MAX_SELECTION_BYTES :: 64 * 1024
+DIRECT_SELECTION_BYTES :: 32 * 1024
+SELECTION_CHUNK_BYTES :: 32 * 1024
+MAX_SELECTION_BYTES :: 16 * 1024 * 1024
+MAX_OUTGOING_TRANSFERS :: 4
 
 Error :: enum { None, Open_Display, Create_Window, Create_Renderer, WM_Protocol, Selection_Atoms }
 Event_Kind :: enum { None, Close, Redraw, Resize, Focus, Input, Mouse, Paste }
 Selection_Kind :: enum { Primary, Clipboard }
+
+Outgoing_Selection :: struct {
+	requestor: xlib.Window,
+	property: xlib.Atom,
+	target: xlib.Atom,
+	data: [dynamic]byte,
+	offset: int,
+}
+
+Incoming_Selection :: struct {
+	active: bool,
+	property: xlib.Atom,
+	target: xlib.Atom,
+}
 
 Event :: struct {
 	kind:       Event_Kind,
@@ -46,10 +63,13 @@ Window :: struct {
 	string_atom: xlib.Atom,
 	targets_atom: xlib.Atom,
 	atom_atom: xlib.Atom,
+	incr_atom: xlib.Atom,
 	selection_property: xlib.Atom,
 	primary_data: [dynamic]byte,
 	clipboard_data: [dynamic]byte,
 	paste_data: [dynamic]byte,
+	outgoing_selections: [dynamic]Outgoing_Selection,
+	incoming_selection: Incoming_Selection,
 }
 
 open :: proc(title: cstring = "nare") -> (window: Window, err: Error) {
@@ -109,9 +129,10 @@ open :: proc(title: cstring = "nare") -> (window: Window, err: Error) {
 	window.string_atom = xlib.InternAtom(display, "STRING", false)
 	window.targets_atom = xlib.InternAtom(display, "TARGETS", false)
 	window.atom_atom = xlib.InternAtom(display, "ATOM", false)
+	window.incr_atom = xlib.InternAtom(display, "INCR", false)
 	window.selection_property = xlib.InternAtom(display, "NARE_SELECTION", false)
 	if window.primary_atom == 0 || window.clipboard_atom == 0 || window.utf8_atom == 0 ||
-	   window.string_atom == 0 || window.targets_atom == 0 || window.atom_atom == 0 ||
+	   window.string_atom == 0 || window.targets_atom == 0 || window.atom_atom == 0 || window.incr_atom == 0 ||
 	   window.selection_property == 0 {
 		close(&window)
 		return window, .Selection_Atoms
@@ -205,13 +226,19 @@ next_event :: proc(window: ^Window) -> (result: Event, available: bool) {
 		if event.xselectionclear.selection == window.clipboard_atom do clear(&window.clipboard_data)
 	case .SelectionNotify:
 		if receive_selection(window, &event.xselection) do result.kind = .Paste
+	case .PropertyNotify:
+		if event.xproperty.state == .PropertyDelete {
+			send_selection_chunk(window, &event.xproperty)
+		} else if receive_selection_chunk(window, &event.xproperty) {
+			result.kind = .Paste
+		}
 	case:
 	}
 	return result, true
 }
 
 base_event_mask :: proc() -> xlib.EventMask {
-	return {.KeyPress, .ButtonPress, .ButtonRelease, .ButtonMotion, .Exposure, .StructureNotify, .FocusChange}
+	return {.KeyPress, .ButtonPress, .ButtonRelease, .ButtonMotion, .Exposure, .StructureNotify, .FocusChange, .PropertyChange}
 }
 
 own_selection :: proc(window: ^Window, kind: Selection_Kind, data: []byte) -> bool {
@@ -227,6 +254,8 @@ own_selection :: proc(window: ^Window, kind: Selection_Kind, data: []byte) -> bo
 
 request_selection :: proc(window: ^Window, kind: Selection_Kind) {
 	clear(&window.paste_data)
+	window.incoming_selection = {}
+	_ = xlib.DeleteProperty(window.display, window.id, window.selection_property)
 	atom := window.primary_atom if kind == .Primary else window.clipboard_atom
 	xlib.ConvertSelection(
 		window.display,
@@ -284,17 +313,32 @@ handle_selection_request :: proc(window: ^Window, request: ^xlib.XSelectionReque
 		)
 		reply.xselection.property = property
 	} else if request.target == window.utf8_atom || request.target == window.string_atom {
-		_ = xlib.ChangeProperty(
-			window.display,
-			request.requestor,
-			property,
-			request.target,
-			8,
-			xlib.PropModeReplace,
-			raw_data(data),
-			i32(len(data)),
-		)
-		reply.xselection.property = property
+		if len(data) <= DIRECT_SELECTION_BYTES {
+			_ = xlib.ChangeProperty(
+				window.display,
+				request.requestor,
+				property,
+				request.target,
+				8,
+				xlib.PropModeReplace,
+				raw_data(data),
+				i32(len(data)),
+			)
+			reply.xselection.property = property
+		} else if begin_outgoing_selection(window, request.requestor, property, request.target, data) {
+			total_bytes := [1]uint{uint(len(data))}
+			_ = xlib.ChangeProperty(
+				window.display,
+				request.requestor,
+				property,
+				window.incr_atom,
+				32,
+				xlib.PropModeReplace,
+				raw_data(total_bytes[:]),
+				1,
+			)
+			reply.xselection.property = property
+		}
 	}
 	_ = xlib.SendEvent(window.display, request.requestor, false, {}, &reply)
 	_ = xlib.Flush(window.display)
@@ -323,12 +367,134 @@ receive_selection :: proc(window: ^Window, event: ^xlib.XSelectionEvent) -> bool
 		&property,
 	)
 	defer if property != nil do xlib.Free(property)
-	if status != 0 || property == nil || actual_format != 8 || bytes_after != 0 do return false
+	if status != 0 || bytes_after != 0 || (property == nil && item_count > 0) do return false
+	if actual_type == window.incr_atom {
+		if actual_format != 32 || item_count > 1 do return false
+		expected := 0
+		if item_count == 1 do expected = int(([^]uint)(property)[0])
+		if expected < 0 || expected > MAX_SELECTION_BYTES do return false
+		clear(&window.paste_data)
+		window.incoming_selection = {
+			active = true,
+			property = event.property,
+			target = event.target,
+		}
+		return false
+	}
+	if actual_format != 8 do return false
 	if actual_type != window.utf8_atom && actual_type != window.string_atom do return false
 	if item_count > MAX_SELECTION_BYTES do return false
 	clear(&window.paste_data)
-	append(&window.paste_data, ..(([^]byte)(property))[:int(item_count)])
+	if item_count > 0 do append(&window.paste_data, ..(([^]byte)(property))[:int(item_count)])
 	return true
+}
+
+begin_outgoing_selection :: proc(
+	window: ^Window,
+	requestor: xlib.Window,
+	property, target: xlib.Atom,
+	data: []byte,
+) -> bool {
+	if len(window.outgoing_selections) >= MAX_OUTGOING_TRANSFERS do return false
+	for &transfer in window.outgoing_selections {
+		if transfer.requestor == requestor && transfer.property == property do return false
+	}
+	transfer := Outgoing_Selection{requestor = requestor, property = property, target = target}
+	append(&transfer.data, ..data)
+	append(&window.outgoing_selections, transfer)
+	xlib.SelectInput(window.display, requestor, {.PropertyChange})
+	return true
+}
+
+send_selection_chunk :: proc(window: ^Window, event: ^xlib.XPropertyEvent) {
+	for index := 0; index < len(window.outgoing_selections); index += 1 {
+		transfer := &window.outgoing_selections[index]
+		if transfer.requestor != event.window || transfer.property != event.atom do continue
+		chunk_size := selection_chunk_size(len(transfer.data), transfer.offset)
+		chunk := transfer.data[transfer.offset:transfer.offset+chunk_size]
+		chunk_data: rawptr
+		if chunk_size > 0 do chunk_data = raw_data(chunk)
+		_ = xlib.ChangeProperty(
+			window.display,
+			transfer.requestor,
+			transfer.property,
+			transfer.target,
+			8,
+			xlib.PropModeReplace,
+			chunk_data,
+			i32(chunk_size),
+		)
+		transfer.offset += chunk_size
+		if chunk_size == 0 do remove_outgoing_selection(window, index)
+		_ = xlib.Flush(window.display)
+		return
+	}
+}
+
+remove_outgoing_selection :: proc(window: ^Window, index: int) {
+	delete(window.outgoing_selections[index].data)
+	ordered_remove(&window.outgoing_selections, index)
+}
+
+receive_selection_chunk :: proc(window: ^Window, event: ^xlib.XPropertyEvent) -> bool {
+	transfer := &window.incoming_selection
+	if !transfer.active || event.window != window.id || event.atom != transfer.property do return false
+	actual_type: xlib.Atom
+	actual_format: i32
+	item_count, bytes_after: uint
+	property: rawptr
+	status := xlib.GetWindowProperty(
+		window.display,
+		window.id,
+		transfer.property,
+		0,
+		MAX_SELECTION_BYTES/4,
+		true,
+		xlib.Atom(xlib.AnyPropertyType),
+		&actual_type,
+		&actual_format,
+		&item_count,
+		&bytes_after,
+		&property,
+	)
+	defer if property != nil do xlib.Free(property)
+	if status != 0 || (property == nil && item_count > 0) || actual_format != 8 || bytes_after != 0 || actual_type != transfer.target {
+		cancel_incoming_selection(window)
+		return false
+	}
+	if item_count == 0 {
+		transfer.active = false
+		return true
+	}
+	chunk := (([^]byte)(property))[:int(item_count)]
+	if !append_selection_chunk(&window.paste_data, chunk) {
+		cancel_incoming_selection(window)
+		return false
+	}
+	return false
+}
+
+selection_chunk_size :: proc(total_bytes, offset: int) -> int {
+	return min(SELECTION_CHUNK_BYTES, max(0, total_bytes-offset))
+}
+
+append_selection_chunk :: proc(output: ^[dynamic]byte, chunk: []byte) -> bool {
+	if !selection_chunk_fits(len(output^), len(chunk)) do return false
+	append(output, ..chunk)
+	return true
+}
+
+selection_chunk_fits :: proc(current_bytes, chunk_bytes: int) -> bool {
+	return current_bytes >= 0 && current_bytes <= MAX_SELECTION_BYTES &&
+	       chunk_bytes >= 0 && chunk_bytes <= MAX_SELECTION_BYTES-current_bytes
+}
+
+cancel_incoming_selection :: proc(window: ^Window) {
+	if window.incoming_selection.property != 0 {
+		_ = xlib.DeleteProperty(window.display, window.id, window.incoming_selection.property)
+	}
+	window.incoming_selection = {}
+	clear(&window.paste_data)
 }
 
 set_mouse_tracking :: proc(window: ^Window, tracking: int) {
@@ -395,6 +561,8 @@ close :: proc(window: ^Window) {
 	delete(window.primary_data)
 	delete(window.clipboard_data)
 	delete(window.paste_data)
+	for &transfer in window.outgoing_selections do delete(transfer.data)
+	delete(window.outgoing_selections)
 	if window.gc != nil do xlib.FreeGC(window.display, window.gc)
 	if window.id != 0 do xlib.DestroyWindow(window.display, window.id)
 	xlib.CloseDisplay(window.display)
