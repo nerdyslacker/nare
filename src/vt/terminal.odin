@@ -233,17 +233,50 @@ handle_apc :: proc(terminal: ^Terminal, data: []byte, discarded: bool = false) {
 		kitty_reply(terminal, command, false, kitty_error_text(decode_error))
 		return
 	}
+	if command.action == .Delete {
+		screen := terminal_screen(terminal)
+		screen_kind := graphics.Screen.Alternate if terminal.using_alternate else graphics.Screen.Main
+		if command.delete_target == .Image {
+			_ = graphics.delete_protocol_image(
+				&terminal.images,
+				.Kitty,
+				command.image_id,
+				command.placement_id,
+				command.delete_data,
+			)
+		} else {
+			graphics.delete_visible_placements(
+				&terminal.images,
+				screen_kind,
+				0,
+				screen.rows-1,
+				command.delete_data,
+			)
+		}
+		kitty_reply(terminal, command, true, "")
+		return
+	}
+	if command.action == .Display {
+		resource := graphics.find_protocol_image(&terminal.images, .Kitty, command.image_id)
+		if resource == nil {
+			kitty_reply(terminal, command, false, "ENOENT")
+			return
+		}
+		if placement_error := kitty_place_image(terminal, command, resource.id); placement_error != "" {
+			kitty_reply(terminal, command, false, placement_error)
+			return
+		}
+		kitty_reply(terminal, command, true, "")
+		return
+	}
 	if command.action == .Query {
 		graphics.decoded_image_destroy(&image)
 		kitty_reply(terminal, command, true, "")
 		return
 	}
-	if command.action == .Transmit_And_Display {
-		if command.columns <= 0 || command.rows <= 0 {
-			graphics.decoded_image_destroy(&image)
-			kitty_reply(terminal, command, false, "ENOTSUP")
-			return
-		}
+	if command.image_id != 0 {
+		existing := graphics.find_protocol_image(&terminal.images, .Kitty, command.image_id)
+		if existing != nil do _ = graphics.delete_image(&terminal.images, existing.id)
 	}
 	image_id, image_error := graphics.add_image(&terminal.images, .Kitty, command.image_id, &image)
 	if image_error != .None {
@@ -252,47 +285,49 @@ handle_apc :: proc(terminal: ^Terminal, data: []byte, discarded: bool = false) {
 		return
 	}
 	if command.action == .Transmit_And_Display {
-		resource := graphics.find_image(&terminal.images, image_id)
-		source_width := command.source_width
-		source_height := command.source_height
-		if resource == nil || command.source_x >= resource.width || command.source_y >= resource.height {
+		if placement_error := kitty_place_image(terminal, command, image_id); placement_error != "" {
 			_ = graphics.delete_image(&terminal.images, image_id)
-			kitty_reply(terminal, command, false, "EINVAL")
+			kitty_reply(terminal, command, false, placement_error)
 			return
-		}
-		if source_width == 0 do source_width = resource.width-command.source_x
-		if source_height == 0 do source_height = resource.height-command.source_y
-		source_width = min(source_width, resource.width-command.source_x)
-		source_height = min(source_height, resource.height-command.source_y)
-		screen := terminal_screen(terminal)
-		screen_kind := graphics.Screen.Alternate if terminal.using_alternate else graphics.Screen.Main
-		_, placement_error := graphics.add_placement(&terminal.images, {
-			image_id = image_id,
-			protocol_id = command.placement_id if command.image_id != 0 else 0,
-			screen = screen_kind,
-			row = screen.cursor.row,
-			column = screen.cursor.column,
-			rows = command.rows,
-			columns = command.columns,
-			source_x = command.source_x,
-			source_y = command.source_y,
-			source_width = source_width,
-			source_height = source_height,
-			z = command.z,
-			preserve_aspect = true,
-		})
-		if placement_error != .None {
-			_ = graphics.delete_image(&terminal.images, image_id)
-			kitty_reply(terminal, command, false, "EINVAL")
-			return
-		}
-		if !command.no_cursor_move {
-			screen.cursor.column = min(screen.columns-1, screen.cursor.column+command.columns)
-			screen.cursor.row = min(screen.scroll_bottom, screen.cursor.row+command.rows)
-			screen.wrap_pending = false
 		}
 	}
 	kitty_reply(terminal, command, true, "")
+}
+
+kitty_place_image :: proc(terminal: ^Terminal, command: graphics.Kitty_Command, image_id: u64) -> string {
+	if command.columns <= 0 || command.rows <= 0 do return "ENOTSUP"
+	resource := graphics.find_image(&terminal.images, image_id)
+	if resource == nil || command.source_x >= resource.width || command.source_y >= resource.height do return "EINVAL"
+	source_width := command.source_width
+	source_height := command.source_height
+	if source_width == 0 do source_width = resource.width-command.source_x
+	if source_height == 0 do source_height = resource.height-command.source_y
+	source_width = min(source_width, resource.width-command.source_x)
+	source_height = min(source_height, resource.height-command.source_y)
+	screen := terminal_screen(terminal)
+	screen_kind := graphics.Screen.Alternate if terminal.using_alternate else graphics.Screen.Main
+	_, placement_error := graphics.add_placement(&terminal.images, {
+		image_id = image_id,
+		protocol_id = command.placement_id if command.image_id != 0 else 0,
+		screen = screen_kind,
+		row = screen.cursor.row,
+		column = screen.cursor.column,
+		rows = command.rows,
+		columns = command.columns,
+		source_x = command.source_x,
+		source_y = command.source_y,
+		source_width = source_width,
+		source_height = source_height,
+		z = command.z,
+		preserve_aspect = true,
+	})
+	if placement_error != .None do return "EINVAL"
+	if !command.no_cursor_move {
+		screen.cursor.column = min(screen.columns-1, screen.cursor.column+command.columns)
+		screen.cursor.row = min(screen.scroll_bottom, screen.cursor.row+command.rows)
+		screen.wrap_pending = false
+	}
+	return ""
 }
 
 kitty_error_text :: proc(err: graphics.Kitty_Error) -> string {
@@ -307,6 +342,7 @@ kitty_error_text :: proc(err: graphics.Kitty_Error) -> string {
 
 kitty_reply :: proc(terminal: ^Terminal, command: graphics.Kitty_Command, success: bool, error_text: string) {
 	if command.quiet == 2 || success && command.quiet == 1 do return
+	if success && command.action == .Delete do return
 	if success && command.action != .Query && command.image_id == 0 do return
 	response: [dynamic]byte
 	defer delete(response)

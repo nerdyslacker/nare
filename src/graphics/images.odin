@@ -150,7 +150,6 @@ add_image :: proc(
 add_placement :: proc(registry: ^Registry, request: Placement_Request) -> (u64, Error) {
 	resource := find_image(registry, request.image_id)
 	if resource == nil do return 0, .Unknown_Image
-	if registry.next_placement_id == 0 || registry.next_placement_id == max(u64) do return 0, .ID_Exhausted
 	if request.rows <= 0 || request.rows > MAX_PLACEMENT_CELLS ||
 	   request.columns <= 0 || request.columns > MAX_PLACEMENT_CELLS ||
 	   request.source_x < 0 || request.source_x >= resource.width ||
@@ -166,10 +165,7 @@ add_placement :: proc(registry: ^Registry, request: Placement_Request) -> (u64, 
 		return 0, .Invalid_Placement
 	}
 
-	id := registry.next_placement_id
-	registry.next_placement_id += 1
-	append(&registry.placements, Placement{
-		id = id,
+	placement := Placement{
 		image_id = request.image_id,
 		protocol_id = request.protocol_id,
 		screen = request.screen,
@@ -183,11 +179,26 @@ add_placement :: proc(registry: ^Registry, request: Placement_Request) -> (u64, 
 		source_height = source_height,
 		z = request.z,
 		preserve_aspect = request.preserve_aspect,
-	})
+	}
+	if request.protocol_id != 0 {
+		for &existing in registry.placements {
+			if existing.image_id != request.image_id || existing.protocol_id != request.protocol_id do continue
+			placement.id = existing.id
+			existing = placement
+			touch(registry, resource)
+			registry.generation += 1
+			return placement.id, .None
+		}
+	}
+
+	if registry.next_placement_id == 0 || registry.next_placement_id == max(u64) do return 0, .ID_Exhausted
+	placement.id = registry.next_placement_id
+	registry.next_placement_id += 1
+	append(&registry.placements, placement)
 	resource.placement_count += 1
 	touch(registry, resource)
 	registry.generation += 1
-	return id, .None
+	return placement.id, .None
 }
 
 find_image :: proc(registry: ^Registry, id: u64) -> ^Resource {
@@ -228,6 +239,45 @@ delete_image :: proc(registry: ^Registry, id: u64) -> bool {
 		return true
 	}
 	return false
+}
+
+delete_protocol_image :: proc(
+	registry: ^Registry,
+	protocol: Protocol,
+	protocol_id, placement_id: u32,
+	delete_data: bool,
+) -> bool {
+	resource := find_protocol_image(registry, protocol, protocol_id)
+	if resource == nil do return false
+	resource_id := resource.id
+	affected := placement_id == 0
+	for index := len(registry.placements)-1; index >= 0; index -= 1 {
+		placement := registry.placements[index]
+		if placement.image_id != resource_id || placement_id != 0 && placement.protocol_id != placement_id do continue
+		remove_placement_at(registry, index)
+		affected = true
+	}
+	resource = find_image(registry, resource_id)
+	if delete_data && affected && resource != nil && resource.placement_count == 0 do return delete_image(registry, resource_id)
+	return true
+}
+
+delete_visible_placements :: proc(registry: ^Registry, screen: Screen, top, bottom: int, delete_data: bool) {
+	for resource_index := len(registry.resources)-1; resource_index >= 0; resource_index -= 1 {
+		resource_id := registry.resources[resource_index].id
+		affected := false
+		for placement_index := len(registry.placements)-1; placement_index >= 0; placement_index -= 1 {
+			placement := registry.placements[placement_index]
+			if placement.image_id == resource_id && placement.screen == screen &&
+			   placement.row <= bottom && placement.row+placement.rows > top {
+				remove_placement_at(registry, placement_index)
+				affected = true
+			}
+		}
+		if delete_data && affected && registry.resources[resource_index].placement_count == 0 {
+			delete_resource_at(registry, resource_index)
+		}
+	}
 }
 
 clear_screen :: proc(registry: ^Registry, screen: Screen) {

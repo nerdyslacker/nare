@@ -27,6 +27,11 @@ Kitty_Error :: enum {
 	Image_Limit,
 }
 
+Kitty_Delete_Target :: enum {
+	Visible,
+	Image,
+}
+
 Kitty_Command :: struct {
 	action: Kitty_Action,
 	format: Pixel_Format,
@@ -38,6 +43,8 @@ Kitty_Command :: struct {
 	source_width, source_height: int,
 	z: i32,
 	no_cursor_move: bool,
+	delete_target: Kitty_Delete_Target,
+	delete_data: bool,
 	png: bool,
 	compressed: bool,
 	more: bool,
@@ -89,6 +96,10 @@ kitty_receive_direct :: proc(
 	}
 
 	if transfer.active {
+		if frame.command.action == .Delete {
+			kitty_transfer_reset(transfer)
+			return frame.command, {}, true, .None
+		}
 		command = transfer.command
 		if !frame.more_present || !frame.continuation_controls {
 			kitty_transfer_reset(transfer)
@@ -110,6 +121,7 @@ kitty_receive_direct :: proc(
 	}
 
 	command = frame.command
+	if command.action == .Display || command.action == .Delete do return command, {}, true, .None
 	encoded_limit, limit_error := kitty_encoded_limit(command)
 	if limit_error != .None do return command, {}, true, limit_error
 	if command.more {
@@ -150,7 +162,7 @@ kitty_parse_direct_frame :: proc(data: []byte) -> (Kitty_Frame, Kitty_Error) {
 	seen_id, seen_placement, seen_columns, seen_rows := false, false, false, false
 	seen_medium, seen_compression, seen_more, seen_quiet := false, false, false, false
 	seen_source_x, seen_source_y, seen_source_width, seen_source_height := false, false, false, false
-	seen_z, seen_cursor_policy := false, false
+	seen_z, seen_cursor_policy, seen_delete := false, false, false
 	unsupported := false
 	key_count := 0
 	remaining := control
@@ -290,11 +302,40 @@ kitty_parse_direct_frame :: proc(data: []byte) -> (Kitty_Frame, Kitty_Error) {
 			} else {
 				unsupported = true
 			}
+		case 'd':
+			if seen_delete || len(value) != 1 do return Kitty_Frame{command = command}, .Malformed
+			seen_delete = true
+			switch value[0] {
+			case 'a': command.delete_target = .Visible
+			case 'A':
+				command.delete_target = .Visible
+				command.delete_data = true
+			case 'i': command.delete_target = .Image
+			case 'I':
+				command.delete_target = .Image
+				command.delete_data = true
+			case: unsupported = true
+			}
 		case: unsupported = true
 		}
 	}
-	if unsupported || command.action != .Transmit && command.action != .Transmit_And_Display && command.action != .Query {
+	if unsupported || command.action == .Unsupported {
 		return Kitty_Frame{command = command}, .Unsupported
+	}
+	if command.action != .Delete && seen_delete do return Kitty_Frame{command = command}, .Malformed
+	if command.action == .Display {
+		if command.image_id == 0 || len(payload) != 0 || seen_format || seen_width || seen_height ||
+		   seen_medium || seen_compression || seen_more {
+			return Kitty_Frame{command = command}, .Malformed
+		}
+	} else if command.action == .Delete {
+		if len(payload) != 0 || seen_format || seen_width || seen_height || seen_medium ||
+		   seen_compression || seen_more || seen_columns || seen_rows || seen_source_x ||
+		   seen_source_y || seen_source_width || seen_source_height || seen_z || seen_cursor_policy {
+			return Kitty_Frame{command = command}, .Malformed
+		}
+		if command.delete_target == .Image && command.image_id == 0 do return Kitty_Frame{command = command}, .Malformed
+		if command.delete_target == .Visible && seen_placement do return Kitty_Frame{command = command}, .Malformed
 	}
 	frame.command = command
 	frame.payload = payload
