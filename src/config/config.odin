@@ -11,6 +11,7 @@ MAX_CONFIG_BYTES :: 64 * 1024
 MIN_FONT_SIZE :: 6
 MAX_FONT_SIZE :: 96
 MAX_SCROLLBACK_LINES :: 1_000_000
+MAX_TERM_BYTES :: 64
 
 Error :: enum {
 	None,
@@ -35,6 +36,7 @@ Settings :: struct {
 	title: string,
 	url_opener: string,
 	shell_output_pipe: string,
+	term: string,
 	scrollback_lines: int,
 	osc52_policy: vt.OSC52_Policy,
 }
@@ -47,6 +49,7 @@ settings_init :: proc(settings: ^Settings) {
 	settings.title = strings.clone("nare")
 	settings.url_opener = strings.clone("xdg-open")
 	settings.shell_output_pipe = strings.clone("")
+	settings.term = strings.clone("xterm-256color")
 	settings.scrollback_lines = 10000
 	settings.osc52_policy = .Disabled
 }
@@ -56,6 +59,7 @@ settings_destroy :: proc(settings: ^Settings) {
 	delete(settings.title)
 	delete(settings.url_opener)
 	delete(settings.shell_output_pipe)
+	delete(settings.term)
 	settings^ = {}
 }
 
@@ -146,9 +150,15 @@ apply :: proc(settings: ^Settings, section, key, value: string) -> Error {
 		if value == "" do return .Invalid_Value
 		replace_string(&settings.url_opener, value)
 	} else if section == "shell" {
-		if key != "output-pipe" do return .Unknown_Key
-		if value == "" do return .Invalid_Value
-		replace_string(&settings.shell_output_pipe, value)
+		switch key {
+		case "output-pipe":
+			if value == "" do return .Invalid_Value
+			replace_string(&settings.shell_output_pipe, value)
+		case "term":
+			if !valid_term(value) do return .Invalid_Value
+			replace_string(&settings.term, value)
+		case: return .Unknown_Key
+		}
 	} else if section == "security" {
 		if key != "osc52" do return .Unknown_Key
 		switch value {
@@ -162,6 +172,18 @@ apply :: proc(settings: ^Settings, section, key, value: string) -> Error {
 		return .Unknown_Section
 	}
 	return .None
+}
+
+valid_term :: proc(value: string) -> bool {
+	if len(value) == 0 || len(value) > MAX_TERM_BYTES do return false
+	for character in value {
+		if character >= 'a' && character <= 'z' do continue
+		if character >= 'A' && character <= 'Z' do continue
+		if character >= '0' && character <= '9' do continue
+		if character == '-' || character == '_' || character == '.' || character == '+' do continue
+		return false
+	}
+	return true
 }
 
 parse_bool :: proc(value: string) -> (bool, bool) {

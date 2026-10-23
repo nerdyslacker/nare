@@ -45,7 +45,7 @@ app_main :: proc() -> int {
 	defer drawing.destroy(&renderer, &window)
 
 	columns, rows := x11.grid_size(&window)
-	process, process_err := pty.spawn(command[:], pty_size(columns, rows, window.width, window.height))
+	process, process_err := pty.spawn(command[:], pty_size(columns, rows, window.width, window.height), options.term)
 	if process_err != .None {
 		fmt.eprintln(pty.error_string(process_err))
 		return 1
@@ -153,12 +153,14 @@ apply_argument :: proc(options: ^config.Settings, argument: string) -> config.Er
 		return config.apply(options, "security", "osc52", argument[len("--osc52="):])
 	} else if strings.has_prefix(argument, "--output-pipe=") {
 		return config.apply(options, "shell", "output-pipe", argument[len("--output-pipe="):])
+	} else if strings.has_prefix(argument, "--term=") {
+		return config.apply(options, "shell", "term", argument[len("--term="):])
 	}
 	return .Unknown_Key
 }
 
 usage :: proc() -> string {
-	return "usage: nare [--config=PATH|--no-config] [--renderer=cpu|gpu|auto] [--font=FAMILY] [--font-size=PIXELS] [--ligatures=true|false] [--title=TITLE] [--scrollback-lines=COUNT] [--url-opener=COMMAND] [--output-pipe=COMMAND] [--osc52=disabled|copy-enabled|paste-enabled|enabled] [-e COMMAND [ARG...]]"
+	return "usage: nare [--config=PATH|--no-config] [--renderer=cpu|gpu|auto] [--font=FAMILY] [--font-size=PIXELS] [--ligatures=true|false] [--title=TITLE] [--scrollback-lines=COUNT] [--url-opener=COMMAND] [--output-pipe=COMMAND] [--term=NAME] [--osc52=disabled|copy-enabled|paste-enabled|enabled] [-e COMMAND [ARG...]]"
 }
 
 OSC52_Request :: struct {
