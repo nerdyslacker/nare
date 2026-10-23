@@ -7,6 +7,7 @@ import "core:strconv"
 import "core:strings"
 import "core:unicode"
 import "core:unicode/utf8"
+import graphics "../graphics"
 
 MAX_REPLY_BYTES :: 256 * 1024
 MAX_HYPERLINKS :: 4096
@@ -127,6 +128,7 @@ Terminal :: struct {
 	osc52_policy: OSC52_Policy,
 	osc52_actions: [dynamic]OSC52_Action,
 	osc52_queued_bytes: int,
+	images: graphics.Registry,
 }
 
 terminal_init :: proc(
@@ -138,6 +140,11 @@ terminal_init :: proc(
 	if !screen_init(&terminal.main_screen, columns, rows, scrollback_limit) do return false
 	if !screen_init(&terminal.alternate_screen, columns, rows) {
 		screen_destroy(&terminal.main_screen)
+		return false
+	}
+	if graphics.registry_init(&terminal.images) != .None {
+		screen_destroy(&terminal.main_screen)
+		screen_destroy(&terminal.alternate_screen)
 		return false
 	}
 	terminal.modes.autowrap = true
@@ -158,6 +165,7 @@ terminal_destroy :: proc(terminal: ^Terminal) {
 	delete(terminal.cwd_path)
 	for action in terminal.osc52_actions do delete(action.data)
 	delete(terminal.osc52_actions)
+	graphics.registry_destroy(&terminal.images)
 	terminal^ = {}
 }
 
@@ -207,7 +215,71 @@ terminal_event :: proc(event: Event, user_data: rawptr) {
 	case .DCS:
 		handle_dcs(terminal, event.data)
 	case .APC:
+		handle_apc(terminal, event.data)
 	}
+}
+
+handle_apc :: proc(terminal: ^Terminal, data: []byte) {
+	if len(data) == 0 || data[0] != 'G' do return
+	command, image, decode_error := graphics.kitty_decode_direct(data)
+	if decode_error != .None {
+		kitty_reply(terminal, command, false, kitty_error_text(decode_error))
+		return
+	}
+	if command.action == .Query {
+		graphics.decoded_image_destroy(&image)
+		kitty_reply(terminal, command, true, "")
+		return
+	}
+	if command.action == .Transmit_And_Display {
+		graphics.decoded_image_destroy(&image)
+		kitty_reply(terminal, command, false, "ENOTSUP")
+		return
+	}
+	_, image_error := graphics.add_image(&terminal.images, .Kitty, command.image_id, &image)
+	if image_error != .None {
+		graphics.decoded_image_destroy(&image)
+		kitty_reply(terminal, command, false, "ENOSPC")
+		return
+	}
+	kitty_reply(terminal, command, true, "")
+}
+
+kitty_error_text :: proc(err: graphics.Kitty_Error) -> string {
+	switch err {
+	case .Unsupported: return "ENOTSUP"
+	case .Image_Limit: return "E2BIG"
+	case .Malformed, .Invalid_Data: return "EINVAL"
+	case .None: return ""
+	}
+	return "EINVAL"
+}
+
+kitty_reply :: proc(terminal: ^Terminal, command: graphics.Kitty_Command, success: bool, error_text: string) {
+	if command.quiet == 2 || success && command.quiet == 1 do return
+	if success && command.action != .Query && command.image_id == 0 do return
+	response: [dynamic]byte
+	defer delete(response)
+	append(&response, ..transmute([]byte)string("\x1b_G"))
+	if command.image_id != 0 {
+		encoded_id := fmt.aprintf("i=%d", command.image_id)
+		append(&response, ..transmute([]byte)encoded_id)
+		delete(encoded_id)
+	}
+	if command.placement_id != 0 {
+		if command.image_id != 0 do append(&response, ',')
+		encoded_id := fmt.aprintf("p=%d", command.placement_id)
+		append(&response, ..transmute([]byte)encoded_id)
+		delete(encoded_id)
+	}
+	append(&response, ';')
+	if success {
+		append(&response, 'O', 'K')
+	} else {
+		append(&response, ..transmute([]byte)error_text)
+	}
+	append(&response, 0x1b, '\\')
+	append_reply(terminal, response[:])
 }
 
 handle_dcs :: proc(terminal: ^Terminal, data: []byte) {
@@ -863,4 +935,5 @@ terminal_reset :: proc(terminal: ^Terminal) {
 	screen_clear(&terminal.main_screen, {})
 	screen_clear(&terminal.alternate_screen, {})
 	clear_hyperlinks(terminal)
+	graphics.registry_clear(&terminal.images)
 }
