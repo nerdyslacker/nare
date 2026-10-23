@@ -1,12 +1,21 @@
 package render
 
 import fonts "../font"
+import graphics "../graphics"
 import selection "../selection"
 import vt "../vt"
 import x11 "../x11"
 import xlib "vendor:x11/xlib"
 
 GPU_ENABLED :: #config(RENDERER_GPU, false)
+MAX_IMAGE_TEXTURE_BYTES :: graphics.MAX_CACHE_BYTES
+
+Image_Texture :: struct {
+	image_id: u64,
+	texture: u32,
+	byte_count: int,
+	last_used: u64,
+}
 
 GPU :: struct {
 	ctx: rawptr,
@@ -18,6 +27,10 @@ GPU :: struct {
 	drawable: xlib.XID,
 	atlas: Atlas,
 	commands: [dynamic]Command,
+	image_textures: [dynamic]Image_Texture,
+	image_texture_bytes: int,
+	image_texture_budget: int,
+	image_texture_clock: u64,
 }
 
 when GPU_ENABLED {
@@ -76,16 +89,43 @@ GL_RGBA         :: 0x1908
 GL_BGRA         :: 0x80e1
 GL_UNSIGNED_BYTE :: 0x1401
 GL_UNPACK_ALIGNMENT :: 0x0cf5
+GL_UNPACK_ROW_LENGTH :: 0x0cf2
 GL_COLOR_BUFFER_BIT :: 0x00004000
 GL_QUADS        :: 0x0007
 GL_NO_ERROR     :: 0
 GL_BLEND        :: 0x0be2
 GL_SCISSOR_TEST :: 0x0c11
 GL_ONE          :: 1
+GL_SRC_ALPHA    :: 0x0302
 GL_ONE_MINUS_SRC_ALPHA :: 0x0303
 GL_FRAMEBUFFER  :: 0x8d40
 GL_COLOR_ATTACHMENT0 :: 0x8ce0
 GL_FRAMEBUFFER_COMPLETE :: 0x8cd5
+
+image_texture_coordinates :: proc(
+	command: Command,
+	image_width, image_height: int,
+	left, top, right, bottom: int,
+) -> (u0, v0, u1, v1: f32) {
+	if command.width <= 0 || command.height <= 0 || image_width <= 0 || image_height <= 0 do return
+	u0 = (f32(command.source_x)+f32(left-command.x)*f32(command.source_width)/f32(command.width))/f32(image_width)
+	u1 = (f32(command.source_x)+f32(right-command.x)*f32(command.source_width)/f32(command.width))/f32(image_width)
+	v0 = (f32(command.source_y)+f32(top-command.y)*f32(command.source_height)/f32(command.height))/f32(image_height)
+	v1 = (f32(command.source_y)+f32(bottom-command.y)*f32(command.source_height)/f32(command.height))/f32(image_height)
+	return
+}
+
+image_texture_eviction_index :: proc(entries: []Image_Texture) -> int {
+	oldest_index := -1
+	oldest_tick := max(u64)
+	for entry, index in entries {
+		if entry.last_used < oldest_tick {
+			oldest_index = index
+			oldest_tick = entry.last_used
+		}
+	}
+	return oldest_index
+}
 
 gpu_init :: proc(gpu: ^GPU, window: ^x11.Window) -> bool {
 	when !GPU_ENABLED {
@@ -124,6 +164,7 @@ gpu_init :: proc(gpu: ^GPU, window: ^x11.Window) -> bool {
 		TexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, ATLAS_WIDTH, ATLAS_HEIGHT, 0, GL_RGBA, GL_UNSIGNED_BYTE, nil)
 		gpu.double_buffered = double_buffered != 0
 		gpu.drawable = xlib.XID(window.id)
+		gpu.image_texture_budget = MAX_IMAGE_TEXTURE_BYTES
 		if !gpu_resize(gpu, window) {
 			gpu_destroy(gpu, window)
 			return false
@@ -136,6 +177,10 @@ gpu_destroy :: proc(gpu: ^GPU, window: ^x11.Window) {
 	when GPU_ENABLED {
 		if gpu.ctx != nil {
 			if MakeCurrent(window.display, xlib.XID(window.id), gpu.ctx) != false {
+				for texture in gpu.image_textures {
+					texture_id := texture.texture
+					DeleteTextures(1, &texture_id)
+				}
 				textures := [2]u32{gpu.surface_texture, gpu.atlas_texture}
 				DeleteTextures(2, &textures[0])
 				if gpu.framebuffer != 0 do DeleteFramebuffers(1, &gpu.framebuffer)
@@ -146,6 +191,7 @@ gpu_destroy :: proc(gpu: ^GPU, window: ^x11.Window) {
 	}
 	atlas_destroy(&gpu.atlas)
 	delete(gpu.commands)
+	delete(gpu.image_textures)
 	gpu^ = {}
 }
 
@@ -193,7 +239,6 @@ gpu_draw :: proc(
 		if gpu.ctx == nil || gpu.width != damage.width || gpu.height != damage.height do return false
 		screen := screen_override
 		if screen == nil do screen = vt.terminal_screen(terminal)
-		if vt.screen_has_image_placements(screen) do return false
 		if !damage_rows(damage, terminal, screen, force) do return true
 		if MakeCurrent(window.display, xlib.XID(window.id), gpu.ctx) == false do return false
 		BindFramebuffer(GL_FRAMEBUFFER, gpu.framebuffer)
@@ -210,7 +255,11 @@ gpu_draw :: proc(
 				BindFramebuffer(GL_FRAMEBUFFER, 0)
 				return false
 			}
-			gpu_draw_commands(gpu)
+			if !gpu_prepare_images(gpu, screen.image_registry) {
+				BindFramebuffer(GL_FRAMEBUFFER, 0)
+				return false
+			}
+			gpu_draw_commands(gpu, screen.image_registry)
 		}
 		Disable(GL_SCISSOR_TEST)
 		BindFramebuffer(GL_FRAMEBUFFER, 0)
@@ -301,7 +350,110 @@ when GPU_ENABLED {
 		return GetError() == GL_NO_ERROR
 	}
 
-	gpu_draw_commands :: proc(gpu: ^GPU) {
+	gpu_prepare_images :: proc(gpu: ^GPU, registry: ^graphics.Registry) -> bool {
+		for index := len(gpu.image_textures)-1; index >= 0; index -= 1 {
+			if registry == nil || graphics.find_image(registry, gpu.image_textures[index].image_id) == nil {
+				gpu_remove_image_texture(gpu, index)
+			}
+		}
+		if registry == nil do return true
+		for command in gpu.commands {
+			if command.kind != .Image do continue
+			resource := graphics.find_image(registry, command.image_id)
+			if resource == nil do continue
+			entry := gpu_find_image_texture(gpu, resource.id)
+			if entry != nil {
+				gpu_touch_image_texture(gpu, entry)
+				continue
+			}
+			if !gpu_upload_image(gpu, resource) do return false
+		}
+		return true
+	}
+
+	gpu_upload_image :: proc(gpu: ^GPU, resource: ^graphics.Resource) -> bool {
+		channels := graphics.bytes_per_pixel(resource.format)
+		if channels <= 0 || resource.stride%channels != 0 do return false
+		byte_count := resource.width*resource.height*channels
+		if byte_count > gpu.image_texture_budget do return false
+		for gpu.image_texture_bytes > gpu.image_texture_budget-byte_count {
+			oldest := image_texture_eviction_index(gpu.image_textures[:])
+			if oldest < 0 do return false
+			gpu_remove_image_texture(gpu, oldest)
+		}
+
+		texture: u32
+		GenTextures(1, &texture)
+		if texture == 0 || GetError() != GL_NO_ERROR {
+			if texture != 0 do DeleteTextures(1, &texture)
+			return false
+		}
+		BindTexture(GL_TEXTURE_2D, texture)
+		TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST)
+		TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
+		PixelStorei(GL_UNPACK_ALIGNMENT, 1)
+		PixelStorei(GL_UNPACK_ROW_LENGTH, i32(resource.stride/channels))
+		format: u32 = GL_RGB
+		if resource.format == .RGBA8 do format = GL_RGBA
+		TexImage2D(
+			GL_TEXTURE_2D,
+			0,
+			i32(format),
+			i32(resource.width),
+			i32(resource.height),
+			0,
+			format,
+			GL_UNSIGNED_BYTE,
+			raw_data(resource.pixels),
+		)
+		PixelStorei(GL_UNPACK_ROW_LENGTH, 0)
+		if GetError() != GL_NO_ERROR {
+			DeleteTextures(1, &texture)
+			return false
+		}
+		gpu.image_texture_clock += 1
+		append(&gpu.image_textures, Image_Texture{
+			image_id = resource.id,
+			texture = texture,
+			byte_count = byte_count,
+			last_used = gpu.image_texture_clock,
+		})
+		gpu.image_texture_bytes += byte_count
+		return true
+	}
+
+	gpu_find_image_texture :: proc(gpu: ^GPU, image_id: u64) -> ^Image_Texture {
+		for &entry in gpu.image_textures {
+			if entry.image_id == image_id do return &entry
+		}
+		return nil
+	}
+
+	gpu_touch_image_texture :: proc(gpu: ^GPU, entry: ^Image_Texture) {
+		gpu.image_texture_clock += 1
+		entry.last_used = gpu.image_texture_clock
+	}
+
+	gpu_remove_image_texture :: proc(gpu: ^GPU, index: int) {
+		entry := gpu.image_textures[index]
+		DeleteTextures(1, &entry.texture)
+		gpu.image_texture_bytes -= entry.byte_count
+		ordered_remove(&gpu.image_textures, index)
+	}
+
+	gpu_draw_commands :: proc(gpu: ^GPU, registry: ^graphics.Registry) {
+		has_images := false
+		for command in gpu.commands {
+			if command.kind == .Image {
+				has_images = true
+				break
+			}
+		}
+		if has_images {
+			gpu_draw_ordered_commands(gpu, registry)
+			return
+		}
+
 		Disable(GL_TEXTURE_2D)
 		Disable(GL_BLEND)
 		Begin(GL_QUADS)
@@ -319,27 +471,73 @@ when GPU_ENABLED {
 		Begin(GL_QUADS)
 		for command in gpu.commands {
 			if command.kind != .Glyph do continue
-			entry := atlas_find(&gpu.atlas, command.face_id, command.glyph_index)
-			if entry == nil do continue
-			left := max(0, max(command.clip_left, command.x))
-			right := min(gpu.width, min(command.clip_right, command.x+command.width))
-			top := max(0, command.y)
-			bottom := min(gpu.height, command.y+command.height)
-			if left >= right || top >= bottom do continue
-			if command.glyph_kind == .Coverage {
-				gpu_color(command.color)
-			} else {
-				Color4f(1, 1, 1, 1)
-			}
-			u0 := f32(entry.x+left-command.x)/f32(ATLAS_WIDTH)
-			u1 := f32(entry.x+right-command.x)/f32(ATLAS_WIDTH)
-			v0 := f32(entry.y+top-command.y)/f32(ATLAS_HEIGHT)
-			v1 := f32(entry.y+bottom-command.y)/f32(ATLAS_HEIGHT)
-			gpu_textured_quad(gpu, left, top, right, bottom, u0, v0, u1, v1)
+			gpu_glyph_quad(gpu, command)
 		}
 		End()
 		Disable(GL_BLEND)
 		Disable(GL_TEXTURE_2D)
+	}
+
+	gpu_draw_ordered_commands :: proc(gpu: ^GPU, registry: ^graphics.Registry) {
+		for command in gpu.commands {
+			switch command.kind {
+			case .Rectangle:
+				Disable(GL_TEXTURE_2D)
+				Disable(GL_BLEND)
+				gpu_color(command.color)
+				Begin(GL_QUADS)
+				gpu_quad(gpu, command.x, command.y, command.x+command.width, command.y+command.height)
+				End()
+			case .Glyph:
+				BindTexture(GL_TEXTURE_2D, gpu.atlas_texture)
+				Enable(GL_TEXTURE_2D)
+				Enable(GL_BLEND)
+				BlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA)
+				Begin(GL_QUADS)
+				gpu_glyph_quad(gpu, command)
+				End()
+			case .Image:
+				resource := graphics.find_image(registry, command.image_id)
+				entry := gpu_find_image_texture(gpu, command.image_id)
+				if resource == nil || entry == nil do continue
+				left := max(0, max(command.clip_left, command.x))
+				right := min(gpu.width, min(command.clip_right, command.x+command.width))
+				top := max(0, max(command.clip_top, command.y))
+				bottom := min(gpu.height, min(command.clip_bottom, command.y+command.height))
+				if left >= right || top >= bottom do continue
+				u0, v0, u1, v1 := image_texture_coordinates(command, resource.width, resource.height, left, top, right, bottom)
+				BindTexture(GL_TEXTURE_2D, entry.texture)
+				Enable(GL_TEXTURE_2D)
+				Enable(GL_BLEND)
+				BlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+				Color4f(1, 1, 1, 1)
+				Begin(GL_QUADS)
+				gpu_textured_quad(gpu, left, top, right, bottom, u0, v0, u1, v1)
+				End()
+			}
+		}
+		Disable(GL_BLEND)
+		Disable(GL_TEXTURE_2D)
+	}
+
+	gpu_glyph_quad :: proc(gpu: ^GPU, command: Command) {
+		entry := atlas_find(&gpu.atlas, command.face_id, command.glyph_index)
+		if entry == nil do return
+		left := max(0, max(command.clip_left, command.x))
+		right := min(gpu.width, min(command.clip_right, command.x+command.width))
+		top := max(0, command.y)
+		bottom := min(gpu.height, command.y+command.height)
+		if left >= right || top >= bottom do return
+		if command.glyph_kind == .Coverage {
+			gpu_color(command.color)
+		} else {
+			Color4f(1, 1, 1, 1)
+		}
+		u0 := f32(entry.x+left-command.x)/f32(ATLAS_WIDTH)
+		u1 := f32(entry.x+right-command.x)/f32(ATLAS_WIDTH)
+		v0 := f32(entry.y+top-command.y)/f32(ATLAS_HEIGHT)
+		v1 := f32(entry.y+bottom-command.y)/f32(ATLAS_HEIGHT)
+		gpu_textured_quad(gpu, left, top, right, bottom, u0, v0, u1, v1)
 	}
 
 	gpu_color :: proc(color: u32) {
