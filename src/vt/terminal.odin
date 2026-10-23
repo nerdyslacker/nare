@@ -3,6 +3,7 @@ package vt
 import "core:fmt"
 import base64 "core:encoding/base64"
 import "core:net"
+import "core:strconv"
 import "core:strings"
 import "core:unicode"
 import "core:unicode/utf8"
@@ -16,6 +17,7 @@ MAX_OSC52_WRITE_BYTES :: 512 * 1024
 MAX_OSC52_READ_BYTES :: 128 * 1024
 MAX_OSC52_ACTIONS :: 8
 MAX_OSC52_QUEUED_BYTES :: 512 * 1024
+MAX_OSC133_BYTES :: 4 * 1024
 
 OSC52_Policy :: enum {
 	Disabled,
@@ -182,8 +184,34 @@ handle_osc :: proc(terminal: ^Terminal, data: []byte) {
 	case "7": set_cwd_metadata(terminal, payload)
 	case "8": set_hyperlink(terminal, payload)
 	case "52": handle_osc52(terminal, payload)
+	case "133": handle_osc133(terminal, payload)
 	case:
 	}
+}
+
+handle_osc133 :: proc(terminal: ^Terminal, payload: []byte) {
+	if len(payload) == 0 || len(payload) > MAX_OSC133_BYTES || !valid_osc_text(payload, false) do return
+	parameter_end := len(payload)
+	if separator := strings.index_byte(string(payload), ';'); separator >= 0 do parameter_end = separator
+	if parameter_end != 1 do return
+	marker: Shell_Marker
+	switch payload[0] {
+	case 'A': marker = .Prompt
+	case 'B': marker = .Command
+	case 'C': marker = .Output
+	case 'D': marker = .Finished
+	case: return
+	}
+	screen := terminal_screen(terminal)
+	cell := cell_at(screen, screen.cursor.row, screen.cursor.column)
+	cell.shell_markers += {marker}
+	if marker != .Finished || parameter_end == len(payload) do return
+	status_text := string(payload[parameter_end+1:])
+	if separator := strings.index_byte(status_text, ';'); separator >= 0 do status_text = status_text[:separator]
+	status, ok := strconv.parse_int(status_text)
+	if !ok || status < 0 || status > 255 do return
+	cell.shell_exit_status = i32(status)
+	cell.shell_exit_status_set = true
 }
 
 handle_osc52 :: proc(terminal: ^Terminal, payload: []byte) {

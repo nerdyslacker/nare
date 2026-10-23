@@ -196,6 +196,8 @@ run :: proc(
 	defer features.destroy(&search_state)
 	url_state: features.URL_State
 	defer features.url_destroy(&url_state)
+	shell_state: features.Shell_State
+	defer features.shell_destroy(&shell_state)
 	osc52_request: OSC52_Request
 	running := true
 	close_requested := false
@@ -210,7 +212,7 @@ run :: proc(
 				close_requested = true
 				running = false
 			case .Redraw:
-				redraw(renderer, window, terminal, &selection_state, &search_state, &url_state, true)
+				redraw(renderer, window, terminal, &selection_state, &search_state, &url_state, true, &shell_state)
 			case .Resize:
 				selection.clear(&selection_state)
 				columns, rows := x11.grid_size(window)
@@ -222,23 +224,38 @@ run :: proc(
 				} else {
 					if search_state.active do features.refresh(&search_state, vt.terminal_screen(terminal))
 					if url_state.active do features.url_refresh(&url_state, terminal)
-					redraw(renderer, window, terminal, &selection_state, &search_state, &url_state, true)
+					if shell_state.active do features.shell_refresh(&shell_state, vt.terminal_screen(terminal))
+					redraw(renderer, window, terminal, &selection_state, &search_state, &url_state, true, &shell_state)
 				}
 			case .Input:
+				if prompt_previous_shortcut(event) || prompt_next_shortcut(event) {
+					if search_state.active do features.close(&search_state)
+					if url_state.active do features.url_close(&url_state)
+					selection.clear(&selection_state)
+					if prompt_previous_shortcut(event) {
+						features.shell_previous(&shell_state, vt.terminal_screen(terminal))
+					} else {
+						features.shell_next(&shell_state, vt.terminal_screen(terminal))
+					}
+					redraw(renderer, window, terminal, &selection_state, &search_state, &url_state, true, &shell_state)
+					continue
+				}
 				if url_shortcut(event) {
 					if search_state.active do features.close(&search_state)
+					features.shell_close(&shell_state)
 					selection.clear(&selection_state)
 					features.url_open(&url_state, terminal)
 					update_url_title(window, terminal, base_title, &url_state)
-					redraw(renderer, window, terminal, &selection_state, &search_state, &url_state, true)
+					redraw(renderer, window, terminal, &selection_state, &search_state, &url_state, true, &shell_state)
 					continue
 				}
 				if search_shortcut(event) {
 					if url_state.active do features.url_close(&url_state)
+					features.shell_close(&shell_state)
 					selection.clear(&selection_state)
 					features.open(&search_state, vt.terminal_screen(terminal))
 					update_search_title(window, terminal, base_title, &search_state)
-					redraw(renderer, window, terminal, &selection_state, &search_state, &url_state, true)
+					redraw(renderer, window, terminal, &selection_state, &search_state, &url_state, true, &shell_state)
 					continue
 				}
 				if url_state.active {
@@ -248,6 +265,11 @@ run :: proc(
 				if search_state.active {
 					handle_search_input(window, terminal, renderer, &selection_state, &search_state, &url_state, base_title, event)
 					continue
+				}
+				if shell_state.active {
+					features.shell_close(&shell_state)
+					redraw(renderer, window, terminal, &selection_state, &search_state, &url_state, true, &shell_state)
+					if event.key == .Escape do continue
 				}
 				if copy_shortcut(event) {
 					copy_selection(window, terminal, &selection_state, .Clipboard)
@@ -282,6 +304,10 @@ run :: proc(
 				}
 				if url_state.active {
 					features.url_close(&url_state)
+					mode_closed = true
+				}
+				if shell_state.active {
+					features.shell_close(&shell_state)
 					mode_closed = true
 				}
 				if mode_closed do restore_window_title(window, terminal, base_title)
@@ -335,7 +361,7 @@ run :: proc(
 		}
 
 		if .IN in fds[1].revents || .HUP in fds[1].revents {
-			if !drain_pty(window, process, terminal, renderer, &selection_state, &search_state, &url_state, &osc52_request, base_title) do running = false
+			if !drain_pty(window, process, terminal, renderer, &selection_state, &search_state, &url_state, &shell_state, &osc52_request, base_title) do running = false
 			queue_terminal_replies(&pending, pending_offset, terminal)
 		}
 		if .OUT in fds[1].revents && pending_offset < len(pending) {
@@ -369,6 +395,14 @@ search_shortcut :: proc(event: x11.Event) -> bool {
 url_shortcut :: proc(event: x11.Event) -> bool {
 	if event.key != .Text || .Control not_in event.modifiers || .Shift not_in event.modifiers do return false
 	return event.input_size == 1 && (event.input[0] == 0x15 || event.input[0] == 'u' || event.input[0] == 'U')
+}
+
+prompt_previous_shortcut :: proc(event: x11.Event) -> bool {
+	return event.key == .Up && .Control in event.modifiers && .Shift in event.modifiers
+}
+
+prompt_next_shortcut :: proc(event: x11.Event) -> bool {
+	return event.key == .Down && .Control in event.modifiers && .Shift in event.modifiers
 }
 
 handle_url_input :: proc(
@@ -465,11 +499,14 @@ redraw :: proc(
 	search_state: ^features.State,
 	url_state: ^features.URL_State,
 	force: bool,
+	shell_state: ^features.Shell_State = nil,
 ) {
 	if url_state.active {
 		drawing.draw(renderer, window, terminal, force, nil, features.url_view_screen(url_state))
 	} else if search_state.active {
 		drawing.draw(renderer, window, terminal, force, &search_state.highlight, features.view_screen(search_state))
+	} else if shell_state != nil && shell_state.active {
+		drawing.draw(renderer, window, terminal, force, nil, features.shell_view_screen(shell_state))
 	} else {
 		drawing.draw(renderer, window, terminal, force, selection_state)
 	}
@@ -529,6 +566,7 @@ drain_pty :: proc(
 	selection_state: ^selection.State,
 	search_state: ^features.State,
 	url_state: ^features.URL_State,
+	shell_state: ^features.Shell_State,
 	osc52_request: ^OSC52_Request,
 	base_title: string,
 ) -> bool {
@@ -544,17 +582,17 @@ drain_pty :: proc(
 			dirty = true
 		case .Would_Block:
 			if dirty {
-				refresh_after_pty(window, terminal, renderer, selection_state, search_state, url_state, base_title)
+				refresh_after_pty(window, terminal, renderer, selection_state, search_state, url_state, shell_state, base_title)
 			}
 			return true
 		case .End:
 			if dirty {
-				refresh_after_pty(window, terminal, renderer, selection_state, search_state, url_state, base_title)
+				refresh_after_pty(window, terminal, renderer, selection_state, search_state, url_state, shell_state, base_title)
 			}
 			return false
 		case .Failed:
 			if dirty {
-				refresh_after_pty(window, terminal, renderer, selection_state, search_state, url_state, base_title)
+				refresh_after_pty(window, terminal, renderer, selection_state, search_state, url_state, shell_state, base_title)
 			}
 			fmt.eprintln("PTY read failed")
 			return false
@@ -595,6 +633,7 @@ refresh_after_pty :: proc(
 	selection_state: ^selection.State,
 	search_state: ^features.State,
 	url_state: ^features.URL_State,
+	shell_state: ^features.Shell_State,
 	base_title: string,
 ) {
 	if search_state.active {
@@ -606,6 +645,7 @@ refresh_after_pty :: proc(
 	} else if terminal.title_changed {
 		restore_window_title(window, terminal, base_title)
 	}
+	if shell_state.active do features.shell_refresh(shell_state, vt.terminal_screen(terminal))
 	terminal.title_changed = false
-	redraw(renderer, window, terminal, selection_state, search_state, url_state, search_state.active || url_state.active)
+	redraw(renderer, window, terminal, selection_state, search_state, url_state, search_state.active || url_state.active || shell_state.active, shell_state)
 }

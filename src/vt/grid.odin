@@ -9,6 +9,9 @@ DEFAULT_SCROLLBACK_LINES :: 10000
 Color_Kind :: enum { Default, Indexed, RGB }
 Color :: struct { kind: Color_Kind, value: u32 }
 
+Shell_Marker :: enum { Prompt, Command, Output, Finished }
+Shell_Markers :: bit_set[Shell_Marker; u8]
+
 Attributes :: struct {
 	foreground: Color,
 	background: Color,
@@ -30,6 +33,9 @@ Cell :: struct {
 	width: u8,
 	continuation: bool,
 	hyperlink_id: u32,
+	shell_markers: Shell_Markers,
+	shell_exit_status: i32,
+	shell_exit_status_set: bool,
 	attributes: Attributes,
 }
 
@@ -186,7 +192,10 @@ collect_logical_lines :: proc(screen: ^Screen) -> [dynamic]Logical_Line {
 row_content_length :: proc(row: []Cell) -> int {
 	for index := len(row)-1; index >= 0; index -= 1 {
 		cell := row[index]
-		if cell.codepoint != ' ' || cell.combining_count > 0 || cell.continuation || cell.hyperlink_id != 0 || cell.attributes != {} do return index+1
+		if cell.codepoint != ' ' || cell.combining_count > 0 || cell.continuation || cell.hyperlink_id != 0 ||
+		   cell.shell_markers != {} || cell.attributes != {} {
+			return index+1
+		}
 	}
 	return 0
 }
@@ -360,9 +369,21 @@ screen_put :: proc(screen: ^Screen, codepoint: rune, attributes: Attributes, aut
 		line_feed(screen, attributes)
 	}
 
-	erase_cells(screen, screen.cursor.row, screen.cursor.column, screen.cursor.column+width-1, attributes)
 	cell := cell_at(screen, screen.cursor.row, screen.cursor.column)
-	cell^ = Cell{codepoint = codepoint, width = u8(width), hyperlink_id = hyperlink_id, attributes = attributes}
+	markers := cell.shell_markers
+	exit_status := cell.shell_exit_status
+	exit_status_set := cell.shell_exit_status_set
+	erase_cells(screen, screen.cursor.row, screen.cursor.column, screen.cursor.column+width-1, attributes)
+	cell = cell_at(screen, screen.cursor.row, screen.cursor.column)
+	cell^ = Cell{
+		codepoint = codepoint,
+		width = u8(width),
+		hyperlink_id = hyperlink_id,
+		shell_markers = markers,
+		shell_exit_status = exit_status,
+		shell_exit_status_set = exit_status_set,
+		attributes = attributes,
+	}
 	if width == 2 {
 		continuation := cell_at(screen, screen.cursor.row, screen.cursor.column+1)
 		continuation^ = blank_cell(attributes)
