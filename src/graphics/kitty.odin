@@ -39,6 +39,7 @@ Kitty_Command :: struct {
 	image_id: u32,
 	placement_id: u32,
 	columns, rows: int,
+	destination_x, destination_y: int,
 	source_x, source_y: int,
 	source_width, source_height: int,
 	z: i32,
@@ -162,6 +163,7 @@ kitty_parse_direct_frame :: proc(data: []byte) -> (Kitty_Frame, Kitty_Error) {
 	seen_id, seen_placement, seen_columns, seen_rows := false, false, false, false
 	seen_medium, seen_compression, seen_more, seen_quiet := false, false, false, false
 	seen_source_x, seen_source_y, seen_source_width, seen_source_height := false, false, false, false
+	seen_destination_x, seen_destination_y := false, false
 	seen_z, seen_cursor_policy, seen_delete := false, false, false
 	unsupported := false
 	key_count := 0
@@ -263,6 +265,18 @@ kitty_parse_direct_frame :: proc(data: []byte) -> (Kitty_Frame, Kitty_Error) {
 			parsed, ok := parse_kitty_uint(value)
 			if !ok || parsed > u64(max(int)) do return Kitty_Frame{command = command}, .Malformed
 			command.source_height = int(parsed)
+		case 'X':
+			if seen_destination_x do return Kitty_Frame{command = command}, .Malformed
+			seen_destination_x = true
+			parsed, ok := parse_kitty_uint(value)
+			if !ok || parsed > u64(max(int)) do return Kitty_Frame{command = command}, .Malformed
+			command.destination_x = int(parsed)
+		case 'Y':
+			if seen_destination_y do return Kitty_Frame{command = command}, .Malformed
+			seen_destination_y = true
+			parsed, ok := parse_kitty_uint(value)
+			if !ok || parsed > u64(max(int)) do return Kitty_Frame{command = command}, .Malformed
+			command.destination_y = int(parsed)
 		case 'z':
 			if seen_z do return Kitty_Frame{command = command}, .Malformed
 			seen_z = true
@@ -331,7 +345,8 @@ kitty_parse_direct_frame :: proc(data: []byte) -> (Kitty_Frame, Kitty_Error) {
 	} else if command.action == .Delete {
 		if len(payload) != 0 || seen_format || seen_width || seen_height || seen_medium ||
 		   seen_compression || seen_more || seen_columns || seen_rows || seen_source_x ||
-		   seen_source_y || seen_source_width || seen_source_height || seen_z || seen_cursor_policy {
+		   seen_source_y || seen_source_width || seen_source_height || seen_destination_x ||
+		   seen_destination_y || seen_z || seen_cursor_policy {
 			return Kitty_Frame{command = command}, .Malformed
 		}
 		if command.delete_target == .Image && command.image_id == 0 do return Kitty_Frame{command = command}, .Malformed

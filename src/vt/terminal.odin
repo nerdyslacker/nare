@@ -128,6 +128,7 @@ Terminal :: struct {
 	osc52_policy: OSC52_Policy,
 	osc52_actions: [dynamic]OSC52_Action,
 	osc52_queued_bytes: int,
+	cell_width, cell_height: int,
 	images: graphics.Registry,
 	kitty_transfer: graphics.Kitty_Transfer,
 }
@@ -150,8 +151,15 @@ terminal_init :: proc(
 	}
 	terminal.modes.autowrap = true
 	terminal.modes.cursor_visible = true
+	terminal.cell_width = 1
+	terminal.cell_height = 1
 	terminal.osc52_policy = osc52_policy
 	return true
+}
+
+terminal_set_cell_size :: proc(terminal: ^Terminal, width, height: int) {
+	terminal.cell_width = clamp(width, 1, graphics.MAX_IMAGE_DIMENSION)
+	terminal.cell_height = clamp(height, 1, graphics.MAX_IMAGE_DIMENSION)
 }
 
 terminal_destroy :: proc(terminal: ^Terminal) {
@@ -295,7 +303,6 @@ handle_apc :: proc(terminal: ^Terminal, data: []byte, discarded: bool = false) {
 }
 
 kitty_place_image :: proc(terminal: ^Terminal, command: graphics.Kitty_Command, image_id: u64) -> string {
-	if command.columns <= 0 || command.rows <= 0 do return "ENOTSUP"
 	resource := graphics.find_image(&terminal.images, image_id)
 	if resource == nil || command.source_x >= resource.width || command.source_y >= resource.height do return "EINVAL"
 	source_width := command.source_width
@@ -304,6 +311,14 @@ kitty_place_image :: proc(terminal: ^Terminal, command: graphics.Kitty_Command, 
 	if source_height == 0 do source_height = resource.height-command.source_y
 	source_width = min(source_width, resource.width-command.source_x)
 	source_height = min(source_height, resource.height-command.source_y)
+	columns, rows, pixel_width, pixel_height, preserve_aspect, geometry_ok := kitty_placement_geometry(
+		command,
+		source_width,
+		source_height,
+		terminal.cell_width,
+		terminal.cell_height,
+	)
+	if !geometry_ok do return "EINVAL"
 	screen := terminal_screen(terminal)
 	screen_kind := graphics.Screen.Alternate if terminal.using_alternate else graphics.Screen.Main
 	_, placement_error := graphics.add_placement(&terminal.images, {
@@ -312,22 +327,58 @@ kitty_place_image :: proc(terminal: ^Terminal, command: graphics.Kitty_Command, 
 		screen = screen_kind,
 		row = screen.cursor.row,
 		column = screen.cursor.column,
-		rows = command.rows,
-		columns = command.columns,
+		rows = rows,
+		columns = columns,
+		pixel_offset_x = command.destination_x,
+		pixel_offset_y = command.destination_y,
+		pixel_width = pixel_width,
+		pixel_height = pixel_height,
 		source_x = command.source_x,
 		source_y = command.source_y,
 		source_width = source_width,
 		source_height = source_height,
 		z = command.z,
-		preserve_aspect = true,
+		preserve_aspect = preserve_aspect,
 	})
 	if placement_error != .None do return "EINVAL"
 	if !command.no_cursor_move {
-		screen.cursor.column = min(screen.columns-1, screen.cursor.column+command.columns)
-		screen.cursor.row = min(screen.scroll_bottom, screen.cursor.row+command.rows)
+		screen.cursor.column = min(screen.columns-1, screen.cursor.column+columns)
+		screen.cursor.row = min(screen.scroll_bottom, screen.cursor.row+rows)
 		screen.wrap_pending = false
 	}
 	return ""
+}
+
+kitty_placement_geometry :: proc(
+	command: graphics.Kitty_Command,
+	source_width, source_height, cell_width, cell_height: int,
+) -> (columns, rows, pixel_width, pixel_height: int, preserve_aspect, ok: bool) {
+	if source_width <= 0 || source_height <= 0 || cell_width <= 0 || cell_height <= 0 ||
+	   command.destination_x < 0 || command.destination_x >= cell_width ||
+	   command.destination_y < 0 || command.destination_y >= cell_height {
+		return
+	}
+	columns, rows = command.columns, command.rows
+	if columns > 0 && rows > 0 {
+		pixel_width = columns*cell_width
+		pixel_height = rows*cell_height
+		preserve_aspect = true
+	} else if columns > 0 {
+		pixel_width = columns*cell_width
+		pixel_height = max(1, int((i64(pixel_width)*i64(source_height)+i64(source_width)-1)/i64(source_width)))
+		rows = max(1, (pixel_height+cell_height-1)/cell_height)
+	} else if rows > 0 {
+		pixel_height = rows*cell_height
+		pixel_width = max(1, int((i64(pixel_height)*i64(source_width)+i64(source_height)-1)/i64(source_height)))
+		columns = max(1, (pixel_width+cell_width-1)/cell_width)
+	} else {
+		pixel_width, pixel_height = source_width, source_height
+		columns = max(1, (pixel_width+cell_width-1)/cell_width)
+		rows = max(1, (pixel_height+cell_height-1)/cell_height)
+	}
+	if columns > graphics.MAX_PLACEMENT_CELLS || rows > graphics.MAX_PLACEMENT_CELLS do return
+	ok = true
+	return
 }
 
 kitty_error_text :: proc(err: graphics.Kitty_Error) -> string {

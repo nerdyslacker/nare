@@ -5,6 +5,7 @@ MAX_IMAGE_PIXELS :: 16 * 1024 * 1024
 MAX_IMAGE_BYTES :: 64 * 1024 * 1024
 MAX_CACHE_BYTES :: 256 * 1024 * 1024
 MAX_PLACEMENT_CELLS :: 65_535
+MAX_PLACEMENT_PIXELS :: MAX_PLACEMENT_CELLS*MAX_IMAGE_DIMENSION
 
 Pixel_Format :: enum {
 	RGB8,
@@ -62,6 +63,8 @@ Placement_Request :: struct {
 	screen: Screen,
 	row, column: int,
 	rows, columns: int,
+	pixel_offset_x, pixel_offset_y: int,
+	pixel_width, pixel_height: int,
 	source_x, source_y: int,
 	source_width, source_height: int,
 	z: i32,
@@ -75,6 +78,8 @@ Placement :: struct {
 	screen: Screen,
 	row, column: int,
 	rows, columns: int,
+	pixel_offset_x, pixel_offset_y: int,
+	pixel_width, pixel_height: int,
 	source_x, source_y: int,
 	source_width, source_height: int,
 	z: i32,
@@ -152,6 +157,9 @@ add_placement :: proc(registry: ^Registry, request: Placement_Request) -> (u64, 
 	if resource == nil do return 0, .Unknown_Image
 	if request.rows <= 0 || request.rows > MAX_PLACEMENT_CELLS ||
 	   request.columns <= 0 || request.columns > MAX_PLACEMENT_CELLS ||
+	   request.pixel_offset_x < 0 || request.pixel_offset_y < 0 ||
+	   request.pixel_width < 0 || request.pixel_width > MAX_PLACEMENT_PIXELS ||
+	   request.pixel_height < 0 || request.pixel_height > MAX_PLACEMENT_PIXELS ||
 	   request.source_x < 0 || request.source_x >= resource.width ||
 	   request.source_y < 0 || request.source_y >= resource.height {
 		return 0, .Invalid_Placement
@@ -173,6 +181,10 @@ add_placement :: proc(registry: ^Registry, request: Placement_Request) -> (u64, 
 		column = request.column,
 		rows = request.rows,
 		columns = request.columns,
+		pixel_offset_x = request.pixel_offset_x,
+		pixel_offset_y = request.pixel_offset_y,
+		pixel_width = request.pixel_width,
+		pixel_height = request.pixel_height,
 		source_x = request.source_x,
 		source_y = request.source_y,
 		source_width = source_width,
@@ -349,8 +361,12 @@ clip_placement_top :: proc(placement: ^Placement, cells: int) {
 	clipped := min(max(0, cells), placement.rows)
 	if clipped == 0 do return
 	pixels := (placement.source_height*clipped+placement.rows-1)/placement.rows
+	destination_pixels := 0
+	if placement.pixel_height > 0 do destination_pixels = (placement.pixel_height*clipped+placement.rows-1)/placement.rows
 	placement.source_y += pixels
 	placement.source_height = max(0, placement.source_height-pixels)
+	placement.pixel_height = max(0, placement.pixel_height-destination_pixels)
+	placement.pixel_offset_y = 0
 	placement.row += clipped
 	placement.rows -= clipped
 }
@@ -359,7 +375,10 @@ clip_placement_bottom :: proc(placement: ^Placement, cells: int) {
 	clipped := min(max(0, cells), placement.rows)
 	if clipped == 0 do return
 	pixels := (placement.source_height*clipped+placement.rows-1)/placement.rows
+	destination_pixels := 0
+	if placement.pixel_height > 0 do destination_pixels = (placement.pixel_height*clipped+placement.rows-1)/placement.rows
 	placement.source_height = max(0, placement.source_height-pixels)
+	placement.pixel_height = max(0, placement.pixel_height-destination_pixels)
 	placement.rows -= clipped
 }
 

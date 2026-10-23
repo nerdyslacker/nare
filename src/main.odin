@@ -56,6 +56,7 @@ app_main :: proc() -> int {
 		fmt.eprintln("could not initialize terminal")
 		return 1
 	}
+	vt.terminal_set_cell_size(&terminal, window.cell_w, window.cell_h)
 	defer vt.terminal_destroy(&terminal)
 	return run(&window, &process, &terminal, &renderer, options.url_opener, options.shell_output_pipe, options.title)
 }

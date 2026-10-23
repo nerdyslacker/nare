@@ -169,10 +169,10 @@ append_image_commands :: proc(
 }
 
 image_destination :: proc(placement: graphics.Placement, cell_width, cell_height: int) -> (x, y, width, height: int) {
-	x = placement.column*cell_width
-	y = placement.row*cell_height
-	width = placement.columns*cell_width
-	height = placement.rows*cell_height
+	x = placement.column*cell_width+placement.pixel_offset_x
+	y = placement.row*cell_height+placement.pixel_offset_y
+	width = placement.pixel_width if placement.pixel_width > 0 else placement.columns*cell_width
+	height = placement.pixel_height if placement.pixel_height > 0 else placement.rows*cell_height
 	if !placement.preserve_aspect || placement.source_width <= 0 || placement.source_height <= 0 do return
 	if i64(width)*i64(placement.source_height) > i64(height)*i64(placement.source_width) {
 		fitted := max(1, int(i64(height)*i64(placement.source_width)/i64(placement.source_height)))
