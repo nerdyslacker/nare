@@ -142,8 +142,10 @@ terminal_init :: proc(
 	columns, rows: int,
 	scrollback_limit: int = DEFAULT_SCROLLBACK_LINES,
 	osc52_policy: OSC52_Policy = .Disabled,
+	graphics_limits: ^graphics.Limits = nil,
 ) -> bool {
-	if graphics.registry_init(&terminal.images) != .None do return false
+	registry_error := graphics.registry_init_with_limits(&terminal.images, graphics_limits^) if graphics_limits != nil else graphics.registry_init(&terminal.images)
+	if registry_error != .None do return false
 	if !screen_init(&terminal.main_screen, columns, rows, scrollback_limit, &terminal.images, .Main) {
 		graphics.registry_destroy(&terminal.images)
 		return false
@@ -369,6 +371,7 @@ kitty_place_image :: proc(terminal: ^Terminal, command: graphics.Kitty_Command, 
 		z = command.z,
 		preserve_aspect = preserve_aspect,
 	})
+	if placement_error == .Active_Limit do return "ENOSPC"
 	if placement_error != .None do return "EINVAL"
 	if !command.no_cursor_move {
 		screen.cursor.column = min(screen.columns-1, screen.cursor.column+columns)

@@ -4,6 +4,8 @@ MAX_IMAGE_DIMENSION :: 16_384
 MAX_IMAGE_PIXELS :: 16 * 1024 * 1024
 MAX_IMAGE_BYTES :: 64 * 1024 * 1024
 MAX_CACHE_BYTES :: 256 * 1024 * 1024
+MAX_ACTIVE_IMAGES :: 65_536
+MAX_ACTIVE_PLACEMENTS :: 262_144
 MAX_PLACEMENT_CELLS :: 65_535
 MAX_PLACEMENT_PIXELS :: MAX_PLACEMENT_CELLS*MAX_IMAGE_DIMENSION
 
@@ -43,7 +45,17 @@ Error :: enum {
 	Duplicate_Protocol_ID,
 	Unknown_Image,
 	Invalid_Placement,
+	Active_Limit,
 	ID_Exhausted,
+}
+
+Limits :: struct {
+	cache_bytes: int,
+	kitty_cache_bytes: int,
+	sixel_cache_bytes: int,
+	iterm2_cache_bytes: int,
+	max_images: int,
+	max_placements: int,
 }
 
 Decoded_Image :: struct {
@@ -98,7 +110,8 @@ Registry :: struct {
 	resources: [dynamic]Resource,
 	placements: [dynamic]Placement,
 	decoded_bytes: int,
-	budget_bytes: int,
+	protocol_bytes: [4]int,
+	limits: Limits,
 	next_resource_id: u64,
 	next_placement_id: u64,
 	clock: u64,
@@ -107,7 +120,35 @@ Registry :: struct {
 
 registry_init :: proc(registry: ^Registry, budget_bytes: int = MAX_CACHE_BYTES) -> Error {
 	if budget_bytes < 0 || budget_bytes > MAX_CACHE_BYTES do return .Invalid_Limit
-	registry.budget_bytes = budget_bytes
+	limits := limits_default()
+	limits.cache_bytes = budget_bytes
+	limits.kitty_cache_bytes = budget_bytes
+	limits.sixel_cache_bytes = budget_bytes
+	limits.iterm2_cache_bytes = budget_bytes
+	return registry_init_with_limits(registry, limits)
+}
+
+limits_default :: proc() -> Limits {
+	return {
+		cache_bytes = MAX_CACHE_BYTES,
+		kitty_cache_bytes = MAX_CACHE_BYTES,
+		sixel_cache_bytes = MAX_CACHE_BYTES,
+		iterm2_cache_bytes = MAX_CACHE_BYTES,
+		max_images = 4096,
+		max_placements = 65_536,
+	}
+}
+
+registry_init_with_limits :: proc(registry: ^Registry, limits: Limits) -> Error {
+	if limits.cache_bytes < 0 || limits.cache_bytes > MAX_CACHE_BYTES ||
+	   limits.kitty_cache_bytes < 0 || limits.kitty_cache_bytes > MAX_CACHE_BYTES ||
+	   limits.sixel_cache_bytes < 0 || limits.sixel_cache_bytes > MAX_CACHE_BYTES ||
+	   limits.iterm2_cache_bytes < 0 || limits.iterm2_cache_bytes > MAX_CACHE_BYTES ||
+	   limits.max_images <= 0 || limits.max_images > MAX_ACTIVE_IMAGES ||
+	   limits.max_placements <= 0 || limits.max_placements > MAX_ACTIVE_PLACEMENTS {
+		return .Invalid_Limit
+	}
+	registry.limits = limits
 	registry.next_resource_id = 1
 	registry.next_placement_id = 1
 	return .None
@@ -137,9 +178,21 @@ add_image :: proc(
 		return 0, .Duplicate_Protocol_ID
 	}
 	if registry.next_resource_id == 0 || registry.next_resource_id == max(u64) do return 0, .ID_Exhausted
-	if byte_count > registry.budget_bytes do return 0, .Cache_Full
-	evict_for(registry, byte_count)
-	if registry.decoded_bytes > registry.budget_bytes-byte_count do return 0, .Cache_Full
+	protocol_budget := protocol_budget(registry, protocol)
+	protocol_index := int(protocol)
+	if protocol_index <= int(Protocol.None) || protocol_index >= len(registry.protocol_bytes) ||
+	   byte_count > registry.limits.cache_bytes || byte_count > protocol_budget {
+		return 0, .Cache_Full
+	}
+	evict_for(registry, protocol, byte_count)
+	if registry.decoded_bytes > registry.limits.cache_bytes-byte_count ||
+	   registry.protocol_bytes[protocol_index] > protocol_budget-byte_count {
+		return 0, .Cache_Full
+	}
+	if len(registry.resources) >= registry.limits.max_images {
+		evict_oldest(registry, .None)
+		if len(registry.resources) >= registry.limits.max_images do return 0, .Active_Limit
+	}
 
 	id := registry.next_resource_id
 	registry.next_resource_id += 1
@@ -156,6 +209,7 @@ add_image :: proc(
 		last_used = registry.clock,
 	})
 	registry.decoded_bytes += byte_count
+	registry.protocol_bytes[protocol_index] += byte_count
 	image^ = {}
 	return id, .None
 }
@@ -212,6 +266,7 @@ add_placement :: proc(registry: ^Registry, request: Placement_Request) -> (u64, 
 	}
 
 	if registry.next_placement_id == 0 || registry.next_placement_id == max(u64) do return 0, .ID_Exhausted
+	if len(registry.placements) >= registry.limits.max_placements do return 0, .Active_Limit
 	placement.id = registry.next_placement_id
 	registry.next_placement_id += 1
 	append(&registry.placements, placement)
@@ -367,6 +422,7 @@ registry_clear :: proc(registry: ^Registry) {
 	clear(&registry.resources)
 	clear(&registry.placements)
 	registry.decoded_bytes = 0
+	registry.protocol_bytes = {}
 	if had_placements do registry.generation += 1
 }
 
@@ -488,19 +544,39 @@ touch :: proc(registry: ^Registry, resource: ^Resource) {
 	resource.last_used = registry.clock
 }
 
-evict_for :: proc(registry: ^Registry, incoming_bytes: int) {
-	for registry.decoded_bytes > registry.budget_bytes-incoming_bytes {
-		oldest_index := -1
-		oldest_tick := max(u64)
-		for resource, index in registry.resources {
-			if resource.placement_count == 0 && resource.last_used < oldest_tick {
-				oldest_index = index
-				oldest_tick = resource.last_used
-			}
-		}
-		if oldest_index < 0 do return
-		delete_resource_at(registry, oldest_index)
+protocol_budget :: proc(registry: ^Registry, protocol: Protocol) -> int {
+	switch protocol {
+	case .Kitty: return registry.limits.kitty_cache_bytes
+	case .Sixel: return registry.limits.sixel_cache_bytes
+	case .ITerm2: return registry.limits.iterm2_cache_bytes
+	case .None: return 0
 	}
+	return 0
+}
+
+evict_for :: proc(registry: ^Registry, protocol: Protocol, incoming_bytes: int) {
+	protocol_index := int(protocol)
+	budget := protocol_budget(registry, protocol)
+	for registry.protocol_bytes[protocol_index] > budget-incoming_bytes {
+		if !evict_oldest(registry, protocol) do return
+	}
+	for registry.decoded_bytes > registry.limits.cache_bytes-incoming_bytes {
+		if !evict_oldest(registry, .None) do return
+	}
+}
+
+evict_oldest :: proc(registry: ^Registry, protocol: Protocol) -> bool {
+	oldest_index := -1
+	oldest_tick := max(u64)
+	for resource, index in registry.resources {
+		if resource.placement_count == 0 && (protocol == .None || resource.protocol == protocol) && resource.last_used < oldest_tick {
+			oldest_index = index
+			oldest_tick = resource.last_used
+		}
+	}
+	if oldest_index < 0 do return false
+	delete_resource_at(registry, oldest_index)
+	return true
 }
 
 remove_placement_at :: proc(registry: ^Registry, index: int) {
@@ -521,6 +597,7 @@ delete_resource_at :: proc(registry: ^Registry, index: int) {
 		}
 	}
 	registry.decoded_bytes -= len(registry.resources[index].pixels)
+	registry.protocol_bytes[int(registry.resources[index].protocol)] -= len(registry.resources[index].pixels)
 	delete(registry.resources[index].pixels)
 	ordered_remove(&registry.resources, index)
 	if had_placements do registry.generation += 1

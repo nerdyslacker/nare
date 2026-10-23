@@ -5,6 +5,7 @@ import "core:os"
 import "core:strconv"
 import "core:strings"
 import drawing "../render"
+import graphics "../graphics"
 import vt "../vt"
 
 MAX_CONFIG_BYTES :: 64 * 1024
@@ -39,6 +40,7 @@ Settings :: struct {
 	term: string,
 	scrollback_lines: int,
 	osc52_policy: vt.OSC52_Policy,
+	graphics_limits: graphics.Limits,
 }
 
 settings_init :: proc(settings: ^Settings) {
@@ -52,6 +54,7 @@ settings_init :: proc(settings: ^Settings) {
 	settings.term = strings.clone("xterm-256color")
 	settings.scrollback_lines = 10000
 	settings.osc52_policy = .Disabled
+	settings.graphics_limits = graphics.limits_default()
 }
 
 settings_destroy :: proc(settings: ^Settings) {
@@ -97,7 +100,7 @@ parse :: proc(settings: ^Settings, contents: string) -> Result {
 		if line[0] == '[' {
 			if len(line) < 3 || line[len(line)-1] != ']' do return {error = .Syntax, line = line_number}
 			section = strings.trim_space(line[1:len(line)-1])
-			if section != "main" && section != "scrollback" && section != "url" && section != "shell" && section != "security" {
+			if section != "main" && section != "scrollback" && section != "url" && section != "shell" && section != "security" && section != "graphics" {
 				return {error = .Unknown_Section, line = line_number}
 			}
 			continue
@@ -168,10 +171,45 @@ apply :: proc(settings: ^Settings, section, key, value: string) -> Error {
 		case "enabled": settings.osc52_policy = .Enabled
 		case: return .Invalid_Value
 		}
+	} else if section == "graphics" {
+		switch key {
+		case "cache-size-mib":
+			parsed, ok := parse_mebibytes(value, 1)
+			if !ok do return .Invalid_Value
+			settings.graphics_limits.cache_bytes = parsed
+		case "kitty-cache-size-mib":
+			parsed, ok := parse_mebibytes(value, 0)
+			if !ok do return .Invalid_Value
+			settings.graphics_limits.kitty_cache_bytes = parsed
+		case "sixel-cache-size-mib":
+			parsed, ok := parse_mebibytes(value, 0)
+			if !ok do return .Invalid_Value
+			settings.graphics_limits.sixel_cache_bytes = parsed
+		case "iterm2-cache-size-mib":
+			parsed, ok := parse_mebibytes(value, 0)
+			if !ok do return .Invalid_Value
+			settings.graphics_limits.iterm2_cache_bytes = parsed
+		case "max-images":
+			parsed, ok := strconv.parse_int(value)
+			if !ok || parsed <= 0 || parsed > graphics.MAX_ACTIVE_IMAGES do return .Invalid_Value
+			settings.graphics_limits.max_images = parsed
+		case "max-placements":
+			parsed, ok := strconv.parse_int(value)
+			if !ok || parsed <= 0 || parsed > graphics.MAX_ACTIVE_PLACEMENTS do return .Invalid_Value
+			settings.graphics_limits.max_placements = parsed
+		case: return .Unknown_Key
+		}
 	} else {
 		return .Unknown_Section
 	}
 	return .None
+}
+
+parse_mebibytes :: proc(value: string, minimum: int) -> (int, bool) {
+	parsed, ok := strconv.parse_int(value)
+	maximum := graphics.MAX_CACHE_BYTES/(1024*1024)
+	if !ok || parsed < minimum || parsed > maximum do return 0, false
+	return parsed*1024*1024, true
 }
 
 valid_term :: proc(value: string) -> bool {

@@ -52,7 +52,7 @@ app_main :: proc() -> int {
 	}
 	defer pty.shutdown(&process)
 	terminal: vt.Terminal
-	if !vt.terminal_init(&terminal, columns, rows, options.scrollback_lines, options.osc52_policy) {
+	if !vt.terminal_init(&terminal, columns, rows, options.scrollback_lines, options.osc52_policy, &options.graphics_limits) {
 		fmt.eprintln("could not initialize terminal")
 		return 1
 	}
