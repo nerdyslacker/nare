@@ -3,8 +3,10 @@ package graphics
 import base64 "core:encoding/base64"
 import "core:strconv"
 import "core:strings"
+import zlib "vendor:zlib"
 
-MAX_KITTY_ENCODED_BYTES :: ((MAX_IMAGE_BYTES+2)/3)*4
+MAX_KITTY_COMPRESSED_BYTES :: MAX_IMAGE_BYTES+(MAX_IMAGE_BYTES>>12)+(MAX_IMAGE_BYTES>>14)+(MAX_IMAGE_BYTES>>25)+13
+MAX_KITTY_ENCODED_BYTES :: ((MAX_KITTY_COMPRESSED_BYTES+2)/3)*4
 MAX_KITTY_CHUNKS :: 32_768
 MAX_KITTY_CHUNK_BYTES :: 4096
 
@@ -36,6 +38,7 @@ Kitty_Command :: struct {
 	source_width, source_height: int,
 	z: i32,
 	no_cursor_move: bool,
+	compressed: bool,
 	more: bool,
 	quiet: int,
 }
@@ -144,7 +147,7 @@ kitty_parse_direct_frame :: proc(data: []byte) -> (Kitty_Frame, Kitty_Error) {
 	payload := data[separator+1:]
 	seen_action, seen_format, seen_width, seen_height := false, false, false, false
 	seen_id, seen_placement, seen_columns, seen_rows := false, false, false, false
-	seen_medium, seen_more, seen_quiet := false, false, false
+	seen_medium, seen_compression, seen_more, seen_quiet := false, false, false, false
 	seen_source_x, seen_source_y, seen_source_width, seen_source_height := false, false, false, false
 	seen_z, seen_cursor_policy := false, false
 	unsupported := false
@@ -275,7 +278,14 @@ kitty_parse_direct_frame :: proc(data: []byte) -> (Kitty_Frame, Kitty_Error) {
 			quiet, ok := parse_kitty_uint(value)
 			if !ok || quiet > 2 do return Kitty_Frame{command = command}, .Malformed
 			command.quiet = int(quiet)
-		case 'o': unsupported = true
+		case 'o':
+			if seen_compression do return Kitty_Frame{command = command}, .Malformed
+			seen_compression = true
+			if value == "z" {
+				command.compressed = true
+			} else {
+				unsupported = true
+			}
 		case: unsupported = true
 		}
 	}
@@ -294,7 +304,9 @@ kitty_encoded_limit :: proc(command: Kitty_Command) -> (int, Kitty_Error) {
 	_, byte_count, layout_error := image_layout(command.width, command.height, command.format)
 	if layout_error == .Invalid_Dimensions do return 0, .Malformed
 	if layout_error != .None do return 0, .Image_Limit
-	encoded_limit := ((byte_count+2)/3)*4
+	input_limit := byte_count
+	if command.compressed do input_limit = kitty_compressed_bound(byte_count)
+	encoded_limit := ((input_limit+2)/3)*4
 	if encoded_limit > MAX_KITTY_ENCODED_BYTES do return 0, .Image_Limit
 	return encoded_limit, .None
 }
@@ -312,17 +324,35 @@ kitty_append_chunk :: proc(transfer: ^Kitty_Transfer, payload: []byte, more: boo
 }
 
 kitty_decode_payload :: proc(command: Kitty_Command, payload: []byte) -> (Decoded_Image, Kitty_Error) {
-	stride, encoded_limit, limit_error := kitty_payload_layout(command)
+	stride, byte_count, encoded_limit, limit_error := kitty_payload_layout(command)
 	if limit_error != .None do return {}, limit_error
 	if len(payload) == 0 || len(payload) > encoded_limit do return {}, .Image_Limit
 	decoded, decode_error := base64.decode(string(payload), options = {.Strict})
 	if decode_error != nil do return {}, .Invalid_Data
+	pixels := decoded
+	if command.compressed {
+		pixels = make([]byte, byte_count)
+		destination_length := zlib.uLongf(byte_count)
+		compressed_bytes := len(decoded)
+		source_length := zlib.uLong(compressed_bytes)
+		status := zlib.uncompress2(
+			raw_data(pixels),
+			&destination_length,
+			raw_data(decoded),
+			&source_length,
+		)
+		delete(decoded)
+		if status != zlib.OK || int(destination_length) != byte_count || int(source_length) != compressed_bytes {
+			delete(pixels)
+			return {}, .Invalid_Data
+		}
+	}
 	image := Decoded_Image{
 		width = command.width,
 		height = command.height,
 		stride = stride,
 		format = command.format,
-		pixels = decoded,
+		pixels = pixels,
 	}
 	_, image_error := validate_image(&image)
 	if image_error != .None {
@@ -333,15 +363,20 @@ kitty_decode_payload :: proc(command: Kitty_Command, payload: []byte) -> (Decode
 	return image, .None
 }
 
-kitty_payload_layout :: proc(command: Kitty_Command) -> (stride, encoded_limit: int, err: Kitty_Error) {
-	byte_count: int
+kitty_payload_layout :: proc(command: Kitty_Command) -> (stride, byte_count, encoded_limit: int, err: Kitty_Error) {
 	layout_error: Error
 	stride, byte_count, layout_error = image_layout(command.width, command.height, command.format)
-	if layout_error == .Invalid_Dimensions do return 0, 0, .Malformed
-	if layout_error != .None do return 0, 0, .Image_Limit
-	encoded_limit = ((byte_count+2)/3)*4
-	if encoded_limit > MAX_KITTY_ENCODED_BYTES do return 0, 0, .Image_Limit
-	return stride, encoded_limit, .None
+	if layout_error == .Invalid_Dimensions do return 0, 0, 0, .Malformed
+	if layout_error != .None do return 0, 0, 0, .Image_Limit
+	input_limit := byte_count
+	if command.compressed do input_limit = kitty_compressed_bound(byte_count)
+	encoded_limit = ((input_limit+2)/3)*4
+	if encoded_limit > MAX_KITTY_ENCODED_BYTES do return 0, 0, 0, .Image_Limit
+	return stride, byte_count, encoded_limit, .None
+}
+
+kitty_compressed_bound :: proc(byte_count: int) -> int {
+	return byte_count+(byte_count>>12)+(byte_count>>14)+(byte_count>>25)+13
 }
 
 parse_kitty_uint :: proc(value: string) -> (u64, bool) {
