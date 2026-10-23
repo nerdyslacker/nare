@@ -18,6 +18,46 @@ MAX_OSC52_READ_BYTES :: 128 * 1024
 MAX_OSC52_ACTIONS :: 8
 MAX_OSC52_QUEUED_BYTES :: 512 * 1024
 MAX_OSC133_BYTES :: 4 * 1024
+MAX_XTGETTCAP_BYTES :: 4 * 1024
+MAX_XTGETTCAP_NAMES :: 32
+MAX_XTGETTCAP_NAME_BYTES :: 32
+
+XTGETTCAP_Entry :: struct {
+	name: string,
+	value: string,
+}
+
+XTGETTCAP_ENTRIES := [?]XTGETTCAP_Entry{
+	{"Co", "256"},
+	{"colors", "256"},
+	{"RGB", "8"},
+	{"kf1", "\x1bOP"},
+	{"kf2", "\x1bOQ"},
+	{"kf3", "\x1bOR"},
+	{"kf4", "\x1bOS"},
+	{"kf5", "\x1b[15~"},
+	{"kf6", "\x1b[17~"},
+	{"kf7", "\x1b[18~"},
+	{"kf8", "\x1b[19~"},
+	{"kf9", "\x1b[20~"},
+	{"kf10", "\x1b[21~"},
+	{"kf11", "\x1b[23~"},
+	{"kf12", "\x1b[24~"},
+	{"kcuu1", "\x1bOA"},
+	{"kcud1", "\x1bOB"},
+	{"kcuf1", "\x1bOC"},
+	{"kcub1", "\x1bOD"},
+	{"khome", "\x1bOH"},
+	{"kend", "\x1bOF"},
+	{"kich1", "\x1b[2~"},
+	{"kdch1", "\x1b[3~"},
+	{"kpp", "\x1b[5~"},
+	{"knp", "\x1b[6~"},
+	{"smkx", "\x1b[?1h\x1b="},
+	{"rmkx", "\x1b[?1l\x1b>"},
+	{"smcup", "\x1b[?1049h"},
+	{"rmcup", "\x1b[?1049l"},
+}
 
 OSC52_Policy :: enum {
 	Disabled,
@@ -164,7 +204,83 @@ terminal_event :: proc(event: Event, user_data: rawptr) {
 		handle_csi(terminal, event)
 	case .OSC:
 		handle_osc(terminal, event.data)
-	case .DCS, .APC:
+	case .DCS:
+		handle_dcs(terminal, event.data)
+	case .APC:
+	}
+}
+
+handle_dcs :: proc(terminal: ^Terminal, data: []byte) {
+	if len(data) < 2 || data[0] != '+' || data[1] != 'q' do return
+	handle_xtgettcap(terminal, data[2:])
+}
+
+handle_xtgettcap :: proc(terminal: ^Terminal, query: []byte) {
+	if len(query) == 0 || len(query) > MAX_XTGETTCAP_BYTES {
+		append_reply(terminal, transmute([]byte)string("\x1bP0+r\x1b\\"))
+		return
+	}
+	response: [dynamic]byte
+	defer delete(response)
+	append(&response, ..transmute([]byte)string("\x1bP1+r"))
+	start, count := 0, 0
+	for start <= len(query) {
+		end := start
+		for end < len(query) && query[end] != ';' do end += 1
+		encoded_name := query[start:end]
+		name_buffer: [MAX_XTGETTCAP_NAME_BYTES]byte
+		name, ok := decode_xtgettcap_name(encoded_name, name_buffer[:])
+		value, found := xtgettcap_value(string(name))
+		if !ok || !found || count >= MAX_XTGETTCAP_NAMES {
+			clear(&response)
+			append(&response, ..transmute([]byte)string("\x1bP0+r\x1b\\"))
+			append_reply(terminal, response[:])
+			return
+		}
+		if count > 0 do append(&response, ';')
+		append(&response, ..encoded_name)
+		append(&response, '=')
+		append_hex(&response, transmute([]byte)value)
+		count += 1
+		if end == len(query) do break
+		start = end+1
+	}
+	append(&response, 0x1b, '\\')
+	append_reply(terminal, response[:])
+}
+
+decode_xtgettcap_name :: proc(encoded: []byte, output: []byte) -> ([]byte, bool) {
+	if len(encoded) == 0 || len(encoded)%2 != 0 || len(encoded)/2 > len(output) do return nil, false
+	for index := 0; index < len(encoded); index += 2 {
+		high, high_ok := hex_nibble(encoded[index])
+		low, low_ok := hex_nibble(encoded[index+1])
+		if !high_ok || !low_ok do return nil, false
+		output[index/2] = high<<4 | low
+	}
+	return output[:len(encoded)/2], true
+}
+
+hex_nibble :: proc(value: byte) -> (byte, bool) {
+	switch value {
+	case '0'..='9': return value-'0', true
+	case 'a'..='f': return value-'a'+10, true
+	case 'A'..='F': return value-'A'+10, true
+	case: return 0, false
+	}
+}
+
+xtgettcap_value :: proc(name: string) -> (string, bool) {
+	for entry in XTGETTCAP_ENTRIES {
+		if entry.name == name do return entry.value, true
+	}
+	return "", false
+}
+
+append_hex :: proc(output: ^[dynamic]byte, data: []byte) {
+	digits := "0123456789ABCDEF"
+	for value in data {
+		append(output, digits[value>>4])
+		append(output, digits[value&0x0f])
 	}
 }
 

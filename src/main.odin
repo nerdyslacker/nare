@@ -57,7 +57,7 @@ app_main :: proc() -> int {
 		return 1
 	}
 	defer vt.terminal_destroy(&terminal)
-	return run(&window, &process, &terminal, &renderer, options.url_opener, options.title)
+	return run(&window, &process, &terminal, &renderer, options.url_opener, options.shell_output_pipe, options.title)
 }
 
 command_from_args :: proc(args: []string) -> (options: config.Settings, command: [dynamic]cstring, err: string) {
@@ -151,12 +151,14 @@ apply_argument :: proc(options: ^config.Settings, argument: string) -> config.Er
 		return config.apply(options, "url", "opener", argument[len("--url-opener="):])
 	} else if strings.has_prefix(argument, "--osc52=") {
 		return config.apply(options, "security", "osc52", argument[len("--osc52="):])
+	} else if strings.has_prefix(argument, "--output-pipe=") {
+		return config.apply(options, "shell", "output-pipe", argument[len("--output-pipe="):])
 	}
 	return .Unknown_Key
 }
 
 usage :: proc() -> string {
-	return "usage: nare [--config=PATH|--no-config] [--renderer=cpu|gpu|auto] [--font=FAMILY] [--font-size=PIXELS] [--ligatures=true|false] [--title=TITLE] [--scrollback-lines=COUNT] [--url-opener=COMMAND] [--osc52=disabled|copy-enabled|paste-enabled|enabled] [-e COMMAND [ARG...]]"
+	return "usage: nare [--config=PATH|--no-config] [--renderer=cpu|gpu|auto] [--font=FAMILY] [--font-size=PIXELS] [--ligatures=true|false] [--title=TITLE] [--scrollback-lines=COUNT] [--url-opener=COMMAND] [--output-pipe=COMMAND] [--osc52=disabled|copy-enabled|paste-enabled|enabled] [-e COMMAND [ARG...]]"
 }
 
 OSC52_Request :: struct {
@@ -186,6 +188,7 @@ run :: proc(
 	terminal: ^vt.Terminal,
 	renderer: ^drawing.Renderer,
 	url_opener: string,
+	output_pipe: string,
 	base_title: string,
 ) -> int {
 	pending: [dynamic]byte
@@ -269,6 +272,14 @@ run :: proc(
 				if shell_state.active && copy_output_shortcut(event) {
 					output, ok := features.shell_selected_output(&shell_state, vt.terminal_screen(terminal))
 					if ok do _ = x11.own_selection(window, .Clipboard, transmute([]byte)output)
+					delete(output)
+					continue
+				}
+				if shell_state.active && pipe_output_shortcut(event) {
+					output, ok := features.shell_selected_output(&shell_state, vt.terminal_screen(terminal))
+					if ok && output_pipe != "" && !features.pipe_output(output_pipe, transmute([]byte)output) {
+						fmt.eprintln("could not launch output pipe")
+					}
 					delete(output)
 					continue
 				}
@@ -414,6 +425,11 @@ prompt_next_shortcut :: proc(event: x11.Event) -> bool {
 copy_output_shortcut :: proc(event: x11.Event) -> bool {
 	if event.key != .Text || .Control not_in event.modifiers || .Shift not_in event.modifiers do return false
 	return event.input_size == 1 && (event.input[0] == 0x0f || event.input[0] == 'o' || event.input[0] == 'O')
+}
+
+pipe_output_shortcut :: proc(event: x11.Event) -> bool {
+	if event.key != .Text || .Control not_in event.modifiers || .Shift not_in event.modifiers do return false
+	return event.input_size == 1 && (event.input[0] == 0x10 || event.input[0] == 'p' || event.input[0] == 'P')
 }
 
 handle_url_input :: proc(

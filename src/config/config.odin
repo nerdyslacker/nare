@@ -34,6 +34,7 @@ Settings :: struct {
 	font_size: int,
 	title: string,
 	url_opener: string,
+	shell_output_pipe: string,
 	scrollback_lines: int,
 	osc52_policy: vt.OSC52_Policy,
 }
@@ -45,6 +46,7 @@ settings_init :: proc(settings: ^Settings) {
 	settings.font_size = 16
 	settings.title = strings.clone("nare")
 	settings.url_opener = strings.clone("xdg-open")
+	settings.shell_output_pipe = strings.clone("")
 	settings.scrollback_lines = 10000
 	settings.osc52_policy = .Disabled
 }
@@ -53,6 +55,7 @@ settings_destroy :: proc(settings: ^Settings) {
 	delete(settings.font)
 	delete(settings.title)
 	delete(settings.url_opener)
+	delete(settings.shell_output_pipe)
 	settings^ = {}
 }
 
@@ -90,7 +93,7 @@ parse :: proc(settings: ^Settings, contents: string) -> Result {
 		if line[0] == '[' {
 			if len(line) < 3 || line[len(line)-1] != ']' do return {error = .Syntax, line = line_number}
 			section = strings.trim_space(line[1:len(line)-1])
-			if section != "main" && section != "scrollback" && section != "url" && section != "security" {
+			if section != "main" && section != "scrollback" && section != "url" && section != "shell" && section != "security" {
 				return {error = .Unknown_Section, line = line_number}
 			}
 			continue
@@ -142,6 +145,10 @@ apply :: proc(settings: ^Settings, section, key, value: string) -> Error {
 		if key != "opener" do return .Unknown_Key
 		if value == "" do return .Invalid_Value
 		replace_string(&settings.url_opener, value)
+	} else if section == "shell" {
+		if key != "output-pipe" do return .Unknown_Key
+		if value == "" do return .Invalid_Value
+		replace_string(&settings.shell_output_pipe, value)
 	} else if section == "security" {
 		if key != "osc52" do return .Unknown_Key
 		switch value {
