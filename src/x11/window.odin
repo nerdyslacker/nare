@@ -178,8 +178,13 @@ next_event :: proc(window: ^Window) -> (result: Event, available: bool) {
 	case .ClientMessage:
 		if xlib.Atom(event.xclient.data.l[0]) == window.wm_delete do result.kind = .Close
 	case .Expose:
-		result.kind = .Redraw
+		if event.xexpose.count == 0 do result.kind = .Redraw
 	case .ConfigureNotify:
+		latest: xlib.XEvent
+		for xlib.CheckTypedWindowEvent(window.display, window.id, .ConfigureNotify, &latest) != false {
+			event = latest
+		}
+		for xlib.CheckTypedWindowEvent(window.display, window.id, .Expose, &latest) != false {}
 		if int(event.xconfigure.width) != window.width || int(event.xconfigure.height) != window.height {
 			window.width = int(event.xconfigure.width)
 			window.height = int(event.xconfigure.height)
@@ -213,6 +218,10 @@ next_event :: proc(window: ^Window) -> (result: Event, available: bool) {
 		result.mouse.row = max(1, int(event.xbutton.y)/window.cell_h+1)
 		result.mouse.modifiers = modifiers_from_state(event.xbutton.state)
 	case .MotionNotify:
+		latest: xlib.XEvent
+		for xlib.CheckTypedWindowEvent(window.display, window.id, .MotionNotify, &latest) != false {
+			event = latest
+		}
 		result.kind = .Mouse
 		result.mouse.action = .Motion
 		result.mouse.button = held_button(event.xmotion.state)

@@ -239,7 +239,7 @@ gpu_draw :: proc(
 		if gpu.ctx == nil || gpu.width != damage.width || gpu.height != damage.height do return false
 		screen := screen_override
 		if screen == nil do screen = vt.terminal_screen(terminal)
-		if !damage_rows(damage, terminal, screen, force) do return true
+		if !damage_rows(damage, terminal, screen, force, selection_state) do return true
 		if MakeCurrent(window.display, xlib.XID(window.id), gpu.ctx) == false do return false
 		BindFramebuffer(GL_FRAMEBUFFER, gpu.framebuffer)
 		Viewport(0, 0, i32(gpu.width), i32(gpu.height))

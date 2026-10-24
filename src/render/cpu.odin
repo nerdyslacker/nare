@@ -22,6 +22,7 @@ CPU :: struct {
 	previous_cursor_visible: bool,
 	previous_alternate: bool,
 	previous_image_generation: u64,
+	previous_selection: selection.State,
 }
 
 cpu_resize :: proc(cpu: ^CPU, window: ^x11.Window) -> bool {
@@ -85,14 +86,20 @@ cpu_render :: proc(
 	if cpu.image == nil do return false
 	screen := screen_override
 	if screen == nil do screen = vt.terminal_screen(terminal)
-	if !damage_rows(cpu, terminal, screen, force) do return false
+	if !damage_rows(cpu, terminal, screen, force, selection_state) do return false
 	for dirty, row in cpu.dirty_rows {
 		if dirty do render_row(cpu, font, window, terminal, screen, row, ligatures, selection_state)
 	}
 	return true
 }
 
-damage_rows :: proc(cpu: ^CPU, terminal: ^vt.Terminal, screen: ^vt.Screen, force: bool) -> bool {
+damage_rows :: proc(
+	cpu: ^CPU,
+	terminal: ^vt.Terminal,
+	screen: ^vt.Screen,
+	force: bool,
+	selection_state: ^selection.State = nil,
+) -> bool {
 	if cpu.image == nil do return false
 	full_redraw := force
 	if len(cpu.previous) != len(screen.cells) {
@@ -108,12 +115,21 @@ damage_rows :: proc(cpu: ^CPU, terminal: ^vt.Terminal, screen: ^vt.Screen, force
 		for index in 0..<len(cpu.dirty_rows) do cpu.dirty_rows[index] = false
 	}
 	if cpu.previous_alternate != terminal.using_alternate do full_redraw = true
+	current_selection: selection.State
+	if selection_state != nil do current_selection = selection_state^
+	selection_changed := current_selection != cpu.previous_selection
+	cursor_visibility_changed := cpu.previous_cursor_visible != terminal.modes.cursor_visible
 	image_generation := u64(0)
 	if screen.image_registry != nil do image_generation = screen.image_registry.generation
 	if cpu.previous_image_generation != image_generation do full_redraw = true
 	any_dirty := false
 	for row in 0..<screen.rows {
 		dirty := full_redraw || row == screen.cursor.row || row == cpu.previous_cursor.row
+		if selection_changed &&
+		   (selection_row_affected(&current_selection, row) || selection_row_affected(&cpu.previous_selection, row)) {
+			dirty = true
+		}
+		if cursor_visibility_changed && (row == screen.cursor.row || row == cpu.previous_cursor.row) do dirty = true
 		if !dirty {
 			for column in 0..<screen.columns {
 				index := row*screen.columns+column
@@ -135,7 +151,14 @@ damage_rows :: proc(cpu: ^CPU, terminal: ^vt.Terminal, screen: ^vt.Screen, force
 	cpu.previous_cursor_visible = terminal.modes.cursor_visible
 	cpu.previous_alternate = terminal.using_alternate
 	cpu.previous_image_generation = image_generation
+	cpu.previous_selection = current_selection
 	return any_dirty
+}
+
+selection_row_affected :: proc(state: ^selection.State, row: int) -> bool {
+	if state == nil || !state.active do return false
+	first, last := selection.bounds(state)
+	return row >= first.row && row <= last.row
 }
 
 cpu_present :: proc(cpu: ^CPU, window: ^x11.Window, columns: int) {

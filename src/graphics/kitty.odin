@@ -9,7 +9,7 @@ import zlib "vendor:zlib"
 MAX_KITTY_COMPRESSED_BYTES :: MAX_IMAGE_BYTES+(MAX_IMAGE_BYTES>>12)+(MAX_IMAGE_BYTES>>14)+(MAX_IMAGE_BYTES>>25)+13
 MAX_KITTY_ENCODED_BYTES :: ((MAX_KITTY_COMPRESSED_BYTES+2)/3)*4
 MAX_KITTY_CHUNKS :: 32_768
-MAX_KITTY_CHUNK_BYTES :: 4096
+MAX_KITTY_CHUNK_BYTES :: 128 * 1024
 KITTY_TRANSFER_TIMEOUT :: 10*time.Second
 
 Kitty_Action :: enum {
@@ -45,6 +45,7 @@ Kitty_Command :: struct {
 	action: Kitty_Action,
 	format: Pixel_Format,
 	width, height: int,
+	data_size: int,
 	image_id: u32,
 	placement_id: u32,
 	columns, rows: int,
@@ -73,6 +74,7 @@ Kitty_Transfer :: struct {
 Kitty_Frame :: struct {
 	command: Kitty_Command,
 	payload: []byte,
+	action_present: bool,
 	more_present: bool,
 	quiet_present: bool,
 	continuation_controls: bool,
@@ -127,7 +129,7 @@ kitty_receive_direct :: proc(
 			return frame.command, {}, true, .None
 		}
 		command = transfer.command
-		if !frame.more_present || !frame.continuation_controls {
+		if !frame.continuation_controls || frame.action_present && frame.command.action != command.action {
 			kitty_transfer_reset(transfer)
 			return command, {}, true, .Malformed
 		}
@@ -187,6 +189,7 @@ kitty_parse_direct_frame :: proc(data: []byte) -> (Kitty_Frame, Kitty_Error) {
 	control := string(data[1:separator])
 	payload := data[separator+1:]
 	seen_action, seen_format, seen_width, seen_height := false, false, false, false
+	seen_data_size := false
 	seen_id, seen_placement, seen_columns, seen_rows := false, false, false, false
 	seen_medium, seen_compression, seen_more, seen_quiet := false, false, false, false
 	seen_source_x, seen_source_y, seen_source_width, seen_source_height := false, false, false, false
@@ -244,6 +247,12 @@ kitty_parse_direct_frame :: proc(data: []byte) -> (Kitty_Frame, Kitty_Error) {
 			height, ok := parse_kitty_uint(value)
 			if !ok || height > u64(max(int)) do return Kitty_Frame{command = command}, .Malformed
 			command.height = int(height)
+		case 'S':
+			if seen_data_size do return Kitty_Frame{command = command}, .Malformed
+			seen_data_size = true
+			data_size, ok := parse_kitty_uint(value)
+			if !ok || data_size == 0 || data_size > u64(MAX_KITTY_COMPRESSED_BYTES) do return Kitty_Frame{command = command}, .Malformed
+			command.data_size = int(data_size)
 		case 'i':
 			if seen_id do return Kitty_Frame{command = command}, .Malformed
 			seen_id = true
@@ -394,11 +403,11 @@ kitty_parse_direct_frame :: proc(data: []byte) -> (Kitty_Frame, Kitty_Error) {
 	if command.action != .Delete && seen_delete do return Kitty_Frame{command = command}, .Malformed
 	if command.action == .Display {
 		if command.image_id == 0 || len(payload) != 0 || seen_format || seen_width || seen_height ||
-		   seen_medium || seen_compression || seen_more {
+		   seen_data_size || seen_medium || seen_compression || seen_more {
 			return Kitty_Frame{command = command}, .Malformed
 		}
 	} else if command.action == .Delete {
-		if len(payload) != 0 || seen_format || seen_width || seen_height || seen_medium ||
+		if len(payload) != 0 || seen_format || seen_width || seen_height || seen_data_size || seen_medium ||
 		   seen_compression || seen_more || seen_columns || seen_rows || seen_source_width ||
 		   seen_source_height || seen_destination_x || seen_destination_y || seen_cursor_policy {
 			return Kitty_Frame{command = command}, .Malformed
@@ -432,9 +441,10 @@ kitty_parse_direct_frame :: proc(data: []byte) -> (Kitty_Frame, Kitty_Error) {
 	}
 	frame.command = command
 	frame.payload = payload
+	frame.action_present = seen_action
 	frame.more_present = seen_more
 	frame.quiet_present = seen_quiet
-	frame.continuation_controls = seen_more && key_count == 1+int(seen_quiet)
+	frame.continuation_controls = key_count == int(seen_action)+int(seen_more)+int(seen_quiet)
 	return frame, .None
 }
 
@@ -469,8 +479,14 @@ kitty_decode_payload :: proc(command: Kitty_Command, payload: []byte, limits: ^L
 	encoded_limit, limit_error := kitty_encoded_limit(command, limits)
 	if limit_error != .None do return {}, limit_error
 	if len(payload) == 0 || len(payload) > encoded_limit do return {}, .Image_Limit
-	decoded, decode_error := base64.decode(string(payload), options = {.Strict})
+	decode_options: base64.Decode_Options = {.Strict}
+	if len(payload)%4 != 0 do decode_options += {.No_Padding}
+	decoded, decode_error := base64.decode(string(payload), options = decode_options)
 	if decode_error != nil do return {}, .Invalid_Data
+	if command.data_size > 0 && len(decoded) != command.data_size {
+		delete(decoded)
+		return {}, .Invalid_Data
+	}
 	if command.png {
 		image, png_error := decode_png(decoded, limits)
 		delete(decoded)

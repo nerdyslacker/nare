@@ -584,7 +584,7 @@ handle_selection_mouse :: proc(
 		selection.finish(state, screen, position)
 		copy_selection(window, terminal, state, .Primary)
 	}
-	drawing.draw(renderer, window, terminal, true, state)
+	drawing.draw(renderer, window, terminal, false, state)
 }
 
 queue_input :: proc(pending: ^[dynamic]byte, offset: int, data: []byte) {
