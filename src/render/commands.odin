@@ -32,6 +32,7 @@ build_row_commands :: proc(
 	ligatures: bool,
 	selection_state: ^selection.State = nil,
 	scrollbar: Scrollbar = {},
+	force_bold: bool = false,
 ) {
 	clear(output)
 	y := row * window.cell_h
@@ -90,7 +91,7 @@ build_row_commands :: proc(
 			column += max(1, int(current.width))
 		}
 		shaped: [dynamic]fonts.Shaped_Glyph
-		style := fonts.style_for_attributes(attributes.bold, attributes.italic)
+		style := fonts.style_for_attributes(attributes.bold || force_bold, attributes.italic)
 		if fonts.shape(font, text[:], ligatures, &shaped, style) {
 			for shaped_glyph in shaped {
 				if shaped_glyph.cluster < 0 || shaped_glyph.cluster >= len(clusters) do continue
@@ -205,8 +206,14 @@ image_command_after :: proc(left, right: Command) -> bool {
 
 display_colors :: proc(cell: ^vt.Cell, selected, cursor: bool) -> (foreground, background: u32) {
 	foreground, background = cell_colors(cell)
-	if selected do foreground, background = background, foreground
-	if cursor do foreground, background = background, foreground
+	if selected {
+		foreground = active_theme.selection_foreground
+		background = active_theme.selection_background
+	}
+	if cursor {
+		foreground = active_theme.cursor_text
+		background = active_theme.cursor
+	}
 	return
 }
 
@@ -215,14 +222,22 @@ append_rectangle :: proc(output: ^[dynamic]Command, x, y, width, height: int, co
 }
 
 append_cursor_commands :: proc(output: ^[dynamic]Command, window: ^x11.Window, terminal: ^vt.Terminal, screen: ^vt.Screen, row: int) {
-	if !terminal.modes.cursor_visible || row != screen.cursor.row do return
+	if !cursor_visible(terminal) || row != screen.cursor.row do return
 	style := terminal.modes.cursor_style
 	if style == .Blinking_Block || style == .Steady_Block do return
 	x := screen.cursor.column*window.cell_w
-	color, _ := cell_colors(vt.cell_at(screen, row, screen.cursor.column))
+	color := active_theme.cursor
 	if style == .Blinking_Underline || style == .Steady_Underline {
-		append_rectangle(output, x, row*window.cell_h+window.cell_h-2, window.cell_w, 2, color)
+		height := clamp(terminal.cursor_underline_height, 1, window.cell_h)
+		append_rectangle(output, x, row*window.cell_h+window.cell_h-height, window.cell_w, height, color)
 	} else {
-		append_rectangle(output, x, row*window.cell_h, 2, window.cell_h, color)
+		append_rectangle(output, x, row*window.cell_h, clamp(terminal.cursor_beam_width, 1, window.cell_w), window.cell_h, color)
 	}
+}
+
+cursor_visible :: proc(terminal: ^vt.Terminal) -> bool {
+	if !terminal.modes.cursor_visible do return false
+	style := terminal.modes.cursor_style
+	if style == .Blinking_Block || style == .Blinking_Underline || style == .Blinking_Bar do return terminal.cursor_phase_visible
+	return true
 }

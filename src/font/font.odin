@@ -57,7 +57,16 @@ Manager :: struct {
 	family: string,
 }
 
-init :: proc(manager: ^Manager, family: string = DEFAULT_FAMILY, pixel_size: int = DEFAULT_PIXEL_SIZE) -> Error {
+init :: proc(
+	manager: ^Manager,
+	family: string = DEFAULT_FAMILY,
+	pixel_size: int = DEFAULT_PIXEL_SIZE,
+	bold_family: string = "auto",
+	italic_family: string = "auto",
+	bold_italic_family: string = "auto",
+	cell_width_percent: int = 100,
+	cell_height_percent: int = 100,
+) -> Error {
 	if pixel_size <= 0 do return .Size
 	manager.config = FcInitLoadConfigAndFonts()
 	if manager.config == nil do return .Fontconfig
@@ -74,8 +83,13 @@ init :: proc(manager: ^Manager, family: string = DEFAULT_FAMILY, pixel_size: int
 	}
 	manager.faces[int(Style.Regular)] = regular
 	style_names := [3]string{"Bold", "Italic", "Bold Italic"}
+	style_families := [3]string{bold_family, italic_family, bold_italic_family}
 	for style_name, index in style_names {
 		query := fmt.aprintf("%s:style=%s", family, style_name)
+		if style_families[index] != "" && style_families[index] != "auto" {
+			delete(query)
+			query = strings.clone(style_families[index])
+		}
 		face, loaded := load_face(manager, query)
 		delete(query)
 		if loaded do manager.faces[index+1] = face
@@ -94,6 +108,10 @@ init :: proc(manager: ^Manager, family: string = DEFAULT_FAMILY, pixel_size: int
 	if reference_index != 0 && FT_Load_Glyph(regular.face, reference_index, 0) == 0 {
 		manager.cell_width = max(1, int((regular.face.glyph.advance.x+32)/64))
 	}
+	base_height := manager.cell_height
+	manager.cell_width = max(1, (manager.cell_width*clamp(cell_width_percent, 50, 300)+50)/100)
+	manager.cell_height = max(1, (manager.cell_height*clamp(cell_height_percent, 50, 300)+50)/100)
+	manager.ascent += (manager.cell_height-base_height)/2
 	return .None
 }
 

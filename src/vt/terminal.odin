@@ -123,6 +123,9 @@ Terminal :: struct {
 	hyperlinks: [dynamic]string,
 	active_hyperlink: u32,
 	title: string,
+	cursor_phase_visible: bool,
+	cursor_beam_width: int,
+	cursor_underline_height: int,
 	title_changed: bool,
 	cwd_uri: string,
 	cwd_path: string,
@@ -157,6 +160,9 @@ terminal_init :: proc(
 	}
 	terminal.modes.autowrap = true
 	terminal.modes.cursor_visible = true
+	terminal.cursor_phase_visible = true
+	terminal.cursor_beam_width = 2
+	terminal.cursor_underline_height = 2
 	terminal.modes.sixel_private_colors = true
 	terminal.sixel_palette = graphics.sixel_palette_default()
 	terminal.cell_width = 1
@@ -1116,6 +1122,7 @@ window_status :: proc(terminal: ^Terminal, event: Event) {
 }
 
 set_cursor_style :: proc(terminal: ^Terminal, value: int) {
+	terminal.cursor_phase_visible = true
 	switch value {
 	case 0, 1: terminal.modes.cursor_style = .Blinking_Block
 	case 2: terminal.modes.cursor_style = .Steady_Block

@@ -213,7 +213,8 @@ gpu_resize :: proc(gpu: ^GPU, window: ^x11.Window) -> bool {
 			return false
 		}
 		Viewport(0, 0, i32(window.width), i32(window.height))
-		ClearColor(0, 0, 0, 1)
+		red, green, blue := theme_background_components()
+		ClearColor(red, green, blue, 1)
 		Clear(GL_COLOR_BUFFER_BIT)
 		BindFramebuffer(GL_FRAMEBUFFER, 0)
 		gpu.width = window.width
@@ -252,7 +253,7 @@ gpu_draw :: proc(
 			if y >= gpu.height do continue
 			height := min(window.cell_h, gpu.height-y)
 			Scissor(0, i32(gpu.height-y-height), i32(gpu.width), i32(height))
-			build_row_commands(&gpu.commands, font, window, terminal, screen, row, ligatures, selection_state, scrollbar)
+			build_row_commands(&gpu.commands, font, window, terminal, screen, row, ligatures, selection_state, scrollbar, active_force_bold)
 			if !gpu_prepare_atlas(gpu, font) {
 				BindFramebuffer(GL_FRAMEBUFFER, 0)
 				return false
@@ -266,7 +267,8 @@ gpu_draw :: proc(
 		Disable(GL_SCISSOR_TEST)
 		BindFramebuffer(GL_FRAMEBUFFER, 0)
 		Viewport(0, 0, i32(gpu.width), i32(gpu.height))
-		ClearColor(0, 0, 0, 1)
+		red, green, blue := theme_background_components()
+		ClearColor(red, green, blue, 1)
 		Clear(GL_COLOR_BUFFER_BIT)
 		BindTexture(GL_TEXTURE_2D, gpu.surface_texture)
 		Enable(GL_TEXTURE_2D)
@@ -286,6 +288,13 @@ gpu_draw :: proc(
 		}
 		return true
 	}
+}
+
+theme_background_components :: proc() -> (red, green, blue: f32) {
+	red = f32((active_theme.background>>16)&0xff)/255
+	green = f32((active_theme.background>>8)&0xff)/255
+	blue = f32(active_theme.background&0xff)/255
+	return
 }
 
 when GPU_ENABLED {

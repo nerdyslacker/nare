@@ -31,6 +31,7 @@ Incoming_Selection :: struct {
 
 Event :: struct {
 	kind:       Event_Kind,
+	source:     xlib.Window,
 	width:      int,
 	height:     int,
 	focused:    bool,
@@ -39,6 +40,61 @@ Event :: struct {
 	key:        keyboard.Key,
 	modifiers:  keyboard.Modifiers,
 	mouse:      keyboard.Mouse_Event,
+	timestamp:  u64,
+}
+
+create_child :: proc(parent: ^Window, x, y, width, height: int) -> (child: Window, ok: bool) {
+	child.display = parent.display
+	child.visual = parent.visual
+	child.depth = parent.depth
+	child.dpi = parent.dpi
+	child.black = parent.black
+	child.white = parent.white
+	child.cell_w = parent.cell_w
+	child.cell_h = parent.cell_h
+	child.width = max(1, width)
+	child.height = max(1, height)
+	child.id = xlib.CreateSimpleWindow(
+		parent.display, parent.id, i32(x), i32(y), u32(child.width), u32(child.height),
+		0, parent.white, parent.black,
+	)
+	if child.id == 0 do return child, false
+	values := xlib.XGCValues{
+		foreground = child.white,
+		background = child.black,
+		graphics_exposures = false,
+	}
+	child.gc = xlib.CreateGC(parent.display, xlib.Drawable(child.id), {.GCForeground, .GCBackground, .GCGraphicsExposures}, &values)
+	if child.gc == nil {
+		xlib.DestroyWindow(parent.display, child.id)
+		return {}, false
+	}
+	xlib.SelectInput(parent.display, child.id, base_event_mask())
+	_ = xlib.MapWindow(parent.display, child.id)
+	_ = xlib.Sync(parent.display, false)
+	return child, true
+}
+
+destroy_child :: proc(child: ^Window) {
+	if child.gc != nil do xlib.FreeGC(child.display, child.gc)
+	if child.id != 0 do xlib.DestroyWindow(child.display, child.id)
+	child^ = {}
+}
+
+place_child :: proc(child: ^Window, x, y, width, height: int, visible: bool = true) {
+	child.width = max(1, width)
+	child.height = max(1, height)
+	xlib.MoveResizeWindow(child.display, child.id, i32(x), i32(y), u32(child.width), u32(child.height))
+	if visible {
+		_ = xlib.MapWindow(child.display, child.id)
+	} else {
+		_ = xlib.UnmapWindow(child.display, child.id)
+	}
+}
+
+show_child :: proc(child: ^Window, visible: bool) {
+	if visible do _ = xlib.MapWindow(child.display, child.id)
+	else do _ = xlib.UnmapWindow(child.display, child.id)
 }
 
 Window :: struct {
@@ -137,6 +193,7 @@ open :: proc(title: cstring = "nare") -> (window: Window, err: Error) {
 		close(&window)
 		return window, .Selection_Atoms
 	}
+	set_window_metadata(&window)
 	xlib.StoreName(display, window.id, title)
 	_ = xlib.MapWindow(display, window.id)
 	_ = xlib.Flush(display)
@@ -174,12 +231,17 @@ next_event :: proc(window: ^Window) -> (result: Event, available: bool) {
 	if xlib.Pending(window.display) == 0 do return result, false
 	event: xlib.XEvent
 	xlib.NextEvent(window.display, &event)
+	result.source = event.xany.window
 	#partial switch event.type {
 	case .ClientMessage:
 		if xlib.Atom(event.xclient.data.l[0]) == window.wm_delete do result.kind = .Close
 	case .Expose:
 		if event.xexpose.count == 0 do result.kind = .Redraw
 	case .ConfigureNotify:
+		if event.xconfigure.window != window.id {
+			result.kind = .Redraw
+			return result, true
+		}
 		latest: xlib.XEvent
 		for xlib.CheckTypedWindowEvent(window.display, window.id, .ConfigureNotify, &latest) != false {
 			event = latest
@@ -219,6 +281,7 @@ next_event :: proc(window: ^Window) -> (result: Event, available: bool) {
 		result.mouse.column = max(1, int(event.xbutton.x)/window.cell_w+1)
 		result.mouse.row = max(1, int(event.xbutton.y)/window.cell_h+1)
 		result.mouse.modifiers = modifiers_from_state(event.xbutton.state)
+		result.timestamp = u64(event.xbutton.time)
 	case .MotionNotify:
 		latest: xlib.XEvent
 		for xlib.CheckTypedWindowEvent(window.display, window.id, .MotionNotify, &latest) != false {

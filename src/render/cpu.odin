@@ -58,6 +58,8 @@ cpu_resize :: proc(cpu: ^CPU, window: ^x11.Window) -> bool {
 	}
 	cpu.image = image
 	cpu.pixels = (([^]u32)(data))[:window.width*window.height]
+	background := rgb_to_pixel(window, active_theme.background)
+	for &pixel in cpu.pixels do pixel = background
 	cpu.width = window.width
 	cpu.height = window.height
 	delete(cpu.previous)
@@ -131,7 +133,8 @@ damage_rows :: proc(
 	current_selection: selection.State
 	if selection_state != nil do current_selection = selection_state^
 	selection_changed := current_selection != cpu.previous_selection
-	cursor_visibility_changed := cpu.previous_cursor_visible != terminal.modes.cursor_visible
+	current_cursor_visible := cursor_visible(terminal)
+	cursor_visibility_changed := cpu.previous_cursor_visible != current_cursor_visible
 	image_generation := u64(0)
 	if screen.image_registry != nil do image_generation = screen.image_registry.generation
 	if cpu.previous_image_generation != image_generation do full_redraw = true
@@ -166,7 +169,7 @@ damage_rows :: proc(
 		)
 	}
 	cpu.previous_cursor = screen.cursor
-	cpu.previous_cursor_visible = terminal.modes.cursor_visible
+	cpu.previous_cursor_visible = current_cursor_visible
 	cpu.previous_alternate = terminal.using_alternate
 	cpu.previous_image_generation = image_generation
 	cpu.previous_image_row_offset = screen.image_row_offset
@@ -196,7 +199,7 @@ cpu_present :: proc(cpu: ^CPU, window: ^x11.Window, columns: int) {
 			i32(y),
 			0,
 			i32(y),
-			u32(min(cpu.width, columns*window.cell_w)),
+			u32(cpu.width),
 			u32(height),
 		)
 	}
@@ -232,7 +235,7 @@ render_row :: proc(
 	scrollbar: Scrollbar,
 ) {
 	if row*window.cell_h >= cpu.height do return
-	build_row_commands(&cpu.commands, font, window, terminal, screen, row, ligatures, selection_state, scrollbar)
+	build_row_commands(&cpu.commands, font, window, terminal, screen, row, ligatures, selection_state, scrollbar, active_force_bold)
 	for command in cpu.commands {
 		switch command.kind {
 		case .Rectangle:
@@ -348,7 +351,7 @@ mix_color :: proc(foreground, background: u32) -> u32 {
 
 terminal_color :: proc(color: vt.Color, foreground: bool) -> u32 {
 	switch color.kind {
-	case .Default: return 0xe5e5e5 if foreground else 0x000000
+	case .Default: return active_theme.foreground if foreground else active_theme.background
 	case .Indexed:
 		index := int(color.value)
 		if index < 16 do return ansi_color(index)
@@ -367,13 +370,7 @@ terminal_color :: proc(color: vt.Color, foreground: bool) -> u32 {
 }
 
 ansi_color :: proc(index: int) -> u32 {
-	palette := [16]u32{
-		0x000000, 0xcd3131, 0x0dbc79, 0xe5e510,
-		0x2472c8, 0xbc3fbc, 0x11a8cd, 0xe5e5e5,
-		0x666666, 0xf14c4c, 0x23d18b, 0xf5f543,
-		0x3b8eea, 0xd670d6, 0x29b8db, 0xffffff,
-	}
-	return palette[clamp(index, 0, len(palette)-1)]
+	return active_theme.ansi[clamp(index, 0, len(active_theme.ansi)-1)]
 }
 
 color_cube_component :: proc(value: int) -> int {
@@ -418,6 +415,6 @@ mask_field :: proc(mask: uint) -> (shift, field: uint) {
 }
 
 block_cursor :: proc(terminal: ^vt.Terminal, screen: ^vt.Screen, row, column: int) -> bool {
-	if !terminal.modes.cursor_visible || row != screen.cursor.row || column != screen.cursor.column do return false
+	if !cursor_visible(terminal) || row != screen.cursor.row || column != screen.cursor.column do return false
 	return terminal.modes.cursor_style == .Blinking_Block || terminal.modes.cursor_style == .Steady_Block
 }

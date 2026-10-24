@@ -16,12 +16,15 @@
 
 ## Features
 
-- Native VT parser with Unicode, true color, mouse, focus, and bracketed-paste support.
-- Fontconfig, FreeType, and HarfBuzz text rendering with configurable ligatures.
+- Native VT parser with Unicode, true color, alternate screens, synchronized updates, mouse, focus, and bracketed paste.
+- Fontconfig, FreeType, and HarfBuzz rendering with font fallback, combining and wide characters, color glyphs, and configurable ligatures.
 - Automatic OpenGL rendering with CPU fallback and a separate CPU-only build.
-- Bounded scrollback with search, a scrollbar, text selection, clipboard support, and URL hints.
-- Kitty Graphics, Sixel, and iTerm2 inline images with scaling, transparency, and scrolling.
-- OSC title, working-directory, hyperlink, clipboard, and shell-integration sequences plus bundled terminfo.
+- Native tabs and split/stack pane layouts with configurable keyboard and mouse shortcuts.
+- Bounded, resize-reflowing scrollback with incremental search, smooth wheel navigation, and a draggable scrollbar.
+- X11 PRIMARY and CLIPBOARD selection, bracketed paste, large INCR transfers, OSC 8 links, and keyboard URL hints.
+- Kitty Graphics, Sixel, and iTerm2 inline images with scaling, transparency, clipping, scrolling, and CPU/GPU composition.
+- OSC 0/2/7/8/52/133 and XTGETTCAP support, including prompt navigation and command-output copy or piping.
+- Runtime configuration, bounded image and transfer resources, and bundled terminfo.
 
 ## Dependencies
 
@@ -45,3 +48,5 @@ make
 `nare` uses OpenGL when available and falls back to CPU rendering. `make cpu` builds the optional no-OpenGL `build/nare-cpu` binary.
 
 Configuration is loaded from `$XDG_CONFIG_HOME/nare/nare.conf`, or `~/.config/nare/nare.conf`. Copy [nare.conf](nare.conf) as a starting point; command-line options override it.
+
+Run `nare /path/to/folder` to open a shell in that folder. `make install` also installs the desktop entry used by file managers for **Open with nare**.

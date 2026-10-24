@@ -37,28 +37,10 @@ app_main :: proc() -> int {
 		return 1
 	}
 	defer x11.close(&window)
-	renderer: drawing.Renderer
-	if render_error := drawing.init(&renderer, &window, options.renderer, options.ligatures, options.font, options.font_size); render_error != .None {
-		fmt.eprintln(drawing.error_string(render_error))
-		return 1
-	}
-	defer drawing.destroy(&renderer, &window)
-
-	columns, rows := x11.grid_size(&window)
-	process, process_err := pty.spawn(command[:], pty_size(columns, rows, window.width, window.height), options.term)
-	if process_err != .None {
-		fmt.eprintln(pty.error_string(process_err))
-		return 1
-	}
-	defer pty.shutdown(&process)
-	terminal: vt.Terminal
-	if !vt.terminal_init(&terminal, columns, rows, options.scrollback_lines, options.osc52_policy, &options.graphics_limits) {
-		fmt.eprintln("could not initialize terminal")
-		return 1
-	}
-	vt.terminal_set_cell_size(&terminal, window.cell_w, window.cell_h)
-	defer vt.terminal_destroy(&terminal)
-	return run(&window, &process, &terminal, &renderer, options.url_opener, options.shell_output_pipe, options.title)
+	x11.set_opacity(&window, options.window.background_opacity)
+	x11.set_decorations(&window, options.window.decorations)
+	drawing.set_theme(options.theme)
+	return workspace_run(&window, command[:], &options)
 }
 
 command_from_args :: proc(args: []string) -> (options: config.Settings, command: [dynamic]cstring, err: string) {
@@ -88,6 +70,9 @@ command_from_args :: proc(args: []string) -> (options: config.Settings, command:
 		switch argument {
 		case "-h", "--help": return options, command, strings.clone(usage())
 		case "--config": index += 1
+		case "--working-directory":
+			if index+1 >= len(args) || !set_working_directory(&options, args[index+1]) do return options, command, strings.clone(usage())
+			index += 1
 		case "--no-config":
 		case "-e":
 			if index+1 >= len(args) do return options, command, strings.clone(usage())
@@ -96,6 +81,14 @@ command_from_args :: proc(args: []string) -> (options: config.Settings, command:
 		case:
 			config_result := apply_argument(&options, argument)
 			if config_result == .Unknown_Key && strings.has_prefix(argument, "--config=") do continue
+			if config_result == .Unknown_Key && strings.has_prefix(argument, "--working-directory=") {
+				if !set_working_directory(&options, argument[len("--working-directory="):]) do return options, command, strings.clone(usage())
+				continue
+			}
+			if config_result == .Unknown_Key && len(argument) > 0 && argument[0] != '-' && options.working_directory == "" {
+				if !set_working_directory(&options, argument) do return options, command, strings.clone(usage())
+				continue
+			}
 			if config_result != .None do return options, command, strings.clone(usage())
 		}
 	}
@@ -108,6 +101,12 @@ command_from_args :: proc(args: []string) -> (options: config.Settings, command:
 	}
 	append(&command, nil)
 	return options, command, ""
+}
+
+set_working_directory :: proc(options: ^config.Settings, path: string) -> bool {
+	if path == "" || !os.is_directory(path) do return false
+	config.replace_string(&options.working_directory, path)
+	return true
 }
 
 config_argument :: proc(args: []string) -> (path: string, explicit, disabled, ok: bool) {
@@ -161,7 +160,7 @@ apply_argument :: proc(options: ^config.Settings, argument: string) -> config.Er
 }
 
 usage :: proc() -> string {
-	return "usage: nare [--config=PATH|--no-config] [--renderer=cpu|gpu|auto] [--font=FAMILY] [--font-size=PIXELS] [--ligatures=true|false] [--title=TITLE] [--scrollback-lines=COUNT] [--url-opener=COMMAND] [--output-pipe=COMMAND] [--term=NAME] [--osc52=disabled|copy-enabled|paste-enabled|enabled] [-e COMMAND [ARG...]]"
+	return "usage: nare [DIRECTORY|--working-directory=PATH] [--config=PATH|--no-config] [--renderer=cpu|gpu|auto] [--font=FAMILY] [--font-size=PIXELS] [--ligatures=true|false] [--title=TITLE] [--scrollback-lines=COUNT] [--url-opener=COMMAND] [--output-pipe=COMMAND] [--term=NAME] [--osc52=disabled|copy-enabled|paste-enabled|enabled] [-e COMMAND [ARG...]]"
 }
 
 OSC52_Request :: struct {

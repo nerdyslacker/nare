@@ -8,6 +8,8 @@ DATADIR := $(PREFIX)/share
 ICONDIR := $(DATADIR)/icons/hicolor/256x256/apps
 DESKTOPDIR := $(DATADIR)/applications
 TERMINFO_DIR := $(DATADIR)/terminfo
+SYSCONFDIR ?= /etc
+NAREDIR := $(SYSCONFDIR)/nare
 
 APP := $(BUILD_DIR)/nare
 APP_CPU := $(BUILD_DIR)/nare-cpu
@@ -39,8 +41,10 @@ install: release
 	install -Dm755 $(APP) $(DESTDIR)$(BINDIR)/nare
 	install -Dm755 $(APP_CPU) $(DESTDIR)$(BINDIR)/nare-cpu
 	install -Dm644 assets/logo_256.png $(DESTDIR)$(ICONDIR)/nare.png
+	install -Dm644 nare.conf $(DESTDIR)$(NAREDIR)/nare.conf
 	install -Dm644 nare.desktop $(DESTDIR)$(DESKTOPDIR)/nare.desktop
 	tic -x -o $(DESTDIR)$(TERMINFO_DIR) terminfo/nare.terminfo
+	@if command -v update-desktop-database >/dev/null 2>&1; then update-desktop-database $(DESTDIR)$(DESKTOPDIR); fi
 
 uninstall:
 	rm -f $(DESTDIR)$(BINDIR)/nare
@@ -48,6 +52,7 @@ uninstall:
 	rm -f $(DESTDIR)$(ICONDIR)/nare.png
 	rm -f $(DESTDIR)$(DESKTOPDIR)/nare.desktop
 	rm -f $(DESTDIR)$(TERMINFO_DIR)/n/nare
+	@if command -v update-desktop-database >/dev/null 2>&1; then update-desktop-database $(DESTDIR)$(DESKTOPDIR); fi
 
 clean:
 	rm -rf $(BUILD_DIR)

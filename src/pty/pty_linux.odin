@@ -42,13 +42,15 @@ Process :: struct {
 	closed:      bool,
 }
 
-spawn :: proc(argv: []cstring, size: Size, term: string = "xterm-256color") -> (process: Process, err: Error) {
+spawn :: proc(argv: []cstring, size: Size, term: string = "xterm-256color", working_directory: string = "") -> (process: Process, err: Error) {
 	process.master = -1
 	if len(argv) < 2 || argv[0] == nil || argv[len(argv)-1] != nil {
 		return process, .Invalid_Command
 	}
 	term_cstring := strings.clone_to_cstring(term)
 	defer delete(term_cstring)
+	working_directory_cstring := strings.clone_to_cstring(working_directory)
+	defer delete(working_directory_cstring)
 	master := posix.posix_openpt({.RDWR, .NOCTTY, .CLOEXEC})
 	if master < 0 {
 		return process, .Open_Master
@@ -83,7 +85,7 @@ spawn :: proc(argv: []cstring, size: Size, term: string = "xterm-256color") -> (
 	}
 	if child == 0 {
 		_ = posix.close(ready_pipe[0])
-		child_exec(master, slave_name, argv, size, ready_pipe[1], term_cstring)
+		child_exec(master, slave_name, argv, size, ready_pipe[1], term_cstring, working_directory_cstring)
 	}
 	_ = posix.close(ready_pipe[1])
 	process.child = child
@@ -104,7 +106,7 @@ spawn :: proc(argv: []cstring, size: Size, term: string = "xterm-256color") -> (
 	return process, .None
 }
 
-child_exec :: proc(master: posix.FD, slave_name: cstring, argv: []cstring, size: Size, ready_fd: posix.FD, term: cstring) -> ! {
+child_exec :: proc(master: posix.FD, slave_name: cstring, argv: []cstring, size: Size, ready_fd: posix.FD, term, working_directory: cstring) -> ! {
 	if posix.setsid() < 0 {
 		posix._exit(127)
 	}
@@ -121,6 +123,9 @@ child_exec :: proc(master: posix.FD, slave_name: cstring, argv: []cstring, size:
 	}
 	_ = posix.close(master)
 	if posix.setenv("TERM", term, true) != .OK {
+		posix._exit(127)
+	}
+	if working_directory != nil && (^byte)(working_directory)^ != 0 && posix.chdir(working_directory) != .OK {
 		posix._exit(127)
 	}
 	ready: [1]byte = {1}
