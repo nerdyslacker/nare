@@ -284,7 +284,8 @@ next_event :: proc(window: ^Window) -> (result: Event, available: bool) {
 		result.timestamp = u64(event.xbutton.time)
 	case .MotionNotify:
 		latest: xlib.XEvent
-		for xlib.CheckTypedWindowEvent(window.display, window.id, .MotionNotify, &latest) != false {
+		motion_window := event.xmotion.window
+		for xlib.CheckTypedWindowEvent(window.display, motion_window, .MotionNotify, &latest) != false {
 			event = latest
 		}
 		result.kind = .Mouse

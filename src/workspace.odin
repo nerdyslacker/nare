@@ -461,7 +461,8 @@ workspace_tab_page_width :: proc(workspace: ^Workspace) -> int {
 	pane := workspace_active_pane(workspace)
 	if height <= 0 || pane == nil do return max(1, workspace.root.width)
 	arrow_width := tab_arrow_width(&pane.renderer.font, workspace.root.width, height)
-	return max(1, workspace.root.width-arrow_width*2)
+	new_tab_space := tab_new_tab_space_width(&pane.renderer.font, workspace.root.width)
+	return max(1, workspace.root.width-arrow_width*2-new_tab_space)
 }
 
 workspace_begin_rename :: proc(workspace: ^Workspace, index: int) {
@@ -516,6 +517,7 @@ workspace_handle_selection_mouse :: proc(root: ^x11.Window, pane: ^Pane, event: 
 	if event.button != 1 do return
 	screen := vt.terminal_screen(&pane.terminal)
 	position := vt.screen_position(screen, event.row-1, event.column-1)
+	previous := pane.selection_state
 	switch event.action {
 	case .Press: selection.begin(&pane.selection_state, screen, position)
 	case .Motion: selection.update(&pane.selection_state, screen, position)
@@ -523,6 +525,7 @@ workspace_handle_selection_mouse :: proc(root: ^x11.Window, pane: ^Pane, event: 
 		selection.finish(&pane.selection_state, screen, position)
 		copy_selection(root, &pane.terminal, &pane.selection_state, .Primary)
 	}
+	if event.action == .Motion && pane.selection_state == previous do return
 	drawing.draw(&pane.renderer, &pane.surface, &pane.terminal, false, &pane.selection_state, nil, {history_rows = len(screen.scrollback)})
 }
 

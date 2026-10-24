@@ -52,44 +52,47 @@ draw_workspace_tab_bar :: proc(
 	pixels := (([^]u32)(data))[:window.width*height]
 	background_pixel := drawing.rgb_to_pixel(window, background)
 	for &pixel in pixels do pixel = background_pixel
+	new_tab_space := tab_new_tab_space_width(font, window.width)
+	bar_content_width := max(1, window.width-new_tab_space)
+	widths := tab_layout_widths(font, labels, active_bold, bar_content_width)
 	total_width := 0
-	for label in labels do total_width += tab_label_width(font, label, active_bold)
-	overflow := total_width > window.width
+	for width in widths do total_width += width
+	overflow := total_width > bar_content_width
 	arrow_width := 0
 	content_left := 0
-	content_right := window.width
+	content_right := bar_content_width
 	if overflow {
 		arrow_width = tab_arrow_width(font, window.width, height)
 		content_left = arrow_width
-		content_right = max(content_left, window.width-arrow_width)
+		content_right = max(content_left, bar_content_width-arrow_width)
 		page_width := content_right-content_left
 		max_offset := max(0, total_width-page_width)
 		scroll_offset^ = clamp(scroll_offset^, 0, max_offset)
 		if reveal_active && active_index >= 0 && active_index < len(labels) {
-			active_left := tab_width_between(font, labels, 0, active_index, active_bold)
-			active_right := active_left+tab_label_width(font, labels[active_index], active_bold)
+			active_left := tab_width_between(widths, 0, active_index)
+			active_right := active_left+widths[active_index]
 			if active_left < scroll_offset^ do scroll_offset^ = active_left
 			else if active_right > scroll_offset^+page_width do scroll_offset^ = active_right-page_width
 			scroll_offset^ = clamp(scroll_offset^, 0, max_offset)
 		}
 		draw_tab_arrow(pixels, window, font, "<", 0, arrow_width, height, inactive_background, active_background)
-		draw_tab_arrow(pixels, window, font, ">", window.width-arrow_width, arrow_width, height, inactive_background, active_background)
+		draw_tab_arrow(pixels, window, font, ">", content_right, arrow_width, height, inactive_background, active_background)
 		append(bounds, {x = 0, width = arrow_width, tab_index = TAB_HIT_LEFT})
-		append(bounds, {x = window.width-arrow_width, width = arrow_width, tab_index = TAB_HIT_RIGHT})
+		append(bounds, {x = content_right, width = arrow_width, tab_index = TAB_HIT_RIGHT})
 	} else {
 		scroll_offset^ = 0
 	}
 	x := content_left-scroll_offset^
 	for label, index in labels {
-		natural_width := tab_label_width(font, label, active_bold)
-		if x+natural_width <= content_left {
-			x += natural_width
+		tab_width := widths[index]
+		if x+tab_width <= content_left {
+			x += tab_width
 			continue
 		}
 		if x >= content_right do break
 		bold := label.active && active_bold
 		visible_left := max(content_left, x)
-		visible_right := min(content_right, x+natural_width)
+		visible_right := min(content_right, x+tab_width)
 		width := visible_right-visible_left
 		if width <= 0 do break
 		append(bounds, {x = visible_left, width = width, tab_index = index})
@@ -97,7 +100,7 @@ draw_workspace_tab_bar :: proc(
 		fg := active_foreground if label.active else inactive_foreground
 		fill_tab_rect(pixels, window, visible_left, 0, width, height, bg)
 		draw_tab_text(pixels, window, font, label.text, x+6, 2+font.ascent, fg, bold, visible_left, visible_right-6)
-		x += natural_width
+		x += tab_width
 	}
 	xlib.PutImage(window.display, xlib.Drawable(window.id), window.gc, image, 0, 0, 0, i32(y), u32(window.width), u32(height))
 	_ = xlib.Flush(window.display)
@@ -107,13 +110,50 @@ tab_arrow_width :: proc(font: ^fonts.Manager, window_width, height: int) -> int 
 	return min(max(height, font.cell_width+12), max(1, window_width/4))
 }
 
+tab_new_tab_space_width :: proc(font: ^fonts.Manager, window_width: int) -> int {
+	return min(max(20, font.cell_width*3), max(1, window_width/4))
+}
+
 tab_label_width :: proc(font: ^fonts.Manager, label: Tab_Draw_Label, active_bold: bool) -> int {
 	return max(1, tab_text_width(font, label.text, label.active && active_bold)+12)
 }
 
-tab_width_between :: proc(font: ^fonts.Manager, labels: []Tab_Draw_Label, first, end: int, active_bold: bool) -> int {
+tab_layout_widths :: proc(font: ^fonts.Manager, labels: []Tab_Draw_Label, active_bold: bool, available: int) -> []int {
+	widths := make([]int, len(labels), context.temp_allocator)
+	minimums := make([]int, len(labels), context.temp_allocator)
+	total := 0
+	minimum_total := 0
+	minimum_width := font.cell_width*5+12
+	for label, index in labels {
+		widths[index] = tab_label_width(font, label, active_bold)
+		minimums[index] = min(widths[index], minimum_width)
+		total += widths[index]
+		minimum_total += minimums[index]
+	}
+	if total <= available do return widths
+	if minimum_total > available {
+		copy(widths, minimums)
+		return widths
+	}
+	for total > available {
+		shrinkable := 0
+		for width, index in widths do if width > minimums[index] do shrinkable += 1
+		if shrinkable == 0 do break
+		step := max(1, (total-available+shrinkable-1)/shrinkable)
+		for &width, index in widths {
+			if width <= minimums[index] do continue
+			reduction := min(width-minimums[index], min(step, total-available))
+			width -= reduction
+			total -= reduction
+			if total <= available do break
+		}
+	}
+	return widths
+}
+
+tab_width_between :: proc(widths: []int, first, end: int) -> int {
 	width := 0
-	for index in max(0, first)..<min(end, len(labels)) do width += tab_label_width(font, labels[index], active_bold)
+	for index in max(0, first)..<min(end, len(widths)) do width += widths[index]
 	return width
 }
 
