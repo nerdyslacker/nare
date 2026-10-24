@@ -28,7 +28,7 @@ ITerm2_Error :: enum {
 	Limit,
 }
 
-decode_iterm2_inline :: proc(data: []byte) -> (ITerm2_Command, Decoded_Image, ITerm2_Error) {
+decode_iterm2_inline :: proc(data: []byte, limits: ^Limits = nil) -> (ITerm2_Command, Decoded_Image, ITerm2_Error) {
 	command := ITerm2_Command{preserve_aspect = true}
 	separator := strings.index_byte(string(data), ':')
 	if separator < 0 do return command, {}, .Malformed
@@ -91,7 +91,7 @@ decode_iterm2_inline :: proc(data: []byte) -> (ITerm2_Command, Decoded_Image, IT
 	defer delete(decoded)
 	if declared_size >= 0 && declared_size != len(decoded) do return command, {}, .Malformed
 	if len(decoded) >= 8 && string(decoded[:8]) == "\x89PNG\r\n\x1a\n" {
-		image, png_error := decode_png(decoded)
+		image, png_error := decode_png(decoded, limits)
 		switch png_error {
 		case .None: return command, image, .None
 		case .Limit: return command, {}, .Limit
@@ -99,14 +99,14 @@ decode_iterm2_inline :: proc(data: []byte) -> (ITerm2_Command, Decoded_Image, IT
 		case .Invalid_Data: return command, {}, .Malformed
 		}
 	} else if len(decoded) >= 3 && decoded[0] == 0xff && decoded[1] == 0xd8 && decoded[2] == 0xff {
-		image, jpeg_error := decode_jpeg(decoded)
+		image, jpeg_error := decode_jpeg(decoded, limits)
 		switch jpeg_error {
 		case .None: return command, image, .None
 		case .Limit: return command, {}, .Limit
 		case .Invalid_Data: return command, {}, .Malformed
 		}
 	} else if len(decoded) >= 6 && (string(decoded[:6]) == "GIF87a" || string(decoded[:6]) == "GIF89a") {
-		image, gif_error := decode_gif(decoded)
+		image, gif_error := decode_gif(decoded, limits)
 		switch gif_error {
 		case .None: return command, image, .None
 		case .Limit: return command, {}, .Limit

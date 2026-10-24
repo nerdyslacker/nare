@@ -109,6 +109,7 @@ kitty_transfer_timeout_ms :: proc(transfer: ^Kitty_Transfer, now: time.Tick) -> 
 kitty_receive_direct :: proc(
 	transfer: ^Kitty_Transfer,
 	data: []byte,
+	limits: ^Limits = nil,
 ) -> (command: Kitty_Command, image: Decoded_Image, complete: bool, err: Kitty_Error) {
 	frame, frame_error := kitty_parse_direct_frame(data)
 	if frame_error != .None {
@@ -141,14 +142,14 @@ kitty_receive_direct :: proc(
 		transfer.last_activity = time.tick_now()
 		if frame.command.more do return command, {}, false, .None
 		command.more = false
-		image, err = kitty_decode_payload(command, transfer.encoded[:])
+		image, err = kitty_decode_payload(command, transfer.encoded[:], limits)
 		kitty_transfer_reset(transfer)
 		return command, image, true, err
 	}
 
 	command = frame.command
 	if command.action == .Display || command.action == .Delete do return command, {}, true, .None
-	encoded_limit, limit_error := kitty_encoded_limit(command)
+	encoded_limit, limit_error := kitty_encoded_limit(command, limits)
 	if limit_error != .None do return command, {}, true, limit_error
 	if command.more {
 		if command.action == .Query do return command, {}, true, .Unsupported
@@ -165,14 +166,14 @@ kitty_receive_direct :: proc(
 	if frame.more_present && len(frame.payload) > MAX_KITTY_CHUNK_BYTES {
 		return command, {}, true, .Image_Limit
 	}
-	image, err = kitty_decode_payload(command, frame.payload)
+	image, err = kitty_decode_payload(command, frame.payload, limits)
 	return command, image, true, err
 }
 
-kitty_decode_direct :: proc(data: []byte) -> (Kitty_Command, Decoded_Image, Kitty_Error) {
+kitty_decode_direct :: proc(data: []byte, limits: ^Limits = nil) -> (Kitty_Command, Decoded_Image, Kitty_Error) {
 	transfer: Kitty_Transfer
 	defer kitty_transfer_destroy(&transfer)
-	command, image, complete, err := kitty_receive_direct(&transfer, data)
+	command, image, complete, err := kitty_receive_direct(&transfer, data, limits)
 	if !complete do return command, {}, .Unsupported
 	return command, image, err
 }
@@ -437,13 +438,13 @@ kitty_parse_direct_frame :: proc(data: []byte) -> (Kitty_Frame, Kitty_Error) {
 	return frame, .None
 }
 
-kitty_encoded_limit :: proc(command: Kitty_Command) -> (int, Kitty_Error) {
+kitty_encoded_limit :: proc(command: Kitty_Command, limits: ^Limits = nil) -> (int, Kitty_Error) {
 	if command.png {
 		if command.compressed do return 0, .Unsupported
 		return ((MAX_PNG_BYTES+2)/3)*4, .None
 	}
-	_, byte_count, layout_error := image_layout(command.width, command.height, command.format)
-	if layout_error == .Invalid_Dimensions do return 0, .Malformed
+	_, byte_count, layout_error := image_layout_with_limits(command.width, command.height, command.format, limits)
+	if command.width <= 0 || command.height <= 0 do return 0, .Malformed
 	if layout_error != .None do return 0, .Image_Limit
 	input_limit := byte_count
 	if command.compressed do input_limit = kitty_compressed_bound(byte_count)
@@ -464,14 +465,14 @@ kitty_append_chunk :: proc(transfer: ^Kitty_Transfer, payload: []byte, more: boo
 	return .None
 }
 
-kitty_decode_payload :: proc(command: Kitty_Command, payload: []byte) -> (Decoded_Image, Kitty_Error) {
-	encoded_limit, limit_error := kitty_encoded_limit(command)
+kitty_decode_payload :: proc(command: Kitty_Command, payload: []byte, limits: ^Limits = nil) -> (Decoded_Image, Kitty_Error) {
+	encoded_limit, limit_error := kitty_encoded_limit(command, limits)
 	if limit_error != .None do return {}, limit_error
 	if len(payload) == 0 || len(payload) > encoded_limit do return {}, .Image_Limit
 	decoded, decode_error := base64.decode(string(payload), options = {.Strict})
 	if decode_error != nil do return {}, .Invalid_Data
 	if command.png {
-		image, png_error := decode_png(decoded)
+		image, png_error := decode_png(decoded, limits)
 		delete(decoded)
 		switch png_error {
 		case .None: return image, .None
@@ -480,7 +481,7 @@ kitty_decode_payload :: proc(command: Kitty_Command, payload: []byte) -> (Decode
 		case .Invalid_Data: return {}, .Invalid_Data
 		}
 	}
-	stride, byte_count, _, layout_error := kitty_payload_layout(command)
+	stride, byte_count, _, layout_error := kitty_payload_layout(command, limits)
 	if layout_error != .None {
 		delete(decoded)
 		return {}, layout_error
@@ -510,7 +511,7 @@ kitty_decode_payload :: proc(command: Kitty_Command, payload: []byte) -> (Decode
 		format = command.format,
 		pixels = pixels,
 	}
-	_, image_error := validate_image(&image)
+	_, image_error := validate_image_with_limits(&image, limits)
 	if image_error != .None {
 		decoded_image_destroy(&image)
 		if image_error == .Invalid_Pixel_Data do return {}, .Invalid_Data
@@ -519,10 +520,10 @@ kitty_decode_payload :: proc(command: Kitty_Command, payload: []byte) -> (Decode
 	return image, .None
 }
 
-kitty_payload_layout :: proc(command: Kitty_Command) -> (stride, byte_count, encoded_limit: int, err: Kitty_Error) {
+kitty_payload_layout :: proc(command: Kitty_Command, limits: ^Limits = nil) -> (stride, byte_count, encoded_limit: int, err: Kitty_Error) {
 	layout_error: Error
-	stride, byte_count, layout_error = image_layout(command.width, command.height, command.format)
-	if layout_error == .Invalid_Dimensions do return 0, 0, 0, .Malformed
+	stride, byte_count, layout_error = image_layout_with_limits(command.width, command.height, command.format, limits)
+	if command.width <= 0 || command.height <= 0 do return 0, 0, 0, .Malformed
 	if layout_error != .None do return 0, 0, 0, .Image_Limit
 	input_limit := byte_count
 	if command.compressed do input_limit = kitty_compressed_bound(byte_count)

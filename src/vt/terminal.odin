@@ -243,7 +243,7 @@ handle_apc :: proc(terminal: ^Terminal, data: []byte, discarded: bool = false) {
 		return
 	}
 	if len(data) == 0 || data[0] != 'G' do return
-	command, image, complete, decode_error := graphics.kitty_receive_direct(&terminal.kitty_transfer, data)
+	command, image, complete, decode_error := graphics.kitty_receive_direct(&terminal.kitty_transfer, data, &terminal.images.limits)
 	if !complete do return
 	if decode_error != .None {
 		kitty_reply(terminal, command, false, kitty_error_text(decode_error))
@@ -457,7 +457,7 @@ handle_dcs :: proc(terminal: ^Terminal, data: []byte) {
 		return
 	}
 	palette := &terminal.sixel_palette if !terminal.modes.sixel_private_colors else nil
-	image, info, sixel_error := graphics.decode_sixel_dcs(data, palette)
+	image, info, sixel_error := graphics.decode_sixel_dcs(data, palette, &terminal.images.limits)
 	if sixel_error != .None do return
 	pixel_width_64 := i64(image.width)
 	pixel_height_64 := i64(image.height)*i64(info.pixel_aspect_height)
@@ -599,7 +599,7 @@ handle_osc :: proc(terminal: ^Terminal, data: []byte) {
 handle_osc1337 :: proc(terminal: ^Terminal, payload: []byte) {
 	prefix := "File="
 	if len(payload) < len(prefix) || string(payload[:len(prefix)]) != prefix do return
-	command, image, decode_error := graphics.decode_iterm2_inline(payload[len(prefix):])
+	command, image, decode_error := graphics.decode_iterm2_inline(payload[len(prefix):], &terminal.images.limits)
 	if decode_error != .None do return
 	image_id, image_error := graphics.add_image(&terminal.images, .ITerm2, 0, &image)
 	if image_error != .None {

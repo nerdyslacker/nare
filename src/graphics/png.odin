@@ -13,7 +13,7 @@ PNG_Error :: enum {
 	Unsupported,
 }
 
-decode_png :: proc(data: []byte) -> (Decoded_Image, PNG_Error) {
+decode_png :: proc(data: []byte, limits: ^Limits = nil) -> (Decoded_Image, PNG_Error) {
 	if len(data) < 33 || len(data) > MAX_PNG_BYTES || !png_signature_valid(data) do return {}, .Invalid_Data
 	offset := 8
 	width, height, channels, color_type := 0, 0, 0, byte(0)
@@ -46,9 +46,11 @@ decode_png :: proc(data: []byte) -> (Decoded_Image, PNG_Error) {
 			if seen_header || seen_data || chunk_length != 13 do return {}, .Invalid_Data
 			seen_header = true
 			width_u32, height_u32 := png_u32(chunk_data), png_u32(chunk_data[4:])
+			max_dimension := limits.max_image_dimension if limits != nil else MAX_IMAGE_DIMENSION
+			max_pixels := limits.max_image_pixels if limits != nil else MAX_IMAGE_PIXELS
 			if width_u32 == 0 || height_u32 == 0 ||
-			   width_u32 > u32(MAX_IMAGE_DIMENSION) || height_u32 > u32(MAX_IMAGE_DIMENSION) ||
-			   u64(width_u32)*u64(height_u32) > u64(MAX_IMAGE_PIXELS) {
+			   width_u32 > u32(max_dimension) || height_u32 > u32(max_dimension) ||
+			   u64(width_u32)*u64(height_u32) > u64(max_pixels) {
 				return {}, .Limit
 			}
 			if chunk_data[8] != 8 || chunk_data[10] != 0 || chunk_data[11] != 0 do return {}, .Unsupported
@@ -122,7 +124,7 @@ decode_png :: proc(data: []byte) -> (Decoded_Image, PNG_Error) {
 	}
 	if !png_unfilter(scanlines, width, height, channels) do return {}, .Invalid_Data
 
-	stride, byte_count, layout_error := image_layout(width, height, .RGBA8)
+	stride, byte_count, layout_error := image_layout_with_limits(width, height, .RGBA8, limits)
 	if layout_error != .None do return {}, .Limit
 	pixels := make([]byte, byte_count)
 	for row in 0..<height {

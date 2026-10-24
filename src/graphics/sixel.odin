@@ -29,23 +29,26 @@ Sixel_State :: struct {
 	pixel_aspect_height: int,
 	background_color: [4]byte,
 	background_set: bool,
+	max_repeat: int,
+	max_colors: int,
 }
 
-decode_sixel_dcs :: proc(data: []byte, shared_palette: ^Sixel_Palette = nil) -> (Decoded_Image, Sixel_Info, Sixel_Error) {
+decode_sixel_dcs :: proc(
+	data: []byte,
+	shared_palette: ^Sixel_Palette = nil,
+	limits: ^Limits = nil,
+) -> (Decoded_Image, Sixel_Info, Sixel_Error) {
 	body, transparent, pixel_aspect_height, header_error := sixel_header(data)
 	if header_error != .None do return {}, {}, header_error
-	measured := sixel_state_init(pixel_aspect_height, nil)
+	measured := sixel_state_init(pixel_aspect_height, nil, limits)
 	if process_error := sixel_process(&measured, body); process_error != .None do return {}, {}, process_error
 	width := max(measured.raster_width, measured.max_x)
 	height := max(measured.raster_height, measured.max_y)
 	if !measured.saw_data && (width == 0 || height == 0) do return {}, {}, .Malformed
-	if width <= 0 || height <= 0 || width > MAX_IMAGE_DIMENSION || height > MAX_IMAGE_DIMENSION ||
-	   width > MAX_IMAGE_PIXELS/height {
-		return {}, {}, .Limit
-	}
-	stride := width*4
-	pixels := make([]byte, stride*height)
-	state := sixel_state_init(pixel_aspect_height, shared_palette)
+	stride, byte_count, layout_error := image_layout_with_limits(width, height, .RGBA8, limits)
+	if layout_error != .None do return {}, {}, .Limit
+	pixels := make([]byte, byte_count)
+	state := sixel_state_init(pixel_aspect_height, shared_palette, limits)
 	state.pixels = pixels
 	state.width = width
 	state.height = height
@@ -126,10 +129,12 @@ sixel_palette_default :: proc() -> Sixel_Palette {
 	return palette
 }
 
-sixel_state_init :: proc(pixel_aspect_height: int, palette: ^Sixel_Palette) -> Sixel_State {
+sixel_state_init :: proc(pixel_aspect_height: int, palette: ^Sixel_Palette, limits: ^Limits) -> Sixel_State {
 	state: Sixel_State
 	state.pixel_aspect_height = pixel_aspect_height
 	state.palette = palette^ if palette != nil else sixel_palette_default()
+	state.max_repeat = limits.max_sixel_repeat if limits != nil else MAX_SIXEL_REPEAT
+	state.max_colors = limits.max_sixel_colors if limits != nil else MAX_SIXEL_COLORS
 	return state
 }
 
@@ -147,11 +152,13 @@ sixel_process :: proc(state: ^Sixel_State, data: []byte) -> Sixel_Error {
 			   data[next] < '?' || data[next] > '~' {
 				return .Malformed
 			}
+			if values[0] > state.max_repeat do return .Limit
 			if draw_error := sixel_draw(state, data[next]-'?', values[0]); draw_error != .None do return draw_error
 			index = next+1
 		case '#':
 			values, count, next, ok := sixel_parameters(data, index+1, 5)
 			if !ok || (count != 1 && count != 5) || values[0] < 0 || values[0] >= MAX_SIXEL_COLORS do return .Malformed
+			if values[0] >= state.max_colors do return .Limit
 			state.current_color = values[0]
 			if count == 5 {
 				color, color_ok := sixel_color(values[1], values[2], values[3], values[4])
@@ -166,10 +173,7 @@ sixel_process :: proc(state: ^Sixel_State, data: []byte) -> Sixel_Error {
 			state.pixel_aspect_height = max(1, (values[0]+values[1]/2)/values[1])
 			if state.pixel_aspect_height > MAX_IMAGE_DIMENSION do return .Limit
 			if count == 4 {
-				if values[2] <= 0 || values[3] <= 0 || values[2] > MAX_IMAGE_DIMENSION || values[3] > MAX_IMAGE_DIMENSION ||
-				   values[2] > MAX_IMAGE_PIXELS/values[3] {
-					return .Limit
-				}
+				if _, _, layout_error := image_layout(values[2], values[3], .RGBA8); layout_error != .None do return .Limit
 				state.raster_width, state.raster_height = values[2], values[3]
 				state.background_color = state.palette[0]
 				state.background_set = true

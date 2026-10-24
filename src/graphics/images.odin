@@ -56,6 +56,11 @@ Limits :: struct {
 	iterm2_cache_bytes: int,
 	max_images: int,
 	max_placements: int,
+	max_image_dimension: int,
+	max_image_pixels: int,
+	max_image_bytes: int,
+	max_sixel_repeat: int,
+	max_sixel_colors: int,
 }
 
 Decoded_Image :: struct {
@@ -136,6 +141,11 @@ limits_default :: proc() -> Limits {
 		iterm2_cache_bytes = MAX_CACHE_BYTES,
 		max_images = 4096,
 		max_placements = 65_536,
+		max_image_dimension = MAX_IMAGE_DIMENSION,
+		max_image_pixels = MAX_IMAGE_PIXELS,
+		max_image_bytes = MAX_IMAGE_BYTES,
+		max_sixel_repeat = MAX_SIXEL_REPEAT,
+		max_sixel_colors = MAX_SIXEL_COLORS,
 	}
 }
 
@@ -145,7 +155,12 @@ registry_init_with_limits :: proc(registry: ^Registry, limits: Limits) -> Error 
 	   limits.sixel_cache_bytes < 0 || limits.sixel_cache_bytes > MAX_CACHE_BYTES ||
 	   limits.iterm2_cache_bytes < 0 || limits.iterm2_cache_bytes > MAX_CACHE_BYTES ||
 	   limits.max_images <= 0 || limits.max_images > MAX_ACTIVE_IMAGES ||
-	   limits.max_placements <= 0 || limits.max_placements > MAX_ACTIVE_PLACEMENTS {
+	   limits.max_placements <= 0 || limits.max_placements > MAX_ACTIVE_PLACEMENTS ||
+	   limits.max_image_dimension <= 0 || limits.max_image_dimension > MAX_IMAGE_DIMENSION ||
+	   limits.max_image_pixels <= 0 || limits.max_image_pixels > MAX_IMAGE_PIXELS ||
+	   limits.max_image_bytes <= 0 || limits.max_image_bytes > MAX_IMAGE_BYTES ||
+	   limits.max_sixel_repeat <= 0 || limits.max_sixel_repeat > MAX_SIXEL_REPEAT ||
+	   limits.max_sixel_colors <= 0 || limits.max_sixel_colors > MAX_SIXEL_COLORS {
 		return .Invalid_Limit
 	}
 	registry.limits = limits
@@ -172,7 +187,7 @@ add_image :: proc(
 	protocol_id: u32,
 	image: ^Decoded_Image,
 ) -> (u64, Error) {
-	byte_count, validation_error := validate_image(image)
+	byte_count, validation_error := validate_image_with_limits(image, &registry.limits)
 	if validation_error != .None do return 0, validation_error
 	if protocol_id != 0 && find_protocol_image(registry, protocol, protocol_id) != nil {
 		return 0, .Duplicate_Protocol_ID
@@ -511,23 +526,35 @@ clear_visible :: proc(registry: ^Registry, screen: Screen, top, bottom: int) {
 }
 
 validate_image :: proc(image: ^Decoded_Image) -> (int, Error) {
-	stride, byte_count, layout_error := image_layout(image.width, image.height, image.format)
+	return validate_image_with_limits(image, nil)
+}
+
+validate_image_with_limits :: proc(image: ^Decoded_Image, limits: ^Limits) -> (int, Error) {
+	stride, byte_count, layout_error := image_layout_with_limits(image.width, image.height, image.format, limits)
 	if layout_error != .None do return 0, layout_error
 	if image.stride < stride do return 0, .Invalid_Stride
-	if image.stride > MAX_IMAGE_BYTES/image.height do return 0, .Image_Too_Large
+	max_bytes := limits.max_image_bytes if limits != nil else MAX_IMAGE_BYTES
+	if image.stride > max_bytes/image.height do return 0, .Image_Too_Large
 	byte_count = image.stride*image.height
 	if len(image.pixels) != byte_count do return 0, .Invalid_Pixel_Data
 	return byte_count, .None
 }
 
 image_layout :: proc(width, height: int, format: Pixel_Format) -> (stride, byte_count: int, err: Error) {
-	if width <= 0 || height <= 0 || width > MAX_IMAGE_DIMENSION || height > MAX_IMAGE_DIMENSION {
+	return image_layout_with_limits(width, height, format, nil)
+}
+
+image_layout_with_limits :: proc(width, height: int, format: Pixel_Format, limits: ^Limits) -> (stride, byte_count: int, err: Error) {
+	max_dimension := limits.max_image_dimension if limits != nil else MAX_IMAGE_DIMENSION
+	max_pixels := limits.max_image_pixels if limits != nil else MAX_IMAGE_PIXELS
+	max_bytes := limits.max_image_bytes if limits != nil else MAX_IMAGE_BYTES
+	if width <= 0 || height <= 0 || width > max_dimension || height > max_dimension {
 		return 0, 0, .Invalid_Dimensions
 	}
-	if width > MAX_IMAGE_PIXELS/height do return 0, 0, .Image_Too_Large
+	if width > max_pixels/height do return 0, 0, .Image_Too_Large
 	channels := bytes_per_pixel(format)
 	stride = width*channels
-	if stride > MAX_IMAGE_BYTES/height do return 0, 0, .Image_Too_Large
+	if stride > max_bytes/height do return 0, 0, .Image_Too_Large
 	return stride, stride*height, .None
 }
 

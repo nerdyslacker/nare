@@ -197,6 +197,26 @@ apply :: proc(settings: ^Settings, section, key, value: string) -> Error {
 			parsed, ok := strconv.parse_int(value)
 			if !ok || parsed <= 0 || parsed > graphics.MAX_ACTIVE_PLACEMENTS do return .Invalid_Value
 			settings.graphics_limits.max_placements = parsed
+		case "max-image-dimension":
+			parsed, ok := strconv.parse_int(value)
+			if !ok || parsed <= 0 || parsed > graphics.MAX_IMAGE_DIMENSION do return .Invalid_Value
+			settings.graphics_limits.max_image_dimension = parsed
+		case "max-image-pixels":
+			parsed, ok := strconv.parse_int(value)
+			if !ok || parsed <= 0 || parsed > graphics.MAX_IMAGE_PIXELS do return .Invalid_Value
+			settings.graphics_limits.max_image_pixels = parsed
+		case "max-image-size-mib":
+			parsed, ok := parse_mebibytes(value, 1)
+			if !ok || parsed > graphics.MAX_IMAGE_BYTES do return .Invalid_Value
+			settings.graphics_limits.max_image_bytes = parsed
+		case "max-sixel-repeat":
+			parsed, ok := strconv.parse_int(value)
+			if !ok || parsed <= 0 || parsed > graphics.MAX_SIXEL_REPEAT do return .Invalid_Value
+			settings.graphics_limits.max_sixel_repeat = parsed
+		case "max-sixel-colors":
+			parsed, ok := strconv.parse_int(value)
+			if !ok || parsed <= 0 || parsed > graphics.MAX_SIXEL_COLORS do return .Invalid_Value
+			settings.graphics_limits.max_sixel_colors = parsed
 		case: return .Unknown_Key
 		}
 	} else {

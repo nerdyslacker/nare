@@ -14,6 +14,18 @@
 
 `nare` is an experimental X11-only terminal emulator written in Odin.
 
+## Dependencies
+
+Void Linux and LazyLinux use the same XBPS packages:
+
+```sh
+sudo xbps-install -S base-devel libX11-devel fontconfig-devel freetype-devel harfbuzz-devel ncurses
+```
+
+Install Odin `dev-2026-10` separately and make sure `odin` is in `PATH`. The optional GPU build also needs `libglvnd-devel`.
+
+Prebuilt binaries require `libX11 fontconfig freetype libharfbuzz`; the GPU binary additionally requires `libglvnd`. A usable font is required (`dejavu-fonts-ttf` is a small default), and `xdg-utils` enables the default URL opener.
+
 Build and run:
 
 ```sh
