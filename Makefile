@@ -1,46 +1,53 @@
+
 ODIN ?= odin
-ODIN_FLAGS ?= -vet -strict-style
-BUILD_DIR ?= build
-TERMINFO_DIR ?= $(HOME)/.terminfo
-ODIN_VERSION := dev-2026-10
-SRC := $(shell find src -name '*.odin' -type f)
+BUILD_DIR := build
+PREFIX ?= /usr
+DESTDIR ?=
+BINDIR := $(PREFIX)/bin
+DATADIR := $(PREFIX)/share
+ICONDIR := $(DATADIR)/icons/hicolor/256x256/apps
+DESKTOPDIR := $(DATADIR)/applications
+TERMINFO_DIR := $(DATADIR)/terminfo
 
-.PHONY: all cpu gpu check check-cpu check-gpu check-terminfo install-terminfo check-version clean
+APP := $(BUILD_DIR)/nare
+APP_CPU := $(BUILD_DIR)/nare-cpu
+ODIN_FLAGS := -vet -strict-style
 
-all: check-version $(BUILD_DIR)/nare
+.PHONY: build cpu release check run install uninstall clean
 
-$(BUILD_DIR)/nare: $(SRC)
+build:
 	mkdir -p $(BUILD_DIR)
-	$(ODIN) build src $(ODIN_FLAGS) -define:RENDERER_GPU=true -out:$@
+	$(ODIN) build src $(ODIN_FLAGS) -define:RENDERER_GPU=true -debug -out:$(APP)
 
-gpu: all
-
-cpu: check-version $(BUILD_DIR)/nare-cpu
-
-$(BUILD_DIR)/nare-cpu: $(SRC)
+cpu:
 	mkdir -p $(BUILD_DIR)
-	$(ODIN) build src $(ODIN_FLAGS) -out:$@
+	$(ODIN) build src $(ODIN_FLAGS) -debug -out:$(APP_CPU)
 
-check-version:
-	@test "$$($(ODIN) version)" = "odin version $(ODIN_VERSION)" || \
-		{ echo "expected Odin $(ODIN_VERSION)" >&2; exit 1; }
+release:
+	mkdir -p $(BUILD_DIR)
+	$(ODIN) build src $(ODIN_FLAGS) -define:RENDERER_GPU=true -o:speed -out:$(APP)
+	$(ODIN) build src $(ODIN_FLAGS) -o:speed -out:$(APP_CPU)
 
-check: check-version
+check:
 	$(ODIN) check src $(ODIN_FLAGS) -define:RENDERER_GPU=true
-
-check-cpu: check-version
 	$(ODIN) check src $(ODIN_FLAGS)
 
-check-gpu: check
+run: build
+	./$(APP)
 
-check-terminfo:
-	mkdir -p "$(BUILD_DIR)/terminfo"
-	tic -x -o "$(BUILD_DIR)/terminfo" terminfo/nare.terminfo
-	TERMINFO="$(CURDIR)/$(BUILD_DIR)/terminfo" infocmp -x nare >/dev/null
+install: release
+	install -Dm755 $(APP) $(DESTDIR)$(BINDIR)/nare
+	install -Dm755 $(APP_CPU) $(DESTDIR)$(BINDIR)/nare-cpu
+	install -Dm644 assets/logo_256.png $(DESTDIR)$(ICONDIR)/nare.png
+	install -Dm644 nare.desktop $(DESTDIR)$(DESKTOPDIR)/nare.desktop
+	tic -x -o $(DESTDIR)$(TERMINFO_DIR) terminfo/nare.terminfo
 
-install-terminfo:
-	mkdir -p "$(TERMINFO_DIR)"
-	tic -x -o "$(TERMINFO_DIR)" terminfo/nare.terminfo
+uninstall:
+	rm -f $(DESTDIR)$(BINDIR)/nare
+	rm -f $(DESTDIR)$(BINDIR)/nare-cpu
+	rm -f $(DESTDIR)$(ICONDIR)/nare.png
+	rm -f $(DESTDIR)$(DESKTOPDIR)/nare.desktop
+	rm -f $(DESTDIR)$(TERMINFO_DIR)/n/nare
 
 clean:
-	rm -f $(BUILD_DIR)/nare $(BUILD_DIR)/nare-cpu
+	rm -rf $(BUILD_DIR)
