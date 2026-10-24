@@ -77,8 +77,13 @@ workspace_run :: proc(root: ^x11.Window, command: []cstring, settings: ^config.S
 		return 1
 	}
 	workspace_layout(&workspace)
+	x11.set_mouse_tracking(root, 0, settings.scrollbar_enabled)
 	for len(workspace.tabs) > 0 {
-		if pane := workspace_active_pane(&workspace); pane != nil do x11.set_mouse_tracking(&pane.surface, pane.terminal.modes.mouse_tracking)
+		for tab in workspace.tabs {
+			for pane in tab.panes {
+				if pane.visible do x11.set_mouse_tracking(&pane.surface, pane.terminal.modes.mouse_tracking, settings.scrollbar_enabled)
+			}
+		}
 		for {
 			event, available := x11.next_event(root)
 			if !available do break
@@ -260,7 +265,7 @@ workspace_layout :: proc(workspace: ^Workspace) {
 				_ = vt.terminal_resize(&pane.terminal, columns, rows)
 				_ = pty.resize(&pane.process, pty_size(columns, rows, width, height))
 			}
-			drawing.draw(&pane.renderer, &pane.surface, &pane.terminal, true, &pane.selection_state, nil, {history_rows = len(vt.terminal_screen(&pane.terminal).scrollback)})
+			drawing.draw(&pane.renderer, &pane.surface, &pane.terminal, true, &pane.selection_state, nil, workspace_scrollbar(workspace, pane))
 		}
 	}
 	workspace_draw_tabs(workspace)
@@ -313,7 +318,7 @@ workspace_event :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
 		if event.source == workspace.root.id {
 			workspace_draw_tabs(workspace)
 		} else if pane := workspace_find_pane(workspace, event.source); pane != nil && pane.visible {
-			drawing.draw(&pane.renderer, &pane.surface, &pane.terminal, true, &pane.selection_state, nil, {history_rows = len(vt.terminal_screen(&pane.terminal).scrollback)})
+			drawing.draw(&pane.renderer, &pane.surface, &pane.terminal, true, &pane.selection_state, nil, workspace_scrollbar(workspace, pane))
 		}
 	case .Input:
 		if workspace.renaming_tab >= 0 {
@@ -328,7 +333,7 @@ workspace_event :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
 		if rows := scrollback_shortcut(event, vt.terminal_screen(&pane.terminal).rows); rows != 0 {
 			selection.clear(&pane.selection_state)
 			features.scrollback_scroll(&pane.scrollback_state, vt.terminal_screen(&pane.terminal), rows)
-			redraw(&pane.renderer, &pane.surface, &pane.terminal, &pane.selection_state, &pane.search_state, &pane.url_state, true, &pane.shell_state, &pane.scrollback_state)
+			workspace_redraw(workspace, pane, true)
 			return true
 		}
 		if copy_shortcut(event) { copy_selection(workspace.root, &pane.terminal, &pane.selection_state, .Clipboard); return true }
@@ -340,14 +345,25 @@ workspace_event :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
 		else if .Alt in event.modifiers do queue_input(&pane.pending, pane.pending_offset, {0x1b})
 		queue_input(&pane.pending, pane.pending_offset, data)
 	case .Mouse:
+		workspace_clear_scrollbar_hover(workspace, event.source)
 		if event.source == workspace.root.id && workspace_tab_bar_mouse(workspace, event.mouse, event.timestamp) do return true
 		pane := workspace_find_pane(workspace, event.source)
 		if pane == nil do return true
-		workspace_focus_pane(workspace, pane)
+		if event.mouse.action == .Press do workspace_focus_pane(workspace, pane)
 		mouse := event.mouse
 		mouse.column = max(1, mouse.x/pane.surface.cell_w+1)
 		mouse.row = max(1, mouse.y/pane.surface.cell_h+1)
 		local_mouse := pane.terminal.modes.mouse_tracking == 0 || .Shift in mouse.modifiers
+		if workspace.settings.scrollbar_enabled && !pane.search_state.active && !pane.url_state.active && !pane.shell_state.active {
+			handled, scrolled, visual_changed := handle_scrollbar_mouse(&pane.surface, &pane.terminal, &pane.scrollback_state, &pane.scrollbar, mouse)
+			if handled {
+				if scrolled do selection.clear(&pane.selection_state)
+				if scrolled || visual_changed {
+					workspace_redraw(workspace, pane, true)
+				}
+				return true
+			}
+		}
 		if local_mouse && mouse.action == .Press && mouse.button == 2 {
 			if .Shift in mouse.modifiers do workspace_close_pane(workspace)
 			else do workspace_split(workspace, .Rows)
@@ -361,12 +377,12 @@ workspace_event :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
 			if mouse.action == .Press {
 				direction := 1 if mouse.button == 4 else -1
 				features.scrollback_scroll(&pane.scrollback_state, vt.terminal_screen(&pane.terminal), direction)
-				redraw(&pane.renderer, &pane.surface, &pane.terminal, &pane.selection_state, &pane.search_state, &pane.url_state, true, &pane.shell_state, &pane.scrollback_state)
+				workspace_redraw(workspace, pane, true)
 			}
 			return true
 		}
 		if local_mouse {
-			workspace_handle_selection_mouse(workspace.root, pane, mouse)
+			workspace_handle_selection_mouse(workspace, pane, mouse)
 			if mouse.action == .Release && workspace.settings.window.copy_on_select do copy_selection(workspace.root, &pane.terminal, &pane.selection_state, .Clipboard)
 		} else {
 			encoded: [32]byte
@@ -513,7 +529,7 @@ workspace_rename_input :: proc(workspace: ^Workspace, event: x11.Event) {
 	}
 }
 
-workspace_handle_selection_mouse :: proc(root: ^x11.Window, pane: ^Pane, event: keyboard.Mouse_Event) {
+workspace_handle_selection_mouse :: proc(workspace: ^Workspace, pane: ^Pane, event: keyboard.Mouse_Event) {
 	if event.button != 1 do return
 	screen := vt.terminal_screen(&pane.terminal)
 	position := vt.screen_position(screen, event.row-1, event.column-1)
@@ -523,10 +539,49 @@ workspace_handle_selection_mouse :: proc(root: ^x11.Window, pane: ^Pane, event: 
 	case .Motion: selection.update(&pane.selection_state, screen, position)
 	case .Release:
 		selection.finish(&pane.selection_state, screen, position)
-		copy_selection(root, &pane.terminal, &pane.selection_state, .Primary)
+		copy_selection(workspace.root, &pane.terminal, &pane.selection_state, .Primary)
 	}
 	if event.action == .Motion && pane.selection_state == previous do return
-	drawing.draw(&pane.renderer, &pane.surface, &pane.terminal, false, &pane.selection_state, nil, {history_rows = len(screen.scrollback)})
+	drawing.draw(&pane.renderer, &pane.surface, &pane.terminal, false, &pane.selection_state, nil, workspace_scrollbar(workspace, pane))
+}
+
+workspace_scrollbar :: proc(workspace: ^Workspace, pane: ^Pane) -> drawing.Scrollbar {
+	if !workspace.settings.scrollbar_enabled do return {}
+	return {
+		history_rows = len(vt.terminal_screen(&pane.terminal).scrollback),
+		offset = pane.scrollback_state.offset,
+		hovered = pane.scrollbar.hovered || pane.scrollbar.dragging,
+		track_color = workspace.settings.ui_colors.inactive_tab_background,
+	}
+}
+
+workspace_redraw :: proc(workspace: ^Workspace, pane: ^Pane, force: bool) {
+	scrollbar := workspace_scrollbar(workspace, pane)
+	redraw(
+		&pane.renderer,
+		&pane.surface,
+		&pane.terminal,
+		&pane.selection_state,
+		&pane.search_state,
+		&pane.url_state,
+		force,
+		&pane.shell_state,
+		&pane.scrollback_state,
+		workspace.settings.scrollbar_enabled,
+		&scrollbar,
+	)
+}
+
+workspace_clear_scrollbar_hover :: proc(workspace: ^Workspace, source: xlib.Window) {
+	for tab in workspace.tabs {
+		for pane in tab.panes {
+			if pane.surface.id == source || !pane.scrollbar.hovered || pane.scrollbar.dragging do continue
+			pane.scrollbar.hovered = false
+			if pane.visible {
+				drawing.draw(&pane.renderer, &pane.surface, &pane.terminal, true, &pane.selection_state, nil, workspace_scrollbar(workspace, pane))
+			}
+		}
+	}
 }
 
 workspace_shortcut :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
@@ -694,7 +749,7 @@ workspace_cursor_tick :: proc(workspace: ^Workspace) {
 		if !blinking do continue
 		pane.terminal.cursor_phase_visible = !pane.terminal.cursor_phase_visible
 		if tab_index == workspace.active && (!tab.stacked || tab.panes[tab.active] == pane) {
-			drawing.draw(&pane.renderer, &pane.surface, &pane.terminal, false, &pane.selection_state, nil, {history_rows = len(vt.terminal_screen(&pane.terminal).scrollback)})
+			drawing.draw(&pane.renderer, &pane.surface, &pane.terminal, false, &pane.selection_state, nil, workspace_scrollbar(workspace, pane))
 		}
 	}
 }
@@ -757,7 +812,7 @@ workspace_drain :: proc(workspace: ^Workspace, pane: ^Pane) -> bool {
 			queue_terminal_replies(&pane.pending, pane.pending_offset, &pane.terminal)
 			if dirty {
 				features.scrollback_refresh(&pane.scrollback_state, vt.terminal_screen(&pane.terminal))
-				if pane.visible do drawing.draw(&pane.renderer, &pane.surface, &pane.terminal, false, &pane.selection_state, nil, {history_rows = len(vt.terminal_screen(&pane.terminal).scrollback)})
+				if pane.visible do drawing.draw(&pane.renderer, &pane.surface, &pane.terminal, false, &pane.selection_state, nil, workspace_scrollbar(workspace, pane))
 				if pane == workspace_active_pane(workspace) && pane.terminal.title_changed {
 					x11.set_title(workspace.root, current_window_title(&pane.terminal, workspace.settings.title))
 					workspace_draw_tabs(workspace)

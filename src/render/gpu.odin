@@ -453,14 +453,14 @@ when GPU_ENABLED {
 	}
 
 	gpu_draw_commands :: proc(gpu: ^GPU, registry: ^graphics.Registry) {
-		has_images := false
+		ordered := false
 		for command in gpu.commands {
-			if command.kind == .Image {
-				has_images = true
+			if command.kind == .Image || command.opacity != 0 {
+				ordered = true
 				break
 			}
 		}
-		if has_images {
+		if ordered {
 			gpu_draw_ordered_commands(gpu, registry)
 			return
 		}
@@ -494,8 +494,14 @@ when GPU_ENABLED {
 			switch command.kind {
 			case .Rectangle:
 				Disable(GL_TEXTURE_2D)
-				Disable(GL_BLEND)
-				gpu_color(command.color)
+				if command.opacity == 0 {
+					Disable(GL_BLEND)
+					gpu_color(command.color)
+				} else {
+					Enable(GL_BLEND)
+					BlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+					gpu_color_alpha(command.color, command.opacity)
+				}
 				Begin(GL_QUADS)
 				gpu_quad(gpu, command.x, command.y, command.x+command.width, command.y+command.height)
 				End()
@@ -553,6 +559,10 @@ when GPU_ENABLED {
 
 	gpu_color :: proc(color: u32) {
 		Color4f(f32((color>>16)&0xff)/255, f32((color>>8)&0xff)/255, f32(color&0xff)/255, 1)
+	}
+
+	gpu_color_alpha :: proc(color: u32, opacity: u8) {
+		Color4f(f32((color>>16)&0xff)/255, f32((color>>8)&0xff)/255, f32(color&0xff)/255, f32(opacity)/255)
 	}
 
 	gpu_quad :: proc(gpu: ^GPU, left, top, right, bottom: int) {

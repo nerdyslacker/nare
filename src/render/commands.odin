@@ -12,6 +12,7 @@ Command :: struct {
 	kind: Command_Kind,
 	x, y, width, height: int,
 	color: u32,
+	opacity: u8,
 	face_id: int,
 	glyph_index: u32,
 	glyph_kind: fonts.Bitmap_Kind,
@@ -219,6 +220,10 @@ display_colors :: proc(cell: ^vt.Cell, selected, cursor: bool) -> (foreground, b
 
 append_rectangle :: proc(output: ^[dynamic]Command, x, y, width, height: int, color: u32) {
 	append(output, Command{kind = .Rectangle, x = x, y = y, width = width, height = height, color = color})
+}
+
+append_translucent_rectangle :: proc(output: ^[dynamic]Command, x, y, width, height: int, color: u32, opacity: u8) {
+	append(output, Command{kind = .Rectangle, x = x, y = y, width = width, height = height, color = color, opacity = opacity})
 }
 
 append_cursor_commands :: proc(output: ^[dynamic]Command, window: ^x11.Window, terminal: ^vt.Terminal, screen: ^vt.Screen, row: int) {

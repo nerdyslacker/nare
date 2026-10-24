@@ -113,6 +113,7 @@ Window :: struct {
 	cell_h:    int,
 	focused:   bool,
 	mouse_tracking: int,
+	pointer_motion: bool,
 	primary_atom: xlib.Atom,
 	clipboard_atom: xlib.Atom,
 	utf8_atom: xlib.Atom,
@@ -578,16 +579,14 @@ cancel_incoming_selection :: proc(window: ^Window) {
 	clear(&window.paste_data)
 }
 
-set_mouse_tracking :: proc(window: ^Window, tracking: int) {
-	if tracking == window.mouse_tracking do return
+set_mouse_tracking :: proc(window: ^Window, tracking: int, pointer_motion: bool = false) {
+	if tracking == window.mouse_tracking && pointer_motion == window.pointer_motion do return
 	mask := base_event_mask()
-	if tracking == 1002 {
-		mask += {.ButtonMotion}
-	} else if tracking == 1003 {
-		mask += {.PointerMotion}
-	}
+	if tracking == 1002 do mask += {.ButtonMotion}
+	if tracking == 1003 || pointer_motion do mask += {.PointerMotion}
 	xlib.SelectInput(window.display, window.id, mask)
 	window.mouse_tracking = tracking
+	window.pointer_motion = pointer_motion
 }
 
 modifiers_from_state :: proc(state: xlib.InputMask) -> keyboard.Modifiers {

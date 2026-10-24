@@ -97,6 +97,7 @@ Settings :: struct {
 	term: string,
 	working_directory: string,
 	scrollback_lines: int,
+	scrollbar_enabled: bool,
 	osc52_policy: vt.OSC52_Policy,
 	graphics_limits: graphics.Limits,
 	theme: drawing.Theme,
@@ -124,6 +125,7 @@ settings_init :: proc(settings: ^Settings) {
 	settings.term = strings.clone("xterm-256color")
 	settings.working_directory = strings.clone("")
 	settings.scrollback_lines = 10000
+	settings.scrollbar_enabled = true
 	settings.osc52_policy = .Disabled
 	settings.graphics_limits = graphics.limits_default()
 	settings.theme = drawing.DEFAULT_THEME
@@ -293,10 +295,17 @@ apply :: proc(settings: ^Settings, section, key, value: string) -> Error {
 		case: return .Unknown_Key
 		}
 	} else if section == "scrollback" {
-		if key != "lines" do return .Unknown_Key
-		parsed, ok := strconv.parse_int(value)
-		if !ok || parsed < 0 || parsed > MAX_SCROLLBACK_LINES do return .Invalid_Value
-		settings.scrollback_lines = parsed
+		switch key {
+		case "lines":
+			parsed, ok := strconv.parse_int(value)
+			if !ok || parsed < 0 || parsed > MAX_SCROLLBACK_LINES do return .Invalid_Value
+			settings.scrollback_lines = parsed
+		case "scrollbar":
+			parsed, ok := parse_bool(value)
+			if !ok do return .Invalid_Value
+			settings.scrollbar_enabled = parsed
+		case: return .Unknown_Key
+		}
 	} else if section == "url" {
 		if key != "opener" do return .Unknown_Key
 		if value == "" do return .Invalid_Value

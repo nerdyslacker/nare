@@ -170,6 +170,7 @@ OSC52_Request :: struct {
 
 Scrollbar_Interaction :: struct {
 	dragging: bool,
+	hovered: bool,
 	grab_y: int,
 }
 
@@ -217,7 +218,7 @@ run :: proc(
 
 	for running {
 		scroll_redraw_pending := false
-		x11.set_mouse_tracking(window, terminal.modes.mouse_tracking)
+		x11.set_mouse_tracking(window, terminal.modes.mouse_tracking, true)
 		for {
 			event, available := x11.next_event(window)
 			if !available do break
@@ -346,7 +347,7 @@ run :: proc(
 			case .Mouse:
 				local_mouse := terminal.modes.mouse_tracking == 0 || .Shift in event.mouse.modifiers
 				if !search_state.active && !url_state.active && !shell_state.active {
-					handled, changed := handle_scrollbar_mouse(
+					handled, scrolled, visual_changed := handle_scrollbar_mouse(
 						window,
 						terminal,
 						&scrollback_state,
@@ -354,10 +355,10 @@ run :: proc(
 						event.mouse,
 					)
 					if handled {
-						if changed {
+						if scrolled {
 							selection.clear(&selection_state)
-							scroll_redraw_pending = true
 						}
+						if scrolled || visual_changed do scroll_redraw_pending = true
 						continue
 					}
 				}
@@ -519,33 +520,41 @@ handle_scrollbar_mouse :: proc(
 	state: ^features.Scrollback_State,
 	interaction: ^Scrollbar_Interaction,
 	event: keyboard.Mouse_Event,
-) -> (handled, changed: bool) {
+) -> (handled, scrolled, visual_changed: bool) {
 	screen := vt.terminal_screen(terminal)
 	scrollbar := drawing.Scrollbar{history_rows = len(screen.scrollback), offset = state.offset}
 	geometry := drawing.scrollbar_geometry(window, screen, scrollbar)
+	over_track := geometry.visible && event.x >= geometry.x && event.x < geometry.x+geometry.width &&
+	              event.y >= 0 && event.y < geometry.track_height
+	over_thumb := over_track && event.y >= geometry.y && event.y < geometry.y+geometry.height
+	was_hovered := interaction.hovered
+	interaction.hovered = over_thumb || interaction.dragging
 	if event.action == .Motion && interaction.dragging {
 		previous := state.offset
 		features.scrollback_set_offset(state, screen, drawing.scrollbar_offset_at(scrollbar, geometry, event.y, interaction.grab_y))
-		return true, state.offset != previous
+		return true, state.offset != previous, interaction.hovered != was_hovered
 	}
-	if event.button != 1 do return false, false
+	if event.action == .Motion {
+		return over_track || interaction.hovered != was_hovered, false, interaction.hovered != was_hovered
+	}
+	if event.button != 1 do return false, false, interaction.hovered != was_hovered
 	if event.action == .Release && interaction.dragging {
 		interaction.dragging = false
-		return true, false
+		return true, false, interaction.hovered != was_hovered
 	}
-	if event.action != .Press || !geometry.visible || event.x < geometry.x || event.x >= geometry.x+geometry.width ||
-	   event.y < 0 || event.y >= geometry.track_height {
-		return false, false
+	if event.action != .Press || !over_track {
+		return false, false, interaction.hovered != was_hovered
 	}
 	interaction.dragging = true
-	if event.y >= geometry.y && event.y < geometry.y+geometry.height {
+	interaction.hovered = true
+	if over_thumb {
 		interaction.grab_y = event.y-geometry.y
-		return true, false
+		return true, false, !was_hovered
 	}
 	interaction.grab_y = geometry.height/2
 	previous := state.offset
 	features.scrollback_set_offset(state, screen, drawing.scrollbar_offset_at(scrollbar, geometry, event.y, interaction.grab_y))
-	return true, state.offset != previous
+	return true, state.offset != previous, !was_hovered
 }
 
 handle_url_input :: proc(
@@ -644,10 +653,15 @@ redraw :: proc(
 	force: bool,
 	shell_state: ^features.Shell_State = nil,
 	scrollback_state: ^features.Scrollback_State = nil,
+	show_scrollbar: bool = true,
+	scrollbar_override: ^drawing.Scrollbar = nil,
 ) {
-	scrollbar := drawing.Scrollbar{history_rows = len(vt.terminal_screen(terminal).scrollback)}
-	if scrollback_state != nil {
-		scrollbar.offset = scrollback_state.offset
+	scrollbar: drawing.Scrollbar
+	if scrollbar_override != nil {
+		scrollbar = scrollbar_override^
+	} else {
+		if show_scrollbar do scrollbar.history_rows = len(vt.terminal_screen(terminal).scrollback)
+		if scrollback_state != nil do scrollbar.offset = scrollback_state.offset
 	}
 	if url_state.active {
 		drawing.draw(renderer, window, terminal, force, nil, features.url_view_screen(url_state))

@@ -125,6 +125,8 @@ damage_rows :: proc(
 	scrollbar_changed := cpu.previous_scrollbar != scrollbar
 	if scrollbar_changed &&
 	   (cpu.previous_scrollbar.visible != scrollbar.visible ||
+	    cpu.previous_scrollbar.track_visible != scrollbar.track_visible ||
+	    cpu.previous_scrollbar.track_color != scrollbar.track_color ||
 	    cpu.previous_scrollbar.x != scrollbar.x || cpu.previous_scrollbar.width != scrollbar.width ||
 	    cpu.previous_scrollbar.track_height != scrollbar.track_height ||
 	    cpu.previous_scrollbar.cell_height != scrollbar.cell_height) {
@@ -239,7 +241,11 @@ render_row :: proc(
 	for command in cpu.commands {
 		switch command.kind {
 		case .Rectangle:
-			fill_rect(cpu, window, command.x, command.y, command.width, command.height, command.color)
+			if command.opacity == 0 {
+				fill_rect(cpu, window, command.x, command.y, command.width, command.height, command.color)
+			} else {
+				blend_rect(cpu, window, command.x, command.y, command.width, command.height, command.color, command.opacity)
+			}
 		case .Image:
 			if screen.image_registry == nil do continue
 			image := graphics.find_image(screen.image_registry, command.image_id)
@@ -309,6 +315,17 @@ fill_rect :: proc(cpu: ^CPU, window: ^x11.Window, x, y, width, height: int, colo
 	right, bottom := min(cpu.width, x+width), min(cpu.height, y+height)
 	for destination_y in top..<bottom {
 		for destination_x in left..<right do cpu.pixels[destination_y*cpu.width+destination_x] = pixel
+	}
+}
+
+blend_rect :: proc(cpu: ^CPU, window: ^x11.Window, x, y, width, height: int, color: u32, opacity: u8) {
+	left, top := max(0, x), max(0, y)
+	right, bottom := min(cpu.width, x+width), min(cpu.height, y+height)
+	for destination_y in top..<bottom {
+		for destination_x in left..<right {
+			pixel := &cpu.pixels[destination_y*cpu.width+destination_x]
+			pixel^ = blend(window, pixel^, color, opacity)
+		}
 	}
 }
 
