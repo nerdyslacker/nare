@@ -58,6 +58,7 @@ Screen :: struct {
 	scrollback_limit: int,
 	image_registry: ^graphics.Registry,
 	image_screen: graphics.Screen,
+	image_row_offset: int,
 }
 
 Logical_Line :: struct {

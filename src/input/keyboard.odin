@@ -40,6 +40,7 @@ Mouse_Event :: struct {
 	button: int,
 	column: int,
 	row: int,
+	x, y: int,
 	modifiers: Modifiers,
 }
 

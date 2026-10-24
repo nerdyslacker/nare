@@ -112,6 +112,15 @@ decode_iterm2_inline :: proc(data: []byte, limits: ^Limits = nil) -> (ITerm2_Com
 		case .Limit: return command, {}, .Limit
 		case .Invalid_Data: return command, {}, .Malformed
 		}
+	} else if len(decoded) >= 4 &&
+	          (string(decoded[:4]) == "II\x2a\x00" || string(decoded[:4]) == "MM\x00\x2a") {
+		image, tiff_error := decode_tiff(decoded, limits)
+		switch tiff_error {
+		case .None: return command, image, .None
+		case .Limit: return command, {}, .Limit
+		case .Unsupported: return command, {}, .Unsupported
+		case .Invalid_Data: return command, {}, .Malformed
+		}
 	}
 	return command, {}, .Unsupported
 }

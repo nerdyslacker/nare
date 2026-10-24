@@ -375,8 +375,7 @@ kitty_place_image :: proc(terminal: ^Terminal, command: graphics.Kitty_Command, 
 	if placement_error != .None do return "EINVAL"
 	if !command.no_cursor_move {
 		screen.cursor.column = min(screen.columns-1, screen.cursor.column+columns)
-		screen.cursor.row = min(screen.scroll_bottom, screen.cursor.row+rows)
-		screen.wrap_pending = false
+		for _ in 0..<rows do line_feed(screen, terminal.attributes)
 	}
 	return ""
 }

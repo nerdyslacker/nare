@@ -44,7 +44,7 @@ Settings :: struct {
 }
 
 settings_init :: proc(settings: ^Settings) {
-	settings.renderer = .CPU
+	settings.renderer = .Auto
 	settings.ligatures = true
 	settings.font = strings.clone("monospace")
 	settings.font_size = 16

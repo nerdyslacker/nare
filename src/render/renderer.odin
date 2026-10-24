@@ -82,16 +82,17 @@ draw :: proc(
 	force: bool = false,
 	selection_state: ^selection.State = nil,
 	screen_override: ^vt.Screen = nil,
+	scrollbar: Scrollbar = {},
 ) {
 	if terminal.modes.synchronized_updates do return
 	if renderer.active == .CPU {
-		cpu_draw(&renderer.cpu, &renderer.font, window, terminal, renderer.ligatures, force, selection_state, screen_override)
+		cpu_draw(&renderer.cpu, &renderer.font, window, terminal, renderer.ligatures, force, selection_state, screen_override, scrollbar)
 		return
 	}
-	if !gpu_draw(&renderer.gpu, &renderer.cpu, &renderer.font, window, terminal, renderer.ligatures, force, selection_state, screen_override) {
+	if !gpu_draw(&renderer.gpu, &renderer.cpu, &renderer.font, window, terminal, renderer.ligatures, force, selection_state, screen_override, scrollbar) {
 		gpu_destroy(&renderer.gpu, window)
 		renderer.active = .CPU
-		_ = cpu_render(&renderer.cpu, &renderer.font, window, terminal, renderer.ligatures, true, selection_state, screen_override)
+		_ = cpu_render(&renderer.cpu, &renderer.font, window, terminal, renderer.ligatures, true, selection_state, screen_override, scrollbar)
 		screen := screen_override
 		if screen == nil do screen = vt.terminal_screen(terminal)
 		cpu_present(&renderer.cpu, window, screen.columns)

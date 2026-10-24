@@ -214,6 +214,8 @@ next_event :: proc(window: ^Window) -> (result: Event, available: bool) {
 		result.kind = .Mouse
 		result.mouse.action = .Press if event.type == .ButtonPress else .Release
 		result.mouse.button = int(event.xbutton.button)
+		result.mouse.x = int(event.xbutton.x)
+		result.mouse.y = int(event.xbutton.y)
 		result.mouse.column = max(1, int(event.xbutton.x)/window.cell_w+1)
 		result.mouse.row = max(1, int(event.xbutton.y)/window.cell_h+1)
 		result.mouse.modifiers = modifiers_from_state(event.xbutton.state)
@@ -225,6 +227,8 @@ next_event :: proc(window: ^Window) -> (result: Event, available: bool) {
 		result.kind = .Mouse
 		result.mouse.action = .Motion
 		result.mouse.button = held_button(event.xmotion.state)
+		result.mouse.x = int(event.xmotion.x)
+		result.mouse.y = int(event.xmotion.y)
 		result.mouse.column = max(1, int(event.xmotion.x)/window.cell_w+1)
 		result.mouse.row = max(1, int(event.xmotion.y)/window.cell_h+1)
 		result.mouse.modifiers = modifiers_from_state(event.xmotion.state)

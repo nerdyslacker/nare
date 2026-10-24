@@ -22,7 +22,9 @@ CPU :: struct {
 	previous_cursor_visible: bool,
 	previous_alternate: bool,
 	previous_image_generation: u64,
+	previous_image_row_offset: int,
 	previous_selection: selection.State,
+	previous_scrollbar: Scrollbar_Geometry,
 }
 
 cpu_resize :: proc(cpu: ^CPU, window: ^x11.Window) -> bool {
@@ -82,13 +84,15 @@ cpu_render :: proc(
 	force: bool,
 	selection_state: ^selection.State = nil,
 	screen_override: ^vt.Screen = nil,
+	scrollbar: Scrollbar = {},
 ) -> bool {
 	if cpu.image == nil do return false
 	screen := screen_override
 	if screen == nil do screen = vt.terminal_screen(terminal)
-	if !damage_rows(cpu, terminal, screen, force, selection_state) do return false
+	scrollbar_geometry := scrollbar_geometry(window, screen, scrollbar)
+	if !damage_rows(cpu, terminal, screen, force, selection_state, scrollbar_geometry) do return false
 	for dirty, row in cpu.dirty_rows {
-		if dirty do render_row(cpu, font, window, terminal, screen, row, ligatures, selection_state)
+		if dirty do render_row(cpu, font, window, terminal, screen, row, ligatures, selection_state, scrollbar)
 	}
 	return true
 }
@@ -99,6 +103,7 @@ damage_rows :: proc(
 	screen: ^vt.Screen,
 	force: bool,
 	selection_state: ^selection.State = nil,
+	scrollbar: Scrollbar_Geometry = {},
 ) -> bool {
 	if cpu.image == nil do return false
 	full_redraw := force
@@ -115,6 +120,14 @@ damage_rows :: proc(
 		for index in 0..<len(cpu.dirty_rows) do cpu.dirty_rows[index] = false
 	}
 	if cpu.previous_alternate != terminal.using_alternate do full_redraw = true
+	scrollbar_changed := cpu.previous_scrollbar != scrollbar
+	if scrollbar_changed &&
+	   (cpu.previous_scrollbar.visible != scrollbar.visible ||
+	    cpu.previous_scrollbar.x != scrollbar.x || cpu.previous_scrollbar.width != scrollbar.width ||
+	    cpu.previous_scrollbar.track_height != scrollbar.track_height ||
+	    cpu.previous_scrollbar.cell_height != scrollbar.cell_height) {
+		full_redraw = true
+	}
 	current_selection: selection.State
 	if selection_state != nil do current_selection = selection_state^
 	selection_changed := current_selection != cpu.previous_selection
@@ -122,9 +135,14 @@ damage_rows :: proc(
 	image_generation := u64(0)
 	if screen.image_registry != nil do image_generation = screen.image_registry.generation
 	if cpu.previous_image_generation != image_generation do full_redraw = true
+	if cpu.previous_image_row_offset != screen.image_row_offset do full_redraw = true
 	any_dirty := false
 	for row in 0..<screen.rows {
 		dirty := full_redraw || row == screen.cursor.row || row == cpu.previous_cursor.row
+		if scrollbar_changed &&
+		   (scrollbar_row_affected(cpu.previous_scrollbar, row) || scrollbar_row_affected(scrollbar, row)) {
+			dirty = true
+		}
 		if selection_changed &&
 		   (selection_row_affected(&current_selection, row) || selection_row_affected(&cpu.previous_selection, row)) {
 			dirty = true
@@ -151,7 +169,9 @@ damage_rows :: proc(
 	cpu.previous_cursor_visible = terminal.modes.cursor_visible
 	cpu.previous_alternate = terminal.using_alternate
 	cpu.previous_image_generation = image_generation
+	cpu.previous_image_row_offset = screen.image_row_offset
 	cpu.previous_selection = current_selection
+	cpu.previous_scrollbar = scrollbar
 	return any_dirty
 }
 
@@ -192,8 +212,9 @@ cpu_draw :: proc(
 	force: bool,
 	selection_state: ^selection.State = nil,
 	screen_override: ^vt.Screen = nil,
+	scrollbar: Scrollbar = {},
 ) {
-	if !cpu_render(cpu, font, window, terminal, ligatures, force, selection_state, screen_override) do return
+	if !cpu_render(cpu, font, window, terminal, ligatures, force, selection_state, screen_override, scrollbar) do return
 	screen := screen_override
 	if screen == nil do screen = vt.terminal_screen(terminal)
 	cpu_present(cpu, window, screen.columns)
@@ -208,9 +229,10 @@ render_row :: proc(
 	row: int,
 	ligatures: bool,
 	selection_state: ^selection.State,
+	scrollbar: Scrollbar,
 ) {
 	if row*window.cell_h >= cpu.height do return
-	build_row_commands(&cpu.commands, font, window, terminal, screen, row, ligatures, selection_state)
+	build_row_commands(&cpu.commands, font, window, terminal, screen, row, ligatures, selection_state, scrollbar)
 	for command in cpu.commands {
 		switch command.kind {
 		case .Rectangle:

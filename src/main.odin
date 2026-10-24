@@ -169,6 +169,11 @@ OSC52_Request :: struct {
 	selection: vt.OSC52_Selection,
 }
 
+Scrollbar_Interaction :: struct {
+	dragging: bool,
+	grab_y: int,
+}
+
 command_destroy :: proc(command: ^[dynamic]cstring) {
 	for arg in command^ {
 		if arg != nil do delete(arg)
@@ -204,11 +209,15 @@ run :: proc(
 	defer features.url_destroy(&url_state)
 	shell_state: features.Shell_State
 	defer features.shell_destroy(&shell_state)
+	scrollback_state: features.Scrollback_State
+	defer features.scrollback_destroy(&scrollback_state)
+	scrollbar_interaction: Scrollbar_Interaction
 	osc52_request: OSC52_Request
 	running := true
 	close_requested := false
 
 	for running {
+		scroll_redraw_pending := false
 		x11.set_mouse_tracking(window, terminal.modes.mouse_tracking)
 		for {
 			event, available := x11.next_event(window)
@@ -218,8 +227,9 @@ run :: proc(
 				close_requested = true
 				running = false
 			case .Redraw:
-				redraw(renderer, window, terminal, &selection_state, &search_state, &url_state, true, &shell_state)
+				redraw(renderer, window, terminal, &selection_state, &search_state, &url_state, true, &shell_state, &scrollback_state)
 			case .Resize:
+				scrollbar_interaction = {}
 				selection.clear(&selection_state)
 				columns, rows := x11.grid_size(window)
 				if !drawing.resize(renderer, window) ||
@@ -231,12 +241,24 @@ run :: proc(
 					if search_state.active do features.refresh(&search_state, vt.terminal_screen(terminal))
 					if url_state.active do features.url_refresh(&url_state, terminal)
 					if shell_state.active do features.shell_refresh(&shell_state, vt.terminal_screen(terminal))
-					redraw(renderer, window, terminal, &selection_state, &search_state, &url_state, true, &shell_state)
+					features.scrollback_refresh(&scrollback_state, vt.terminal_screen(terminal))
+					redraw(renderer, window, terminal, &selection_state, &search_state, &url_state, true, &shell_state, &scrollback_state)
 				}
 			case .Input:
+				if scroll_rows := scrollback_shortcut(event, vt.terminal_screen(terminal).rows); scroll_rows != 0 {
+					if search_state.active do features.close(&search_state)
+					if url_state.active do features.url_close(&url_state)
+					features.shell_close(&shell_state)
+					selection.clear(&selection_state)
+					features.scrollback_scroll(&scrollback_state, vt.terminal_screen(terminal), scroll_rows)
+					restore_window_title(window, terminal, base_title)
+					redraw(renderer, window, terminal, &selection_state, &search_state, &url_state, true, &shell_state, &scrollback_state)
+					continue
+				}
 				if prompt_previous_shortcut(event) || prompt_next_shortcut(event) {
 					if search_state.active do features.close(&search_state)
 					if url_state.active do features.url_close(&url_state)
+					features.scrollback_close(&scrollback_state)
 					selection.clear(&selection_state)
 					if prompt_previous_shortcut(event) {
 						features.shell_previous(&shell_state, vt.terminal_screen(terminal))
@@ -249,6 +271,7 @@ run :: proc(
 				if url_shortcut(event) {
 					if search_state.active do features.close(&search_state)
 					features.shell_close(&shell_state)
+					features.scrollback_close(&scrollback_state)
 					selection.clear(&selection_state)
 					features.url_open(&url_state, terminal)
 					update_url_title(window, terminal, base_title, &url_state)
@@ -258,6 +281,7 @@ run :: proc(
 				if search_shortcut(event) {
 					if url_state.active do features.url_close(&url_state)
 					features.shell_close(&shell_state)
+					features.scrollback_close(&scrollback_state)
 					selection.clear(&selection_state)
 					features.open(&search_state, vt.terminal_screen(terminal))
 					update_search_title(window, terminal, base_title, &search_state)
@@ -291,6 +315,10 @@ run :: proc(
 					redraw(renderer, window, terminal, &selection_state, &search_state, &url_state, true, &shell_state)
 					if event.key == .Escape do continue
 				}
+				if scrollback_state.active {
+					features.scrollback_close(&scrollback_state)
+					redraw(renderer, window, terminal, &selection_state, &search_state, &url_state, true, &shell_state, &scrollback_state)
+				}
 				if copy_shortcut(event) {
 					copy_selection(window, terminal, &selection_state, .Clipboard)
 					continue
@@ -317,6 +345,36 @@ run :: proc(
 					queue_input(&pending, pending_offset, transmute([]byte)sequence)
 				}
 			case .Mouse:
+				local_mouse := terminal.modes.mouse_tracking == 0 || .Shift in event.mouse.modifiers
+				if !search_state.active && !url_state.active && !shell_state.active {
+					handled, changed := handle_scrollbar_mouse(
+						window,
+						terminal,
+						&scrollback_state,
+						&scrollbar_interaction,
+						event.mouse,
+					)
+					if handled {
+						if changed {
+							selection.clear(&selection_state)
+							scroll_redraw_pending = true
+						}
+						continue
+					}
+				}
+				if local_mouse && (event.mouse.button == 4 || event.mouse.button == 5) {
+					if event.mouse.action == .Press {
+						if search_state.active do features.close(&search_state)
+						if url_state.active do features.url_close(&url_state)
+						features.shell_close(&shell_state)
+						direction := 1 if event.mouse.button == 4 else -1
+						selection.clear(&selection_state)
+						features.scrollback_scroll(&scrollback_state, vt.terminal_screen(terminal), direction)
+						restore_window_title(window, terminal, base_title)
+						scroll_redraw_pending = true
+					}
+					continue
+				}
 				mode_closed := false
 				if search_state.active {
 					features.close(&search_state)
@@ -330,8 +388,13 @@ run :: proc(
 					features.shell_close(&shell_state)
 					mode_closed = true
 				}
+				if scrollback_state.active {
+					features.scrollback_close(&scrollback_state)
+					mode_closed = true
+					redraw(renderer, window, terminal, &selection_state, &search_state, &url_state, true, &shell_state, &scrollback_state)
+				}
 				if mode_closed do restore_window_title(window, terminal, base_title)
-				if terminal.modes.mouse_tracking == 0 || .Shift in event.mouse.modifiers {
+				if local_mouse {
 					handle_selection_mouse(window, terminal, renderer, &selection_state, event.mouse)
 				} else {
 					encoded: [32]byte
@@ -359,6 +422,9 @@ run :: proc(
 			}
 		}
 		if !running do break
+		if scroll_redraw_pending {
+			redraw(renderer, window, terminal, &selection_state, &search_state, &url_state, true, &shell_state, &scrollback_state)
+		}
 		queue_terminal_replies(&pending, pending_offset, terminal)
 
 		if done, reap_err := pty.reap(process); reap_err != .None {
@@ -384,7 +450,7 @@ run :: proc(
 		_ = vt.terminal_expire_kitty_transfer(terminal)
 
 		if .IN in fds[1].revents || .HUP in fds[1].revents {
-			if !drain_pty(window, process, terminal, renderer, &selection_state, &search_state, &url_state, &shell_state, &osc52_request, base_title) do running = false
+			if !drain_pty(window, process, terminal, renderer, &selection_state, &search_state, &url_state, &shell_state, &scrollback_state, &osc52_request, base_title) do running = false
 			queue_terminal_replies(&pending, pending_offset, terminal)
 		}
 		if .OUT in fds[1].revents && pending_offset < len(pending) {
@@ -436,6 +502,51 @@ copy_output_shortcut :: proc(event: x11.Event) -> bool {
 pipe_output_shortcut :: proc(event: x11.Event) -> bool {
 	if event.key != .Text || .Control not_in event.modifiers || .Shift not_in event.modifiers do return false
 	return event.input_size == 1 && (event.input[0] == 0x10 || event.input[0] == 'p' || event.input[0] == 'P')
+}
+
+scrollback_shortcut :: proc(event: x11.Event, screen_rows: int) -> int {
+	if .Shift not_in event.modifiers do return 0
+	page_rows := max(1, screen_rows-1)
+	#partial switch event.key {
+	case .Page_Up:   return page_rows
+	case .Page_Down: return -page_rows
+	case:            return 0
+	}
+}
+
+handle_scrollbar_mouse :: proc(
+	window: ^x11.Window,
+	terminal: ^vt.Terminal,
+	state: ^features.Scrollback_State,
+	interaction: ^Scrollbar_Interaction,
+	event: keyboard.Mouse_Event,
+) -> (handled, changed: bool) {
+	screen := vt.terminal_screen(terminal)
+	scrollbar := drawing.Scrollbar{history_rows = len(screen.scrollback), offset = state.offset}
+	geometry := drawing.scrollbar_geometry(window, screen, scrollbar)
+	if event.action == .Motion && interaction.dragging {
+		previous := state.offset
+		features.scrollback_set_offset(state, screen, drawing.scrollbar_offset_at(scrollbar, geometry, event.y, interaction.grab_y))
+		return true, state.offset != previous
+	}
+	if event.button != 1 do return false, false
+	if event.action == .Release && interaction.dragging {
+		interaction.dragging = false
+		return true, false
+	}
+	if event.action != .Press || !geometry.visible || event.x < geometry.x || event.x >= geometry.x+geometry.width ||
+	   event.y < 0 || event.y >= geometry.track_height {
+		return false, false
+	}
+	interaction.dragging = true
+	if event.y >= geometry.y && event.y < geometry.y+geometry.height {
+		interaction.grab_y = event.y-geometry.y
+		return true, false
+	}
+	interaction.grab_y = geometry.height/2
+	previous := state.offset
+	features.scrollback_set_offset(state, screen, drawing.scrollbar_offset_at(scrollbar, geometry, event.y, interaction.grab_y))
+	return true, state.offset != previous
 }
 
 handle_url_input :: proc(
@@ -533,15 +644,22 @@ redraw :: proc(
 	url_state: ^features.URL_State,
 	force: bool,
 	shell_state: ^features.Shell_State = nil,
+	scrollback_state: ^features.Scrollback_State = nil,
 ) {
+	scrollbar := drawing.Scrollbar{history_rows = len(vt.terminal_screen(terminal).scrollback)}
+	if scrollback_state != nil {
+		scrollbar.offset = scrollback_state.offset
+	}
 	if url_state.active {
 		drawing.draw(renderer, window, terminal, force, nil, features.url_view_screen(url_state))
 	} else if search_state.active {
 		drawing.draw(renderer, window, terminal, force, &search_state.highlight, features.view_screen(search_state))
 	} else if shell_state != nil && shell_state.active {
 		drawing.draw(renderer, window, terminal, force, nil, features.shell_view_screen(shell_state))
+	} else if scrollback_state != nil && scrollback_state.active {
+		drawing.draw(renderer, window, terminal, force, nil, features.scrollback_view_screen(scrollback_state), scrollbar)
 	} else {
-		drawing.draw(renderer, window, terminal, force, selection_state)
+		drawing.draw(renderer, window, terminal, force, selection_state, nil, scrollbar)
 	}
 }
 
@@ -584,7 +702,15 @@ handle_selection_mouse :: proc(
 		selection.finish(state, screen, position)
 		copy_selection(window, terminal, state, .Primary)
 	}
-	drawing.draw(renderer, window, terminal, false, state)
+	drawing.draw(
+		renderer,
+		window,
+		terminal,
+		false,
+		state,
+		nil,
+		{history_rows = len(screen.scrollback)},
+	)
 }
 
 queue_input :: proc(pending: ^[dynamic]byte, offset: int, data: []byte) {
@@ -600,6 +726,7 @@ drain_pty :: proc(
 	search_state: ^features.State,
 	url_state: ^features.URL_State,
 	shell_state: ^features.Shell_State,
+	scrollback_state: ^features.Scrollback_State,
 	osc52_request: ^OSC52_Request,
 	base_title: string,
 ) -> bool {
@@ -615,17 +742,17 @@ drain_pty :: proc(
 			dirty = true
 		case .Would_Block:
 			if dirty {
-				refresh_after_pty(window, terminal, renderer, selection_state, search_state, url_state, shell_state, base_title)
+				refresh_after_pty(window, terminal, renderer, selection_state, search_state, url_state, shell_state, scrollback_state, base_title)
 			}
 			return true
 		case .End:
 			if dirty {
-				refresh_after_pty(window, terminal, renderer, selection_state, search_state, url_state, shell_state, base_title)
+				refresh_after_pty(window, terminal, renderer, selection_state, search_state, url_state, shell_state, scrollback_state, base_title)
 			}
 			return false
 		case .Failed:
 			if dirty {
-				refresh_after_pty(window, terminal, renderer, selection_state, search_state, url_state, shell_state, base_title)
+				refresh_after_pty(window, terminal, renderer, selection_state, search_state, url_state, shell_state, scrollback_state, base_title)
 			}
 			fmt.eprintln("PTY read failed")
 			return false
@@ -667,6 +794,7 @@ refresh_after_pty :: proc(
 	search_state: ^features.State,
 	url_state: ^features.URL_State,
 	shell_state: ^features.Shell_State,
+	scrollback_state: ^features.Scrollback_State,
 	base_title: string,
 ) {
 	if search_state.active {
@@ -679,6 +807,7 @@ refresh_after_pty :: proc(
 		restore_window_title(window, terminal, base_title)
 	}
 	if shell_state.active do features.shell_refresh(shell_state, vt.terminal_screen(terminal))
+	features.scrollback_refresh(scrollback_state, vt.terminal_screen(terminal))
 	terminal.title_changed = false
-	redraw(renderer, window, terminal, selection_state, search_state, url_state, search_state.active || url_state.active || shell_state.active, shell_state)
+	redraw(renderer, window, terminal, selection_state, search_state, url_state, search_state.active || url_state.active || shell_state.active || scrollback_state.active, shell_state, scrollback_state)
 }

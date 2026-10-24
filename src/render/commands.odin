@@ -31,6 +31,7 @@ build_row_commands :: proc(
 	row: int,
 	ligatures: bool,
 	selection_state: ^selection.State = nil,
+	scrollbar: Scrollbar = {},
 ) {
 	clear(output)
 	y := row * window.cell_h
@@ -122,6 +123,7 @@ build_row_commands :: proc(
 	}
 	append_image_commands(output, window, screen, row, true)
 	append_cursor_commands(output, window, terminal, screen, row)
+	append_scrollbar_commands(output, window, screen, row, scrollbar)
 }
 
 append_image_commands :: proc(
@@ -136,7 +138,12 @@ append_image_commands :: proc(
 	row_top, row_bottom := row*window.cell_h, (row+1)*window.cell_h
 	for placement in screen.image_registry.placements {
 		if placement.screen != screen.image_screen || (placement.z >= 0) != above_text do continue
-		x, y, width, height := image_destination(placement, window.cell_w, window.cell_h)
+		x, y, width, height := image_destination(
+			placement,
+			window.cell_w,
+			window.cell_h,
+			screen.image_row_offset,
+		)
 		if x >= window.width || x+width <= 0 || y >= row_bottom || y+height <= row_top do continue
 		append(output, Command{
 			kind = .Image,
@@ -168,9 +175,13 @@ append_image_commands :: proc(
 	}
 }
 
-image_destination :: proc(placement: graphics.Placement, cell_width, cell_height: int) -> (x, y, width, height: int) {
+image_destination :: proc(
+	placement: graphics.Placement,
+	cell_width, cell_height: int,
+	row_offset: int = 0,
+) -> (x, y, width, height: int) {
 	x = placement.column*cell_width+placement.pixel_offset_x
-	y = placement.row*cell_height+placement.pixel_offset_y
+	y = (placement.row+row_offset)*cell_height+placement.pixel_offset_y
 	width = placement.pixel_width if placement.pixel_width > 0 else placement.columns*cell_width
 	height = placement.pixel_height if placement.pixel_height > 0 else placement.rows*cell_height
 	if !placement.preserve_aspect || placement.source_width <= 0 || placement.source_height <= 0 do return

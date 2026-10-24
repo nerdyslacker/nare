@@ -185,9 +185,13 @@ kitty_parse_direct_frame :: proc(data: []byte) -> (Kitty_Frame, Kitty_Error) {
 	frame := Kitty_Frame{command = command}
 	if len(data) < 3 || data[0] != 'G' do return frame, .Malformed
 	separator := strings.index_byte(string(data), ';')
-	if separator < 1 do return frame, .Malformed
-	control := string(data[1:separator])
-	payload := data[separator+1:]
+	control := string(data[1:])
+	payload: []byte
+	if separator >= 0 {
+		if separator < 1 do return frame, .Malformed
+		control = string(data[1:separator])
+		payload = data[separator+1:]
+	}
 	seen_action, seen_format, seen_width, seen_height := false, false, false, false
 	seen_data_size := false
 	seen_id, seen_placement, seen_columns, seen_rows := false, false, false, false
@@ -469,7 +473,7 @@ kitty_append_chunk :: proc(transfer: ^Kitty_Transfer, payload: []byte, more: boo
 	   len(payload) > transfer.encoded_limit-len(transfer.encoded) {
 		return .Image_Limit
 	}
-	if more && (len(payload) == 0 || len(payload)%4 != 0) do return .Invalid_Data
+	if more && len(payload)%4 != 0 do return .Invalid_Data
 	append(&transfer.encoded, ..payload)
 	transfer.chunk_count += 1
 	return .None

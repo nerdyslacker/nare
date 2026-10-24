@@ -232,6 +232,7 @@ gpu_draw :: proc(
 	force: bool,
 	selection_state: ^selection.State = nil,
 	screen_override: ^vt.Screen = nil,
+	scrollbar: Scrollbar = {},
 ) -> bool {
 	when !GPU_ENABLED {
 		return false
@@ -239,7 +240,8 @@ gpu_draw :: proc(
 		if gpu.ctx == nil || gpu.width != damage.width || gpu.height != damage.height do return false
 		screen := screen_override
 		if screen == nil do screen = vt.terminal_screen(terminal)
-		if !damage_rows(damage, terminal, screen, force, selection_state) do return true
+		scrollbar_geometry := scrollbar_geometry(window, screen, scrollbar)
+		if !damage_rows(damage, terminal, screen, force, selection_state, scrollbar_geometry) do return true
 		if MakeCurrent(window.display, xlib.XID(window.id), gpu.ctx) == false do return false
 		BindFramebuffer(GL_FRAMEBUFFER, gpu.framebuffer)
 		Viewport(0, 0, i32(gpu.width), i32(gpu.height))
@@ -250,7 +252,7 @@ gpu_draw :: proc(
 			if y >= gpu.height do continue
 			height := min(window.cell_h, gpu.height-y)
 			Scissor(0, i32(gpu.height-y-height), i32(gpu.width), i32(height))
-			build_row_commands(&gpu.commands, font, window, terminal, screen, row, ligatures, selection_state)
+			build_row_commands(&gpu.commands, font, window, terminal, screen, row, ligatures, selection_state, scrollbar)
 			if !gpu_prepare_atlas(gpu, font) {
 				BindFramebuffer(GL_FRAMEBUFFER, 0)
 				return false
