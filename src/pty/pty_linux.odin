@@ -1,6 +1,8 @@
 package pty
 
 import "core:c"
+import "core:fmt"
+import "core:os"
 import "core:strings"
 import "core:sys/posix"
 import "core:time"
@@ -9,6 +11,7 @@ foreign import libc "system:c"
 foreign libc {
 	ioctl :: proc(fd: c.int, request: c.ulong, #c_vararg args: ..any) -> c.int ---
 	ptsname_r :: proc(fd: c.int, buffer: [^]byte, size: c.size_t) -> c.int ---
+	tcgetpgrp :: proc(fd: c.int) -> posix.pid_t ---
 }
 
 TIOCSCTTY  :: c.ulong(0x540e)
@@ -166,6 +169,38 @@ resize :: proc(process: ^Process, size: Size) -> Error {
 		return .Resize
 	}
 	return .None
+}
+
+foreground_is_root :: proc(process: ^Process) -> bool {
+	if process == nil || process.master < 0 || process.closed do return false
+	group := tcgetpgrp(c.int(process.master))
+	if group <= 0 do return false
+	path_buffer: [64]byte
+	path := fmt.bprintf(path_buffer[:], "/proc/%d/status", group)
+	data, err := os.read_entire_file(path, context.allocator)
+	if err != nil do return false
+	defer delete(data)
+	uid, ok := status_effective_uid(string(data))
+	return ok && uid == 0
+}
+
+status_effective_uid :: proc(status: string) -> (uid: int, ok: bool) {
+	for index := 0; index+4 <= len(status); index += 1 {
+		if index > 0 && status[index-1] != '\n' do continue
+		if status[index:index+4] != "Uid:" do continue
+		cursor := index+4
+		for field in 0..<2 {
+			for cursor < len(status) && (status[cursor] == ' ' || status[cursor] == '\t') do cursor += 1
+			if cursor >= len(status) || status[cursor] < '0' || status[cursor] > '9' do return 0, false
+			value := 0
+			for cursor < len(status) && status[cursor] >= '0' && status[cursor] <= '9' {
+				value = value*10+int(status[cursor]-'0')
+				cursor += 1
+			}
+			if field == 1 do return value, true
+		}
+	}
+	return 0, false
 }
 
 read :: proc(process: ^Process, buffer: []byte) -> (count: int, result: Read_Result) {

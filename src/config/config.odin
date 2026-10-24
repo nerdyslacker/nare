@@ -46,6 +46,7 @@ UI_Colors :: struct {
 	active_tab_background: u32,
 	inactive_tab_foreground: u32,
 	inactive_tab_background: u32,
+	root_tab_background: u32,
 	tab_bar_background: u32,
 }
 
@@ -138,6 +139,7 @@ settings_init :: proc(settings: ^Settings) {
 		active_tab_background = 0x9c49fc,
 		inactive_tab_foreground = 0xb9c7da,
 		inactive_tab_background = 0x071c33,
+		root_tab_background = 0xff6b7a,
 		tab_bar_background = 0x011224,
 	}
 	settings.window = {
@@ -466,6 +468,7 @@ apply :: proc(settings: ^Settings, section, key, value: string) -> Error {
 		case "active-tab-background": settings.ui_colors.active_tab_background = parsed
 		case "inactive-tab-foreground": settings.ui_colors.inactive_tab_foreground = parsed
 		case "inactive-tab-background": settings.ui_colors.inactive_tab_background = parsed
+		case "root-tab-background": settings.ui_colors.root_tab_background = parsed
 		case "tab-bar-background": settings.ui_colors.tab_bar_background = parsed
 		case:
 			if len(key) < 6 || key[:5] != "color" do return .Unknown_Key

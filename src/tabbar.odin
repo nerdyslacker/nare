@@ -10,6 +10,7 @@ import xlib "vendor:x11/xlib"
 Tab_Draw_Label :: struct {
 	text: string,
 	active: bool,
+	root: bool,
 }
 
 TAB_HIT_EMPTY :: -1
@@ -32,7 +33,7 @@ draw_workspace_tab_bar :: proc(
 	labels: []Tab_Draw_Label,
 	bounds: ^[dynamic]Tab_Bounds,
 	y, height: int,
-	background, active_foreground, active_background, inactive_foreground, inactive_background: u32,
+	background, active_foreground, active_background, inactive_foreground, inactive_background, root_background: u32,
 	active_bold: bool,
 	active_index: int,
 	scroll_offset: ^int,
@@ -98,12 +99,28 @@ draw_workspace_tab_bar :: proc(
 		append(bounds, {x = visible_left, width = width, tab_index = index})
 		bg := active_background if label.active else inactive_background
 		fg := active_foreground if label.active else inactive_foreground
+		if label.root {
+			if label.active {
+				bg = root_background
+				fg = active_foreground
+			} else {
+				bg = muted_root_tab_color(root_background, inactive_background)
+				fg = inactive_foreground
+			}
+		}
 		fill_tab_rect(pixels, window, visible_left, 0, width, height, bg)
 		draw_tab_text(pixels, window, font, label.text, x+6, 2+font.ascent, fg, bold, visible_left, visible_right-6)
 		x += tab_width
 	}
 	xlib.PutImage(window.display, xlib.Drawable(window.id), window.gc, image, 0, 0, 0, i32(y), u32(window.width), u32(height))
 	_ = xlib.Flush(window.display)
+}
+
+muted_root_tab_color :: proc(root, inactive: u32) -> u32 {
+	red := (((root>>16)&0xff)*2+((inactive>>16)&0xff))/3
+	green := (((root>>8)&0xff)*2+((inactive>>8)&0xff))/3
+	blue := ((root&0xff)*2+(inactive&0xff))/3
+	return red<<16|green<<8|blue
 }
 
 tab_arrow_width :: proc(font: ^fonts.Manager, window_width, height: int) -> int {

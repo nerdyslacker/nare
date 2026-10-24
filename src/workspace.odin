@@ -30,6 +30,8 @@ Pane :: struct {
 	osc52: OSC52_Request,
 	visible: bool,
 	exited: bool,
+	root_foreground: bool,
+	display_title: string,
 }
 
 Split_Axis :: enum { Rows, Columns }
@@ -63,7 +65,10 @@ Workspace :: struct {
 	last_tab_click_timestamp: u64,
 	last_click_tab: int,
 	last_cursor_toggle: time.Time,
+	last_privilege_check: time.Time,
 }
+
+PRIVILEGE_CHECK_INTERVAL :: 250*time.Millisecond
 
 workspace_run :: proc(root: ^x11.Window, command: []cstring, settings: ^config.Settings) -> int {
 	workspace := Workspace{
@@ -77,6 +82,7 @@ workspace_run :: proc(root: ^x11.Window, command: []cstring, settings: ^config.S
 		return 1
 	}
 	workspace_layout(&workspace)
+	workspace_refresh_privileged_tabs(&workspace, true)
 	x11.set_mouse_tracking(root, 0, settings.scrollbar_enabled)
 	for len(workspace.tabs) > 0 {
 		for tab in workspace.tabs {
@@ -119,6 +125,7 @@ workspace_run :: proc(root: ^x11.Window, command: []cstring, settings: ^config.S
 			if .ERR in fds[index].revents || .NVAL in fds[index].revents do pane.exited = true
 		}
 		workspace_cursor_tick(&workspace)
+		workspace_refresh_privileged_tabs(&workspace, false)
 		delete(fds)
 		delete(owners)
 	}
@@ -163,6 +170,7 @@ pane_destroy :: proc(pane: ^Pane) {
 	features.url_destroy(&pane.url_state)
 	features.shell_destroy(&pane.shell_state)
 	features.scrollback_destroy(&pane.scrollback_state)
+	delete(pane.display_title)
 	delete(pane.pending)
 	drawing.destroy(&pane.renderer, &pane.surface)
 	x11.destroy_child(&pane.surface)
@@ -285,21 +293,64 @@ workspace_draw_tabs :: proc(workspace: ^Workspace) {
 	labels := make([]Tab_Draw_Label, len(workspace.tabs), context.temp_allocator)
 	for tab, index in workspace.tabs {
 		title := workspace.settings.title
+		active_root := false
 		if tab.custom_title != "" do title = tab.custom_title
-		else if len(tab.panes) > 0 && tab.panes[tab.active].terminal.title != "" do title = tab.panes[tab.active].terminal.title
+		else if len(tab.panes) > 0 {
+			active_pane := tab.panes[tab.active]
+			active_root = active_pane.root_foreground
+			if active_pane.display_title != "" do title = active_pane.display_title
+			else if !active_pane.root_foreground && active_pane.terminal.title != "" do title = active_pane.terminal.title
+		}
+		if tab.custom_title == "" && active_root do title = root_tab_title(title)
 		if workspace.renaming_tab == index do title = fmt.tprintf("Rename: %s_", string(workspace.rename_buffer[:]))
 		with_index, _ := strings.replace_all(workspace.settings.tabs.title_template, "{index}", fmt.tprintf("%d", index+1), context.temp_allocator)
 		label, _ := strings.replace_all(with_index, "{title}", title, context.temp_allocator)
 		if index+1 < len(workspace.tabs) do label = strings.concatenate({label, workspace.settings.tabs.separator}, context.temp_allocator)
-		labels[index] = {text = label, active = index == workspace.active}
+		root := false
+		for pane in tab.panes do if pane.root_foreground {root = true; break}
+		labels[index] = {text = label, active = index == workspace.active, root = root}
 	}
 	y := 0
 	if workspace.settings.tabs.edge == .Bottom do y = workspace.root.height-height
 	colors := workspace.settings.ui_colors
 	pane := workspace_active_pane(workspace)
 	if pane == nil do return
-	draw_workspace_tab_bar(workspace.root, &pane.renderer.font, labels, &workspace.tab_bounds, y, height, colors.tab_bar_background, colors.active_tab_foreground, colors.active_tab_background, colors.inactive_tab_foreground, colors.inactive_tab_background, workspace.settings.tabs.active_bold, workspace.active, &workspace.tab_scroll_offset, workspace.tab_reveal_active)
+	draw_workspace_tab_bar(workspace.root, &pane.renderer.font, labels, &workspace.tab_bounds, y, height, colors.tab_bar_background, colors.active_tab_foreground, colors.active_tab_background, colors.inactive_tab_foreground, colors.inactive_tab_background, colors.root_tab_background, workspace.settings.tabs.active_bold, workspace.active, &workspace.tab_scroll_offset, workspace.tab_reveal_active)
 	workspace.tab_reveal_active = false
+}
+
+root_tab_title :: proc(title: string) -> string {
+	at := strings.index_byte(title, '@')
+	if at <= 0 || at+1 >= len(title) || !tab_title_host_character(title[at+1]) do return title
+	start := at
+	for start > 0 && tab_title_user_character(title[start-1]) do start -= 1
+	if start == at do return title
+	return strings.concatenate({title[:start], "root", title[at:]}, context.temp_allocator)
+}
+
+tab_title_user_character :: proc(character: byte) -> bool {
+	return character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' ||
+	       character >= '0' && character <= '9' || character == '_' || character == '-' || character == '.'
+}
+
+tab_title_host_character :: proc(character: byte) -> bool {
+	return tab_title_user_character(character)
+}
+
+workspace_refresh_privileged_tabs :: proc(workspace: ^Workspace, force: bool) {
+	if !force && time.since(workspace.last_privilege_check) < PRIVILEGE_CHECK_INTERVAL do return
+	workspace.last_privilege_check = time.now()
+	changed := false
+	for tab in workspace.tabs {
+		for pane in tab.panes {
+			root := !pane.exited && pty.foreground_is_root(&pane.process)
+			if root != pane.root_foreground {
+				pane.root_foreground = root
+				changed = true
+			}
+		}
+	}
+	if changed do workspace_draw_tabs(workspace)
 }
 
 workspace_event :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
@@ -813,8 +864,14 @@ workspace_drain :: proc(workspace: ^Workspace, pane: ^Pane) -> bool {
 			if dirty {
 				features.scrollback_refresh(&pane.scrollback_state, vt.terminal_screen(&pane.terminal))
 				if pane.visible do drawing.draw(&pane.renderer, &pane.surface, &pane.terminal, false, &pane.selection_state, nil, workspace_scrollbar(workspace, pane))
-				if pane == workspace_active_pane(workspace) && pane.terminal.title_changed {
-					x11.set_title(workspace.root, current_window_title(&pane.terminal, workspace.settings.title))
+				if pane.terminal.title_changed {
+					pane.root_foreground = pty.foreground_is_root(&pane.process)
+					if !pane.root_foreground && pane.terminal.title != "" {
+						config.replace_string(&pane.display_title, pane.terminal.title)
+					}
+					if pane == workspace_active_pane(workspace) {
+						x11.set_title(workspace.root, current_window_title(&pane.terminal, workspace.settings.title))
+					}
 					workspace_draw_tabs(workspace)
 				}
 				pane.terminal.title_changed = false
