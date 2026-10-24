@@ -322,7 +322,7 @@ parse_notification :: proc(line: []byte, events: ^[dynamic]Event) {
 		token, ok := next_token(line, &cursor)
 		event.window_id, valid = parse_id(token, '@')
 		valid = valid && ok
-	case .Session_Changed, .Session_Window_Changed:
+	case .Session_Changed, .Session_Renamed, .Session_Window_Changed:
 		token, ok := next_token(line, &cursor)
 		event.session_id, valid = parse_id(token, '$')
 		valid = valid && ok
