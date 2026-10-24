@@ -176,6 +176,13 @@ terminal_set_cell_size :: proc(terminal: ^Terminal, width, height: int) {
 	terminal.cell_height = clamp(height, 1, graphics.MAX_IMAGE_DIMENSION)
 }
 
+// Screens retain a pointer to their owning image registry. Call this after a
+// Terminal value is moved to a different address.
+terminal_rebind :: proc(terminal: ^Terminal) {
+	terminal.main_screen.image_registry = &terminal.images
+	terminal.alternate_screen.image_registry = &terminal.images
+}
+
 terminal_destroy :: proc(terminal: ^Terminal) {
 	parser_destroy(&terminal.parser)
 	screen_destroy(&terminal.main_screen)

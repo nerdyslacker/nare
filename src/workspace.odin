@@ -963,6 +963,9 @@ workspace_feed_pty :: proc(workspace: ^Workspace, pane: ^Pane, data: []byte) -> 
 			if title == "" do title = workspace.settings.title
 			x11.set_title(workspace.root, title)
 			workspace_draw_tabs(workspace)
+		case .Model_Changed:
+			config.replace_string(&pane.display_title, string(pane.tmux_session.title[:]))
+			workspace_draw_tabs(workspace)
 		case .Title_Changed:
 			config.replace_string(&pane.display_title, string(pane.tmux_session.title[:]))
 			x11.set_title(workspace.root, pane.display_title)
@@ -989,6 +992,7 @@ workspace_feed_pty :: proc(workspace: ^Workspace, pane: ^Pane, data: []byte) -> 
 workspace_tmux_activate :: proc(workspace: ^Workspace, pane: ^Pane) -> bool {
 	if pane.has_local_terminal do return true
 	pane.local_terminal = pane.terminal
+	vt.terminal_rebind(&pane.local_terminal)
 	pane.terminal = {}
 	pane.has_local_terminal = true
 	pane.local_display_title = pane.display_title
@@ -998,6 +1002,7 @@ workspace_tmux_activate :: proc(workspace: ^Workspace, pane: ^Pane) -> bool {
 	columns, rows := x11.grid_size(&pane.surface)
 	if !vt.terminal_init(&pane.terminal, columns, rows, workspace.settings.scrollback_lines, workspace.settings.osc52_policy, &workspace.settings.graphics_limits) {
 		pane.terminal = pane.local_terminal
+		vt.terminal_rebind(&pane.terminal)
 		pane.local_terminal = {}
 		pane.has_local_terminal = false
 		pane.display_title = pane.local_display_title
@@ -1015,6 +1020,7 @@ workspace_tmux_deactivate :: proc(workspace: ^Workspace, pane: ^Pane) {
 	if !pane.has_local_terminal do return
 	vt.terminal_destroy(&pane.terminal)
 	pane.terminal = pane.local_terminal
+	vt.terminal_rebind(&pane.terminal)
 	pane.local_terminal = {}
 	pane.has_local_terminal = false
 	delete(pane.display_title)
@@ -1032,6 +1038,7 @@ workspace_tmux_reset_display :: proc(workspace: ^Workspace, pane: ^Pane) -> bool
 	if !vt.terminal_init(&replacement, columns, rows, workspace.settings.scrollback_lines, workspace.settings.osc52_policy, &workspace.settings.graphics_limits) do return false
 	vt.terminal_destroy(&pane.terminal)
 	pane.terminal = replacement
+	vt.terminal_rebind(&pane.terminal)
 	vt.terminal_set_cell_size(&pane.terminal, pane.surface.cell_w, pane.surface.cell_h)
 	workspace_apply_cursor(workspace, pane)
 	workspace_reset_view_state(pane)

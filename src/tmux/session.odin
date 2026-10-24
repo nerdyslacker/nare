@@ -1,10 +1,26 @@
 package tmux
 
-LIST_PANES_COMMAND :: "list-panes -F '#{pane_active}\t#{pane_id}\t#{window_id}\t#{pane_width}\t#{pane_height}\t#{session_id}\t#{session_name}'\n"
+LIST_PANES_COMMAND :: "list-panes -s -F '#{session_id}\t#{session_name}\t#{window_active}\t#{window_id}\t#{window_index}\t#{window_name}\t#{window_layout}\t#{pane_active}\t#{pane_id}\t#{pane_left}\t#{pane_top}\t#{pane_width}\t#{pane_height}\t.'\n"
 
 Session_State :: enum { Inactive, Initial_Reply, Pane_List, Capture, Ready, Failed }
-Session_Action :: enum { None, Activated, Pane_Selected, Title_Changed, Output, Deactivated, Failed }
+Session_Action :: enum { None, Activated, Model_Changed, Pane_Selected, Title_Changed, Output, Deactivated, Failed }
 Reply_Purpose :: enum { Ignored, Initial, Pane_List, Capture }
+
+Pane_Info :: struct {
+	id: int,
+	window_id: int,
+	x, y: int,
+	columns, rows: int,
+	active: bool,
+}
+
+Window_Info :: struct {
+	id: int,
+	index: int,
+	active: bool,
+	name: [dynamic]byte,
+	layout: [dynamic]byte,
+}
 
 Session :: struct {
 	stream: Stream,
@@ -15,6 +31,9 @@ Session :: struct {
 	rows: int,
 	title: [dynamic]byte,
 	session_id: int,
+	windows: [dynamic]Window_Info,
+	panes: [dynamic]Pane_Info,
+	previous_pane_id: int,
 	fallback_pane_id: int,
 	fallback_window_id: int,
 	fallback_columns: int,
@@ -30,8 +49,11 @@ Session :: struct {
 
 session_destroy :: proc(session: ^Session) {
 	destroy(&session.stream)
+	session_clear_model(session)
 	delete(session.title)
 	delete(session.fallback_title)
+	delete(session.windows)
+	delete(session.panes)
 	delete(session.reply_queue)
 	session^ = {}
 }
@@ -39,6 +61,7 @@ session_destroy :: proc(session: ^Session) {
 session_handle :: proc(session: ^Session, event: ^Event, commands: ^[dynamic]byte) -> Session_Action {
 	#partial switch event.kind {
 	case .Activated:
+		session.previous_pane_id = -1
 		session_reset_model(session)
 		clear(&session.reply_queue)
 		session.reply_offset = 0
@@ -58,6 +81,7 @@ session_handle :: proc(session: ^Session, event: ^Event, commands: ^[dynamic]byt
 			session.active_reply = session_take_reply(session)
 		}
 		if session.active_reply == .Pane_List {
+			session.previous_pane_id = session.pane_id
 			session_reset_model(session)
 			session.state = .Pane_List
 			session.refresh_queued = false
@@ -77,6 +101,10 @@ session_handle :: proc(session: ^Session, event: ^Event, commands: ^[dynamic]byt
 			if session.pane_id < 0 {
 				session.state = .Failed
 				return .Failed
+			}
+			if session.pane_id == session.previous_pane_id {
+				session.state = .Ready
+				return .Model_Changed
 			}
 			session_queue_capture(session, commands, session.pane_id)
 			return .Pane_Selected
@@ -107,8 +135,9 @@ session_handle :: proc(session: ^Session, event: ^Event, commands: ^[dynamic]byt
 		}
 		changed_pane := event.notification == .Window_Pane_Changed && event.pane_id != session.pane_id
 		changed_window := event.notification == .Session_Window_Changed && event.window_id != session.window_id
-		closed_window := event.notification == .Window_Close && event.window_id == session.window_id
-		if session.state == .Ready && (changed_pane || changed_window || closed_window) {
+		model_notification := event.notification == .Layout_Change || event.notification == .Window_Add ||
+		                      event.notification == .Window_Close || event.notification == .Window_Renamed
+		if session.state == .Ready && (changed_pane || changed_window || model_notification) {
 			session_queue_pane_list(session, commands)
 		}
 	case .Deactivated:
@@ -203,6 +232,24 @@ request_swap_pane :: proc(session: ^Session, commands: ^[dynamic]byte) {
 	session_queue_pane_list(session, commands)
 }
 
+request_select_window :: proc(session: ^Session, commands: ^[dynamic]byte, window_id: int) {
+	if !session_ready(session) || window_id < 0 do return
+	append(commands, "select-window -t @")
+	append_decimal(commands, window_id)
+	append(commands, '\n')
+	session_queue_reply(session, .Ignored)
+	session_queue_pane_list(session, commands)
+}
+
+request_select_pane :: proc(session: ^Session, commands: ^[dynamic]byte, pane_id: int) {
+	if !session_ready(session) || pane_id < 0 do return
+	append(commands, "select-pane -t %")
+	append_decimal(commands, pane_id)
+	append(commands, '\n')
+	session_queue_reply(session, .Ignored)
+	session_queue_pane_list(session, commands)
+}
+
 append_target_command :: proc(commands: ^[dynamic]byte, pane_id: int) {
 	append(commands, " -t %")
 	append_decimal(commands, pane_id)
@@ -214,6 +261,7 @@ hex_digit :: proc(value: byte) -> byte {
 }
 
 session_reset_model :: proc(session: ^Session) {
+	session_clear_model(session)
 	session.pane_id = -1
 	session.window_id = -1
 	session.columns = 0
@@ -229,39 +277,72 @@ session_reset_model :: proc(session: ^Session) {
 }
 
 session_consider_pane :: proc(session: ^Session, line: []byte) {
-	fields: [6][]byte
+	fields: [13][]byte
 	cursor := 0
 	for index in 0..<len(fields) {
 		field, ok := next_tab_field(line, &cursor)
 		if !ok do return
 		fields[index] = field
 	}
-	active, active_ok := parse_u64(fields[0])
-	pane_id, pane_ok := parse_id(fields[1], '%')
-	window_id, window_ok := parse_id(fields[2], '@')
-	columns, columns_ok := parse_u64(fields[3])
-	rows, rows_ok := parse_u64(fields[4])
-	session_id, session_ok := parse_id(fields[5], '$')
-	if !active_ok || !pane_ok || !window_ok || !columns_ok || !rows_ok || !session_ok ||
-	   columns == 0 || rows == 0 || columns > u64(max(int)) || rows > u64(max(int)) {
+	session_id, session_ok := parse_id(fields[0], '$')
+	window_active, window_active_ok := parse_u64(fields[2])
+	window_id, window_ok := parse_id(fields[3], '@')
+	window_index, window_index_ok := parse_u64(fields[4])
+	pane_active, pane_active_ok := parse_u64(fields[7])
+	pane_id, pane_ok := parse_id(fields[8], '%')
+	x, x_ok := parse_u64(fields[9])
+	y, y_ok := parse_u64(fields[10])
+	columns, columns_ok := parse_u64(fields[11])
+	rows, rows_ok := parse_u64(fields[12])
+	if !session_ok || !window_active_ok || !window_ok || !window_index_ok || !pane_active_ok || !pane_ok ||
+	   !x_ok || !y_ok || !columns_ok || !rows_ok || columns == 0 || rows == 0 ||
+	   window_index > u64(max(int)) || x > u64(max(int)) || y > u64(max(int)) ||
+	   columns > u64(max(int)) || rows > u64(max(int)) {
 		return
 	}
-	title := line[cursor:]
+	if session.session_id < 0 {
+		session.session_id = session_id
+		append(&session.title, ..fields[1])
+	}
+	window := session_find_window(session, window_id)
+	if window == nil {
+		append(&session.windows, Window_Info{id = window_id, index = int(window_index), active = window_active != 0})
+		window = &session.windows[len(session.windows)-1]
+		append(&window.name, ..fields[5])
+		append(&window.layout, ..fields[6])
+	}
+	append(&session.panes, Pane_Info{
+		id = pane_id, window_id = window_id, x = int(x), y = int(y), columns = int(columns), rows = int(rows), active = pane_active != 0,
+	})
 	if session.fallback_pane_id < 0 {
 		session.fallback_pane_id = pane_id
 		session.fallback_window_id = window_id
 		session.fallback_columns = int(columns)
 		session.fallback_rows = int(rows)
 		session.fallback_session_id = session_id
-		append(&session.fallback_title, ..title)
+		append(&session.fallback_title, ..fields[1])
 	}
-	if active == 0 || session.pane_id >= 0 do return
+	if window_active == 0 || pane_active == 0 || session.pane_id >= 0 do return
 	session.pane_id = pane_id
 	session.window_id = window_id
 	session.columns = int(columns)
 	session.rows = int(rows)
 	session.session_id = session_id
-	append(&session.title, ..title)
+}
+
+session_clear_model :: proc(session: ^Session) {
+	for &window in session.windows {
+		delete(window.name)
+		delete(window.layout)
+	}
+	clear(&session.windows)
+	clear(&session.panes)
+	clear(&session.title)
+}
+
+session_find_window :: proc(session: ^Session, id: int) -> ^Window_Info {
+	for &window in session.windows do if window.id == id do return &window
+	return nil
 }
 
 session_use_fallback :: proc(session: ^Session) {
@@ -271,7 +352,7 @@ session_use_fallback :: proc(session: ^Session) {
 	session.columns = session.fallback_columns
 	session.rows = session.fallback_rows
 	session.session_id = session.fallback_session_id
-	append(&session.title, ..session.fallback_title[:])
+	if len(session.title) == 0 do append(&session.title, ..session.fallback_title[:])
 }
 
 next_tab_field :: proc(input: []byte, cursor: ^int) -> (field: []byte, ok: bool) {
