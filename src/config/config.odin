@@ -17,6 +17,7 @@ MAX_TERM_BYTES :: 64
 Tab_Edge :: enum { Top, Bottom }
 Tab_Style :: enum { Separator, Hidden }
 Cursor_Shape :: enum { Block, Beam, Underline }
+Tmux_Target :: enum { New_Tab, New_Window }
 
 Window_Settings :: struct {
 	background_opacity: f32,
@@ -56,6 +57,7 @@ Bindings :: struct {
 	focus_left, focus_right, focus_up, focus_down: string,
 	toggle_stack, swap_pane, move_tab_left, move_tab_right: string,
 	copy, paste, font_increase, font_decrease, font_reset: string,
+	tmux_detach: string,
 }
 
 Cursor_Settings :: struct {
@@ -64,6 +66,14 @@ Cursor_Settings :: struct {
 	blink_interval_ms: int,
 	beam_width: int,
 	underline_height: int,
+}
+
+Tmux_Settings :: struct {
+	enabled: bool,
+	auto_detect: bool,
+	default_target: Tmux_Target,
+	active_tab_color: u32,
+	auto_reconnect: bool,
 }
 
 Error :: enum {
@@ -107,6 +117,7 @@ Settings :: struct {
 	tabs: Tab_Settings,
 	bindings: Bindings,
 	cursor: Cursor_Settings,
+	tmux: Tmux_Settings,
 }
 
 settings_init :: proc(settings: ^Settings) {
@@ -177,8 +188,10 @@ settings_init :: proc(settings: ^Settings) {
 		font_increase = strings.clone("alt+equal"),
 		font_decrease = strings.clone("alt+minus"),
 		font_reset = strings.clone("alt+0"),
+		tmux_detach = strings.clone("alt+control+d"),
 	}
 	settings.cursor = {shape = .Block, blink = true, blink_interval_ms = 500, beam_width = 2, underline_height = 2}
+	settings.tmux = {enabled = true, auto_detect = true, default_target = .New_Tab, active_tab_color = 0x13ba19, auto_reconnect = true}
 }
 
 settings_destroy :: proc(settings: ^Settings) {
@@ -231,7 +244,7 @@ parse :: proc(settings: ^Settings, contents: string) -> Result {
 		if line[0] == '[' {
 			if len(line) < 3 || line[len(line)-1] != ']' do return {error = .Syntax, line = line_number}
 			section = strings.trim_space(line[1:len(line)-1])
-			if section != "main" && section != "scrollback" && section != "url" && section != "shell" && section != "security" && section != "graphics" && section != "window" && section != "tabs" && section != "colors" && section != "bindings" && section != "cursor" {
+			if section != "main" && section != "scrollback" && section != "url" && section != "shell" && section != "security" && section != "graphics" && section != "window" && section != "tabs" && section != "colors" && section != "bindings" && section != "cursor" && section != "tmux" {
 				return {error = .Unknown_Section, line = line_number}
 			}
 			continue
@@ -498,6 +511,7 @@ apply :: proc(settings: ^Settings, section, key, value: string) -> Error {
 		case "font-increase": replace_string(&settings.bindings.font_increase, value)
 		case "font-decrease": replace_string(&settings.bindings.font_decrease, value)
 		case "font-reset": replace_string(&settings.bindings.font_reset, value)
+		case "tmux-detach": replace_string(&settings.bindings.tmux_detach, value)
 		case: return .Unknown_Key
 		}
 	} else if section == "cursor" {
@@ -527,6 +541,32 @@ apply :: proc(settings: ^Settings, section, key, value: string) -> Error {
 			settings.cursor.underline_height = parsed
 		case: return .Unknown_Key
 		}
+	} else if section == "tmux" {
+		switch key {
+		case "enabled":
+			parsed, ok := parse_bool(value)
+			if !ok do return .Invalid_Value
+			settings.tmux.enabled = parsed
+		case "auto-detect":
+			parsed, ok := parse_bool(value)
+			if !ok do return .Invalid_Value
+			settings.tmux.auto_detect = parsed
+		case "default-target":
+			switch value {
+			case "new-tab": settings.tmux.default_target = .New_Tab
+			case "new-window": settings.tmux.default_target = .New_Window
+			case: return .Invalid_Value
+			}
+		case "active-tab-color":
+			parsed, ok := parse_color(value)
+			if !ok do return .Invalid_Value
+			settings.tmux.active_tab_color = parsed
+		case "auto-reconnect":
+			parsed, ok := parse_bool(value)
+			if !ok do return .Invalid_Value
+			settings.tmux.auto_reconnect = parsed
+		case: return .Unknown_Key
+		}
 	} else {
 		return .Unknown_Section
 	}
@@ -550,6 +590,7 @@ destroy_bindings :: proc(bindings: ^Bindings) {
 	delete(bindings.focus_left); delete(bindings.focus_right); delete(bindings.focus_up); delete(bindings.focus_down)
 	delete(bindings.toggle_stack); delete(bindings.swap_pane); delete(bindings.move_tab_left); delete(bindings.move_tab_right)
 	delete(bindings.copy); delete(bindings.paste); delete(bindings.font_increase); delete(bindings.font_decrease); delete(bindings.font_reset)
+	delete(bindings.tmux_detach)
 	bindings^ = {}
 }
 

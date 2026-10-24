@@ -10,6 +10,7 @@ import keyboard "input"
 import pty "pty"
 import drawing "render"
 import selection "selection"
+import tmux "tmux"
 import vt "vt"
 import x11 "x11"
 import xlib "vendor:x11/xlib"
@@ -19,6 +20,9 @@ Pane :: struct {
 	renderer: drawing.Renderer,
 	process: pty.Process,
 	terminal: vt.Terminal,
+	local_terminal: vt.Terminal,
+	has_local_terminal: bool,
+	tmux_session: tmux.Session,
 	pending: [dynamic]byte,
 	pending_offset: int,
 	selection_state: selection.State,
@@ -32,6 +36,8 @@ Pane :: struct {
 	exited: bool,
 	root_foreground: bool,
 	display_title: string,
+	local_display_title: string,
+	local_root_foreground: bool,
 }
 
 Split_Axis :: enum { Rows, Columns }
@@ -166,11 +172,14 @@ pane_destroy :: proc(pane: ^Pane) {
 	if pane == nil do return
 	pty.shutdown(&pane.process)
 	vt.terminal_destroy(&pane.terminal)
+	if pane.has_local_terminal do vt.terminal_destroy(&pane.local_terminal)
+	tmux.session_destroy(&pane.tmux_session)
 	features.destroy(&pane.search_state)
 	features.url_destroy(&pane.url_state)
 	features.shell_destroy(&pane.shell_state)
 	features.scrollback_destroy(&pane.scrollback_state)
 	delete(pane.display_title)
+	delete(pane.local_display_title)
 	delete(pane.pending)
 	drawing.destroy(&pane.renderer, &pane.surface)
 	x11.destroy_child(&pane.surface)
@@ -272,6 +281,7 @@ workspace_layout :: proc(workspace: ^Workspace) {
 				_ = drawing.resize(&pane.renderer, &pane.surface)
 				_ = vt.terminal_resize(&pane.terminal, columns, rows)
 				_ = pty.resize(&pane.process, pty_size(columns, rows, width, height))
+				if tmux.session_ready(&pane.tmux_session) do tmux.append_resize_command(&pane.pending, columns, rows)
 			}
 			drawing.draw(&pane.renderer, &pane.surface, &pane.terminal, true, &pane.selection_state, nil, workspace_scrollbar(workspace, pane))
 		}
@@ -308,14 +318,14 @@ workspace_draw_tabs :: proc(workspace: ^Workspace) {
 		if index+1 < len(workspace.tabs) do label = strings.concatenate({label, workspace.settings.tabs.separator}, context.temp_allocator)
 		root := false
 		for pane in tab.panes do if pane.root_foreground {root = true; break}
-		labels[index] = {text = label, active = index == workspace.active, root = root}
+		labels[index] = {text = label, active = index == workspace.active, root = root, tmux = tmux.session_active(&tab.panes[tab.active].tmux_session)}
 	}
 	y := 0
 	if workspace.settings.tabs.edge == .Bottom do y = workspace.root.height-height
 	colors := workspace.settings.ui_colors
 	pane := workspace_active_pane(workspace)
 	if pane == nil do return
-	draw_workspace_tab_bar(workspace.root, &pane.renderer.font, labels, &workspace.tab_bounds, y, height, colors.tab_bar_background, colors.active_tab_foreground, colors.active_tab_background, colors.inactive_tab_foreground, colors.inactive_tab_background, colors.root_tab_background, workspace.settings.tabs.active_bold, workspace.active, &workspace.tab_scroll_offset, workspace.tab_reveal_active)
+	draw_workspace_tab_bar(workspace.root, &pane.renderer.font, labels, &workspace.tab_bounds, y, height, colors.tab_bar_background, colors.active_tab_foreground, colors.active_tab_background, colors.inactive_tab_foreground, colors.inactive_tab_background, colors.root_tab_background, workspace.settings.tmux.active_tab_color, workspace.settings.tabs.active_bold, workspace.active, &workspace.tab_scroll_offset, workspace.tab_reveal_active)
 	workspace.tab_reveal_active = false
 }
 
@@ -343,6 +353,7 @@ workspace_refresh_privileged_tabs :: proc(workspace: ^Workspace, force: bool) {
 	changed := false
 	for tab in workspace.tabs {
 		for pane in tab.panes {
+			if tmux.session_active(&pane.tmux_session) do continue
 			root := !pane.exited && pty.foreground_is_root(&pane.process)
 			if root != pane.root_foreground {
 				pane.root_foreground = root
@@ -393,7 +404,14 @@ workspace_event :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
 		input := event.input
 		data := input[:event.input_size]
 		if event.key != .Text do data = keyboard.encode_key(event.key, event.modifiers, pane.terminal.modes.application_cursor, encoded[:])
-		else if .Alt in event.modifiers do queue_input(&pane.pending, pane.pending_offset, {0x1b})
+		if tmux.session_active(&pane.tmux_session) {
+			if tmux.session_ready(&pane.tmux_session) {
+				if event.key == .Text && .Alt in event.modifiers do tmux.append_input_commands(&pane.pending, pane.tmux_session.pane_id, {0x1b})
+				tmux.append_input_commands(&pane.pending, pane.tmux_session.pane_id, data)
+			}
+			return true
+		}
+		if event.key == .Text && .Alt in event.modifiers do queue_input(&pane.pending, pane.pending_offset, {0x1b})
 		queue_input(&pane.pending, pane.pending_offset, data)
 	case .Mouse:
 		workspace_clear_scrollbar_hover(workspace, event.source)
@@ -438,7 +456,8 @@ workspace_event :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
 		} else {
 			encoded: [32]byte
 			data := keyboard.encode_mouse(mouse, pane.terminal.modes.mouse_tracking, pane.terminal.modes.mouse_sgr, encoded[:])
-			queue_input(&pane.pending, pane.pending_offset, data)
+			if tmux.session_ready(&pane.tmux_session) do tmux.append_input_commands(&pane.pending, pane.tmux_session.pane_id, data)
+			else if !tmux.session_active(&pane.tmux_session) do queue_input(&pane.pending, pane.pending_offset, data)
 		}
 	case .Paste:
 		pane := workspace_active_pane(workspace)
@@ -450,7 +469,8 @@ workspace_event :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
 			} else {
 				paste: [dynamic]byte
 				keyboard.encode_paste(x11.take_paste(workspace.root), pane.terminal.modes.bracketed_paste, &paste)
-				queue_input(&pane.pending, pane.pending_offset, paste[:])
+				if tmux.session_ready(&pane.tmux_session) do tmux.append_input_commands(&pane.pending, pane.tmux_session.pane_id, paste[:])
+				else if !tmux.session_active(&pane.tmux_session) do queue_input(&pane.pending, pane.pending_offset, paste[:])
 				delete(paste)
 			}
 		}
@@ -463,7 +483,8 @@ workspace_event :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
 	case .Focus:
 		if pane := workspace_find_pane(workspace, event.source); pane != nil && pane.terminal.modes.focus_reporting {
 			sequence := "\x1b[I" if event.focused else "\x1b[O"
-			queue_input(&pane.pending, pane.pending_offset, transmute([]byte)sequence)
+			if tmux.session_ready(&pane.tmux_session) do tmux.append_input_commands(&pane.pending, pane.tmux_session.pane_id, transmute([]byte)sequence)
+			else if !tmux.session_active(&pane.tmux_session) do queue_input(&pane.pending, pane.pending_offset, transmute([]byte)sequence)
 		}
 	case:
 	}
@@ -639,6 +660,27 @@ workspace_shortcut :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
 	tab := workspace_active_tab(workspace)
 	if tab == nil do return false
 	bindings := &workspace.settings.bindings
+	if tmux.session_active(&tab.panes[tab.active].tmux_session) {
+		if event_matches(event, bindings.tmux_detach) {
+			if tmux.session_ready(&tab.panes[tab.active].tmux_session) do tmux.append_detach_command(&tab.panes[tab.active].pending)
+			return true
+		}
+		if event_matches(event, bindings.previous_tab) { workspace_switch_tab(workspace, -1); return true }
+		if event_matches(event, bindings.next_tab) { workspace_switch_tab(workspace, 1); return true }
+		if event_matches(event, bindings.copy) { copy_selection(workspace.root, &tab.panes[tab.active].terminal, &tab.panes[tab.active].selection_state, .Clipboard); return true }
+		if event_matches(event, bindings.font_increase) { workspace_font_size(workspace, workspace.settings.font_size+1); return true }
+		if event_matches(event, bindings.font_decrease) { workspace_font_size(workspace, workspace.settings.font_size-1); return true }
+		if event_matches(event, bindings.font_reset) { workspace_font_size(workspace, workspace.initial_font_size); return true }
+		if event_matches(event, bindings.split_horizontal) || event_matches(event, bindings.split_vertical) ||
+		   event_matches(event, bindings.new_tab) || event_matches(event, bindings.close_pane) ||
+		   event_matches(event, bindings.move_tab_left) || event_matches(event, bindings.move_tab_right) ||
+		   event_matches(event, bindings.focus_left) || event_matches(event, bindings.focus_right) ||
+		   event_matches(event, bindings.focus_up) || event_matches(event, bindings.focus_down) ||
+		   event_matches(event, bindings.toggle_stack) || event_matches(event, bindings.swap_pane) {
+			return true
+		}
+		return false
+	}
 	if event_matches(event, bindings.split_horizontal) { workspace_split(workspace, .Rows); return true }
 	if event_matches(event, bindings.split_vertical) { workspace_split(workspace, .Columns); return true }
 	if event_matches(event, bindings.new_tab) { _ = workspace_new_tab(workspace); return true }
@@ -855,16 +897,13 @@ workspace_drain :: proc(workspace: ^Workspace, pane: ^Pane) -> bool {
 		count, result := pty.read(&pane.process, buffer[:])
 		switch result {
 		case .Data:
-			selection.clear(&pane.selection_state)
-			vt.terminal_feed(&pane.terminal, buffer[:count])
-			process_osc52_actions(workspace.root, &pane.terminal, &pane.osc52)
-			dirty = true
+			dirty = workspace_feed_pty(workspace, pane, buffer[:count]) || dirty
 		case .Would_Block, .End, .Failed:
-			queue_terminal_replies(&pane.pending, pane.pending_offset, &pane.terminal)
+			if !tmux.session_active(&pane.tmux_session) do queue_terminal_replies(&pane.pending, pane.pending_offset, &pane.terminal)
 			if dirty {
 				features.scrollback_refresh(&pane.scrollback_state, vt.terminal_screen(&pane.terminal))
 				if pane.visible do drawing.draw(&pane.renderer, &pane.surface, &pane.terminal, false, &pane.selection_state, nil, workspace_scrollbar(workspace, pane))
-				if pane.terminal.title_changed {
+				if pane.terminal.title_changed && !tmux.session_active(&pane.tmux_session) {
 					pane.root_foreground = pty.foreground_is_root(&pane.process)
 					if !pane.root_foreground && pane.terminal.title != "" {
 						config.replace_string(&pane.display_title, pane.terminal.title)
@@ -879,6 +918,110 @@ workspace_drain :: proc(workspace: ^Workspace, pane: ^Pane) -> bool {
 			return result == .Would_Block
 		}
 	}
+}
+
+workspace_feed_pty :: proc(workspace: ^Workspace, pane: ^Pane, data: []byte) -> bool {
+	if !workspace.settings.tmux.enabled || !workspace.settings.tmux.auto_detect {
+		selection.clear(&pane.selection_state)
+		vt.terminal_feed(&pane.terminal, data)
+		process_osc52_actions(workspace.root, &pane.terminal, &pane.osc52)
+		return true
+	}
+	events: [dynamic]tmux.Event
+	defer tmux.events_destroy(&events)
+	tmux.feed(&pane.tmux_session.stream, data, &events)
+	dirty := false
+	for &event in events {
+		if event.kind == .Terminal_Data {
+			selection.clear(&pane.selection_state)
+			vt.terminal_feed(&pane.terminal, event.data[:])
+			process_osc52_actions(workspace.root, &pane.terminal, &pane.osc52)
+			dirty = true
+			continue
+		}
+		action := tmux.session_handle(&pane.tmux_session, &event, &pane.pending)
+		switch action {
+		case .Activated:
+			if workspace_tmux_activate(workspace, pane) {
+				dirty = true
+				workspace_draw_tabs(workspace)
+			} else {
+				pane.tmux_session.state = .Failed
+			}
+		case .Pane_Selected:
+			config.replace_string(&pane.display_title, string(pane.tmux_session.title[:]))
+			columns, rows := x11.grid_size(&pane.surface)
+			tmux.append_resize_command(&pane.pending, columns, rows)
+			title := string(pane.tmux_session.title[:])
+			if title == "" do title = workspace.settings.title
+			x11.set_title(workspace.root, title)
+			workspace_draw_tabs(workspace)
+		case .Output:
+			selection.clear(&pane.selection_state)
+			vt.terminal_feed(&pane.terminal, event.data[:])
+			if event.kind == .Reply_Data do vt.terminal_feed(&pane.terminal, { '\r', '\n' })
+			process_osc52_actions(workspace.root, &pane.terminal, &pane.osc52)
+			dirty = true
+		case .Deactivated:
+			workspace_tmux_deactivate(workspace, pane)
+			dirty = true
+			workspace_draw_tabs(workspace)
+		case .Failed:
+			config.replace_string(&pane.display_title, "tmux protocol error")
+			workspace_draw_tabs(workspace)
+		case .None:
+		}
+	}
+	return dirty
+}
+
+workspace_tmux_activate :: proc(workspace: ^Workspace, pane: ^Pane) -> bool {
+	if pane.has_local_terminal do return true
+	pane.local_terminal = pane.terminal
+	pane.terminal = {}
+	pane.has_local_terminal = true
+	pane.local_display_title = pane.display_title
+	pane.display_title = ""
+	pane.local_root_foreground = pane.root_foreground
+	pane.root_foreground = false
+	columns, rows := x11.grid_size(&pane.surface)
+	if !vt.terminal_init(&pane.terminal, columns, rows, workspace.settings.scrollback_lines, workspace.settings.osc52_policy, &workspace.settings.graphics_limits) {
+		pane.terminal = pane.local_terminal
+		pane.local_terminal = {}
+		pane.has_local_terminal = false
+		pane.display_title = pane.local_display_title
+		pane.local_display_title = ""
+		pane.root_foreground = pane.local_root_foreground
+		return false
+	}
+	vt.terminal_set_cell_size(&pane.terminal, pane.surface.cell_w, pane.surface.cell_h)
+	workspace_apply_cursor(workspace, pane)
+	workspace_reset_view_state(pane)
+	return true
+}
+
+workspace_tmux_deactivate :: proc(workspace: ^Workspace, pane: ^Pane) {
+	if !pane.has_local_terminal do return
+	vt.terminal_destroy(&pane.terminal)
+	pane.terminal = pane.local_terminal
+	pane.local_terminal = {}
+	pane.has_local_terminal = false
+	delete(pane.display_title)
+	pane.display_title = pane.local_display_title
+	pane.local_display_title = ""
+	pane.root_foreground = pane.local_root_foreground
+	workspace_reset_view_state(pane)
+	x11.set_title(workspace.root, current_window_title(&pane.terminal, workspace.settings.title))
+}
+
+workspace_reset_view_state :: proc(pane: ^Pane) {
+	selection.clear(&pane.selection_state)
+	features.destroy(&pane.search_state)
+	features.url_destroy(&pane.url_state)
+	features.shell_destroy(&pane.shell_state)
+	features.scrollback_destroy(&pane.scrollback_state)
+	pane.scrollbar = {}
+	pane.osc52 = {}
 }
 
 workspace_write :: proc(pane: ^Pane) {

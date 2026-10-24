@@ -12,7 +12,7 @@
 
 </div>
 
-`nare` is an experimental X11-only terminal emulator written in Odin.
+`nare` pronounced nah-reh (/nɑːrɛ/) is an experimental X11-only terminal emulator written in Odin.
 
 ## Features
 

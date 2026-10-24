@@ -180,6 +180,18 @@ parser_feed_byte :: proc(parser: ^Parser, value: byte, events: ^[dynamic]Event) 
 
 parse_line :: proc(parser: ^Parser, line: []byte, events: ^[dynamic]Event) {
 	if parser.in_block {
+		if has_prefix(line, "%output ") {
+			parse_output(line[len("%output "):], false, events)
+			return
+		}
+		if has_prefix(line, "%extended-output ") {
+			parse_output(line[len("%extended-output "):], true, events)
+			return
+		}
+		if notification_line_known(line) {
+			parse_notification(line, events)
+			return
+		}
 		kind := Event_Kind.Reply_Data
 		if has_prefix(line, "%end ") do kind = .Reply_End
 		else if has_prefix(line, "%error ") do kind = .Reply_Error
@@ -297,31 +309,7 @@ parse_notification :: proc(line: []byte, events: ^[dynamic]Event) {
 	cursor := 0
 	name, _ := next_token(line, &cursor)
 	event := event_base(.Notification)
-	switch string(name) {
-	case "%client-detached": event.notification = .Client_Detached
-	case "%client-session-changed": event.notification = .Client_Session_Changed
-	case "%config-error": event.notification = .Config_Error
-	case "%continue": event.notification = .Continue
-	case "%layout-change": event.notification = .Layout_Change
-	case "%message": event.notification = .Message
-	case "%pane-mode-changed": event.notification = .Pane_Mode_Changed
-	case "%paste-buffer-changed": event.notification = .Paste_Buffer_Changed
-	case "%paste-buffer-deleted": event.notification = .Paste_Buffer_Deleted
-	case "%pause": event.notification = .Pause
-	case "%session-changed": event.notification = .Session_Changed
-	case "%session-renamed": event.notification = .Session_Renamed
-	case "%session-window-changed": event.notification = .Session_Window_Changed
-	case "%sessions-changed": event.notification = .Sessions_Changed
-	case "%subscription-changed": event.notification = .Subscription_Changed
-	case "%unlinked-window-add": event.notification = .Unlinked_Window_Add
-	case "%unlinked-window-close": event.notification = .Unlinked_Window_Close
-	case "%unlinked-window-renamed": event.notification = .Unlinked_Window_Renamed
-	case "%window-add": event.notification = .Window_Add
-	case "%window-close": event.notification = .Window_Close
-	case "%window-pane-changed": event.notification = .Window_Pane_Changed
-	case "%window-renamed": event.notification = .Window_Renamed
-	case:
-	}
+	event.notification = notification_kind(name)
 
 	valid := true
 	#partial switch event.notification {
@@ -363,6 +351,40 @@ parse_notification :: proc(line: []byte, events: ^[dynamic]Event) {
 	}
 	append(&event.data, ..line)
 	append(events, event)
+}
+
+notification_line_known :: proc(line: []byte) -> bool {
+	cursor := 0
+	name, ok := next_token(line, &cursor)
+	return ok && notification_kind(name) != .Unknown
+}
+
+notification_kind :: proc(name: []byte) -> Notification_Kind {
+	switch string(name) {
+	case "%client-detached": return .Client_Detached
+	case "%client-session-changed": return .Client_Session_Changed
+	case "%config-error": return .Config_Error
+	case "%continue": return .Continue
+	case "%layout-change": return .Layout_Change
+	case "%message": return .Message
+	case "%pane-mode-changed": return .Pane_Mode_Changed
+	case "%paste-buffer-changed": return .Paste_Buffer_Changed
+	case "%paste-buffer-deleted": return .Paste_Buffer_Deleted
+	case "%pause": return .Pause
+	case "%session-changed": return .Session_Changed
+	case "%session-renamed": return .Session_Renamed
+	case "%session-window-changed": return .Session_Window_Changed
+	case "%sessions-changed": return .Sessions_Changed
+	case "%subscription-changed": return .Subscription_Changed
+	case "%unlinked-window-add": return .Unlinked_Window_Add
+	case "%unlinked-window-close": return .Unlinked_Window_Close
+	case "%unlinked-window-renamed": return .Unlinked_Window_Renamed
+	case "%window-add": return .Window_Add
+	case "%window-close": return .Window_Close
+	case "%window-pane-changed": return .Window_Pane_Changed
+	case "%window-renamed": return .Window_Renamed
+	case: return .Unknown
+	}
 }
 
 decode_output :: proc(input: []byte, output: ^[dynamic]byte) -> bool {
