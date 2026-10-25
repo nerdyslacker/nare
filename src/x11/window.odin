@@ -52,6 +52,8 @@ create_child :: proc(parent: ^Window, x, y, width, height: int) -> (child: Windo
 	child.white = parent.white
 	child.cell_w = parent.cell_w
 	child.cell_h = parent.cell_h
+	child.x = x
+	child.y = y
 	child.width = max(1, width)
 	child.height = max(1, height)
 	child.id = xlib.CreateSimpleWindow(
@@ -82,6 +84,8 @@ destroy_child :: proc(child: ^Window) {
 }
 
 place_child :: proc(child: ^Window, x, y, width, height: int, visible: bool = true) {
+	child.x = x
+	child.y = y
 	child.width = max(1, width)
 	child.height = max(1, height)
 	xlib.MoveResizeWindow(child.display, child.id, i32(x), i32(y), u32(child.width), u32(child.height))
@@ -90,6 +94,10 @@ place_child :: proc(child: ^Window, x, y, width, height: int, visible: bool = tr
 	} else {
 		_ = xlib.UnmapWindow(child.display, child.id)
 	}
+}
+
+raise_child :: proc(child: ^Window) {
+	if child.id != 0 do xlib.RaiseWindow(child.display, child.id)
 }
 
 show_child :: proc(child: ^Window, visible: bool) {
@@ -104,6 +112,8 @@ Window :: struct {
 	visual:    ^xlib.Visual,
 	depth:     int,
 	wm_delete: xlib.Atom,
+	x:         int,
+	y:         int,
 	width:     int,
 	height:    int,
 	dpi:       f32,

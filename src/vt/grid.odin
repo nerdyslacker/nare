@@ -315,6 +315,20 @@ screen_position :: proc(screen: ^Screen, row, column: int) -> Cursor {
 	return position
 }
 
+screen_selectable_position :: proc(screen: ^Screen, row, column: int) -> (Cursor, bool) {
+	if row < 0 || row >= screen.rows || column < 0 || column >= screen.columns do return {}, false
+	cells := screen.cells[row*screen.columns:(row+1)*screen.columns]
+	content_length := row_content_length(cells)
+	if content_length == 0 || column >= content_length do return {}, false
+	return screen_position(screen, row, column), true
+}
+
+screen_cell_selectable :: proc(screen: ^Screen, row, column: int) -> bool {
+	if row < 0 || row >= screen.rows || column < 0 || column >= screen.columns do return false
+	cells := screen.cells[row*screen.columns:(row+1)*screen.columns]
+	return column < row_content_length(cells)
+}
+
 screen_extract :: proc(screen: ^Screen, first, last: Cursor) -> string {
 	start := screen_position(screen, first.row, first.column)
 	end := screen_position(screen, last.row, last.column)
@@ -323,14 +337,20 @@ screen_extract :: proc(screen: ^Screen, first, last: Cursor) -> string {
 	for row in start.row..=end.row {
 		start_column := start.column if row == start.row else 0
 		end_column := end.column if row == end.row else screen.columns-1
+		if row == end.row {
+			content_length := row_content_length(screen.cells[row*screen.columns:(row+1)*screen.columns])
+			end_column = min(end_column, content_length-1)
+		}
 		if row < end.row && !screen.wrapped[row] {
 			for end_column >= start_column && copy_blank(cell_at(screen, row, end_column)) do end_column -= 1
 		}
-		for column := start_column; column <= end_column; column += 1 {
-			cell := cell_at(screen, row, column)
-			if cell.continuation do continue
-			append_rune(&result, cell.codepoint)
-			for index in 0..<int(cell.combining_count) do append_rune(&result, cell.combining[index])
+		if start_column <= end_column {
+			for column := start_column; column <= end_column; column += 1 {
+				cell := cell_at(screen, row, column)
+				if cell.continuation do continue
+				append_rune(&result, cell.codepoint)
+				for index in 0..<int(cell.combining_count) do append_rune(&result, cell.combining[index])
+			}
 		}
 		if row < end.row && !screen.wrapped[row] do append(&result, '\n')
 	}

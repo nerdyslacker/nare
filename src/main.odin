@@ -65,6 +65,10 @@ command_from_args :: proc(args: []string) -> (options: config.Settings, command:
 		}
 	}
 	command_args: []string
+	explicit_tmux := false
+	tmux_profile_name := ""
+	tmux_ssh := ""
+	tmux_session := ""
 	for index := 0; index < len(args); index += 1 {
 		argument := args[index]
 		switch argument {
@@ -74,11 +78,49 @@ command_from_args :: proc(args: []string) -> (options: config.Settings, command:
 			if index+1 >= len(args) || !set_working_directory(&options, args[index+1]) do return options, command, strings.clone(usage())
 			index += 1
 		case "--no-config":
+		case "--tmux":
+			explicit_tmux = true
+			if index+1 < len(args) && !strings.has_prefix(args[index+1], "-") {
+				tmux_session = args[index+1]
+				index += 1
+			}
+		case "--tmux-profile":
+			if index+1 >= len(args) do return options, command, strings.clone(usage())
+			explicit_tmux = true
+			tmux_profile_name = args[index+1]
+			index += 1
+		case "--ssh":
+			if index+1 >= len(args) do return options, command, strings.clone(usage())
+			explicit_tmux = true
+			tmux_ssh = args[index+1]
+			index += 1
+		case "--session":
+			if index+1 >= len(args) do return options, command, strings.clone(usage())
+			explicit_tmux = true
+			tmux_session = args[index+1]
+			index += 1
+		case "--new-tab", "--new-window":
+			if !explicit_tmux do return options, command, strings.clone(usage())
 		case "-e":
 			if index+1 >= len(args) do return options, command, strings.clone(usage())
 			command_args = args[index+1:]
 			index = len(args)
 		case:
+			if strings.has_prefix(argument, "--tmux-profile=") {
+				explicit_tmux = true
+				tmux_profile_name = argument[len("--tmux-profile="):]
+				continue
+			}
+			if strings.has_prefix(argument, "--ssh=") {
+				explicit_tmux = true
+				tmux_ssh = argument[len("--ssh="):]
+				continue
+			}
+			if strings.has_prefix(argument, "--session=") {
+				explicit_tmux = true
+				tmux_session = argument[len("--session="):]
+				continue
+			}
 			config_result := apply_argument(&options, argument)
 			if config_result == .Unknown_Key && strings.has_prefix(argument, "--config=") do continue
 			if config_result == .Unknown_Key && strings.has_prefix(argument, "--working-directory=") {
@@ -91,6 +133,26 @@ command_from_args :: proc(args: []string) -> (options: config.Settings, command:
 			}
 			if config_result != .None do return options, command, strings.clone(usage())
 		}
+	}
+	if explicit_tmux {
+		profile: ^config.Tmux_Profile
+		if tmux_profile_name != "" {
+			profile = config.tmux_profile(&options, tmux_profile_name)
+			if profile == nil do return options, command, fmt.aprintf("unknown tmux profile: %s", tmux_profile_name)
+		}
+		launch_profile := config.Tmux_Profile{}
+		if profile != nil do launch_profile = profile^
+		if tmux_ssh != "" do launch_profile.ssh_host = tmux_ssh
+		if tmux_session != "" do launch_profile.session = tmux_session
+		if (launch_profile.ssh_host != "" && !config.valid_tmux_name(launch_profile.ssh_host)) ||
+		   (launch_profile.session != "" && !config.valid_tmux_name(launch_profile.session)) {
+			return options, command, strings.clone(usage())
+		}
+		options.tmux.enabled = true
+		options.tmux.explicit_launch = true
+		append_tmux_launch_command(&command, &launch_profile, false)
+		append(&command, nil)
+		return options, command, ""
 	}
 	if len(command_args) == 0 {
 		shell := os.get_env("SHELL", context.temp_allocator)
@@ -160,7 +222,7 @@ apply_argument :: proc(options: ^config.Settings, argument: string) -> config.Er
 }
 
 usage :: proc() -> string {
-	return "usage: nare [DIRECTORY|--working-directory=PATH] [--config=PATH|--no-config] [--renderer=cpu|gpu|auto] [--font=FAMILY] [--font-size=PIXELS] [--ligatures=true|false] [--title=TITLE] [--scrollback-lines=COUNT] [--url-opener=COMMAND] [--output-pipe=COMMAND] [--term=NAME] [--osc52=disabled|copy-enabled|paste-enabled|enabled] [-e COMMAND [ARG...]]"
+	return "usage: nare [DIRECTORY|--working-directory=PATH] [--config=PATH|--no-config] [--renderer=cpu|gpu|auto] [--font=FAMILY] [--font-size=PIXELS] [--ligatures=true|false] [--title=TITLE] [--scrollback-lines=COUNT] [--url-opener=COMMAND] [--output-pipe=COMMAND] [--term=NAME] [--osc52=disabled|copy-enabled|paste-enabled|enabled] [--tmux [SESSION]|--tmux-profile=NAME] [--ssh=HOST] [--session=NAME] [--new-tab|--new-window] [-e COMMAND [ARG...]]"
 }
 
 OSC52_Request :: struct {

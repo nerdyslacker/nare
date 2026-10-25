@@ -1,9 +1,9 @@
 package tmux
 
-LIST_PANES_COMMAND :: "list-panes -s -F '#{session_id}\t#{session_name}\t#{window_active}\t#{window_id}\t#{window_index}\t#{window_name}\t#{window_layout}\t#{pane_active}\t#{pane_id}\t#{pane_left}\t#{pane_top}\t#{pane_width}\t#{pane_height}\t.'\n"
+LIST_PANES_COMMAND :: "list-panes -s -F '#{session_id}\t#{session_name}\t#{window_active}\t#{window_id}\t#{window_index}\t#{window_name}\t#{window_layout}\t#{pane_active}\t#{pane_id}\t#{pane_left}\t#{pane_top}\t#{pane_width}\t#{pane_height}\t#{cursor_x}\t#{cursor_y}\t.'\n"
 
 Session_State :: enum { Inactive, Initial_Reply, Pane_List, Capture, Ready, Failed }
-Session_Action :: enum { None, Activated, Model_Changed, Pane_Selected, Title_Changed, Output, Deactivated, Failed }
+Session_Action :: enum { None, Activated, Model_Changed, Pane_Selected, Capture_Complete, Title_Changed, Output, Deactivated, Failed }
 Reply_Purpose :: enum { Ignored, Initial, Pane_List, Capture }
 
 Pane_Info :: struct {
@@ -11,6 +11,7 @@ Pane_Info :: struct {
 	window_id: int,
 	x, y: int,
 	columns, rows: int,
+	cursor_column, cursor_row: int,
 	active: bool,
 }
 
@@ -41,8 +42,11 @@ Session :: struct {
 	fallback_title: [dynamic]byte,
 	fallback_session_id: int,
 	reply_queue: [dynamic]Reply_Purpose,
+	reply_pane_ids: [dynamic]int,
 	reply_offset: int,
 	active_reply: Reply_Purpose,
+	active_capture_pane_id: int,
+	active_capture_row: int,
 	reply_open: bool,
 	refresh_queued: bool,
 }
@@ -55,6 +59,7 @@ session_destroy :: proc(session: ^Session) {
 	delete(session.windows)
 	delete(session.panes)
 	delete(session.reply_queue)
+	delete(session.reply_pane_ids)
 	session^ = {}
 }
 
@@ -64,6 +69,7 @@ session_handle :: proc(session: ^Session, event: ^Event, commands: ^[dynamic]byt
 		session.previous_pane_id = -1
 		session_reset_model(session)
 		clear(&session.reply_queue)
+		clear(&session.reply_pane_ids)
 		session.reply_offset = 0
 		session.reply_open = false
 		session.refresh_queued = false
@@ -78,7 +84,7 @@ session_handle :: proc(session: ^Session, event: ^Event, commands: ^[dynamic]byt
 		if session.state == .Initial_Reply {
 			session.active_reply = .Initial
 		} else {
-			session.active_reply = session_take_reply(session)
+			session.active_reply, session.active_capture_pane_id = session_take_reply(session)
 		}
 		if session.active_reply == .Pane_List {
 			session.previous_pane_id = session.pane_id
@@ -87,6 +93,7 @@ session_handle :: proc(session: ^Session, event: ^Event, commands: ^[dynamic]byt
 			session.refresh_queued = false
 		} else if session.active_reply == .Capture {
 			session.state = .Capture
+			session.active_capture_row = 0
 		}
 	case .Reply_End, .Reply_Error:
 		purpose := session.active_reply
@@ -106,7 +113,7 @@ session_handle :: proc(session: ^Session, event: ^Event, commands: ^[dynamic]byt
 				session.state = .Ready
 				return .Model_Changed
 			}
-			session_queue_capture(session, commands, session.pane_id)
+			session.state = .Ready
 			return .Pane_Selected
 		case .Capture:
 			if event.kind == .Reply_Error {
@@ -114,16 +121,21 @@ session_handle :: proc(session: ^Session, event: ^Event, commands: ^[dynamic]byt
 				return .Failed
 			}
 			session.state = .Ready
+			event.pane_id = session.active_capture_pane_id
+			return .Capture_Complete
 		case:
 		}
 	case .Reply_Data:
 		if session.active_reply == .Pane_List {
 			session_consider_pane(session, event.data[:])
 		} else if session.active_reply == .Capture {
+			event.pane_id = session.active_capture_pane_id
+			event.capture_row = session.active_capture_row
+			session.active_capture_row += 1
 			return .Output
 		}
 	case .Output, .Extended_Output:
-		if session.state != .Inactive && session.state != .Failed && event.pane_id == session.pane_id do return .Output
+		if session.state != .Inactive && session.state != .Failed && event.pane_id >= 0 do return .Output
 	case .Notification:
 		if event.notification == .Session_Renamed && event.session_id == session.session_id {
 			name := notification_trailing_value(event.data[:], 2)
@@ -171,7 +183,7 @@ append_input_commands :: proc(session: ^Session, commands: ^[dynamic]byte, pane_
 			append(commands, hex_digit(value>>4), hex_digit(value&0xf))
 		}
 		append(commands, '\n')
-		session_queue_reply(session, .Ignored)
+		session_queue_reply(session, .Ignored, -1)
 		offset = end
 	}
 }
@@ -183,52 +195,56 @@ append_resize_command :: proc(session: ^Session, commands: ^[dynamic]byte, colum
 	append(commands, 'x')
 	append_decimal(commands, rows)
 	append(commands, '\n')
-	session_queue_reply(session, .Ignored)
+	session_queue_reply(session, .Ignored, -1)
 }
 
 append_detach_command :: proc(session: ^Session, commands: ^[dynamic]byte) {
 	append(commands, "detach-client\n")
-	session_queue_reply(session, .Ignored)
+	session_queue_reply(session, .Ignored, -1)
 }
 
 request_new_window :: proc(session: ^Session, commands: ^[dynamic]byte) {
 	if !session_ready(session) do return
 	append(commands, "new-window\n")
-	session_queue_reply(session, .Ignored)
+	session_queue_reply(session, .Ignored, -1)
 	session_queue_pane_list(session, commands)
 }
 
-request_split :: proc(session: ^Session, commands: ^[dynamic]byte, horizontal: bool) {
+request_split :: proc(session: ^Session, commands: ^[dynamic]byte, horizontal: bool, pane_id: int = -1) {
 	if !session_ready(session) do return
+	target := pane_id if pane_id >= 0 else session.pane_id
 	append(commands, "split-window ")
 	append(commands, "-h" if horizontal else "-v")
-	append_target_command(commands, session.pane_id)
-	session_queue_reply(session, .Ignored)
+	append_target_command(commands, target)
+	session_queue_reply(session, .Ignored, -1)
 	session_queue_pane_list(session, commands)
 }
 
-request_kill_pane :: proc(session: ^Session, commands: ^[dynamic]byte) {
+request_kill_pane :: proc(session: ^Session, commands: ^[dynamic]byte, pane_id: int = -1) {
 	if !session_ready(session) do return
+	target := pane_id if pane_id >= 0 else session.pane_id
 	append(commands, "kill-pane")
-	append_target_command(commands, session.pane_id)
-	session_queue_reply(session, .Ignored)
+	append_target_command(commands, target)
+	session_queue_reply(session, .Ignored, -1)
 	session_queue_pane_list(session, commands)
 }
 
-request_focus :: proc(session: ^Session, commands: ^[dynamic]byte, direction: byte) {
+request_focus :: proc(session: ^Session, commands: ^[dynamic]byte, direction: byte, pane_id: int = -1) {
 	if !session_ready(session) do return
+	target := pane_id if pane_id >= 0 else session.pane_id
 	append(commands, "select-pane -")
 	append(commands, direction)
-	append_target_command(commands, session.pane_id)
-	session_queue_reply(session, .Ignored)
+	append_target_command(commands, target)
+	session_queue_reply(session, .Ignored, -1)
 	session_queue_pane_list(session, commands)
 }
 
-request_swap_pane :: proc(session: ^Session, commands: ^[dynamic]byte) {
+request_swap_pane :: proc(session: ^Session, commands: ^[dynamic]byte, pane_id: int = -1) {
 	if !session_ready(session) do return
+	target := pane_id if pane_id >= 0 else session.pane_id
 	append(commands, "swap-pane -D")
-	append_target_command(commands, session.pane_id)
-	session_queue_reply(session, .Ignored)
+	append_target_command(commands, target)
+	session_queue_reply(session, .Ignored, -1)
 	session_queue_pane_list(session, commands)
 }
 
@@ -237,7 +253,7 @@ request_select_window :: proc(session: ^Session, commands: ^[dynamic]byte, windo
 	append(commands, "select-window -t @")
 	append_decimal(commands, window_id)
 	append(commands, '\n')
-	session_queue_reply(session, .Ignored)
+	session_queue_reply(session, .Ignored, -1)
 	session_queue_pane_list(session, commands)
 }
 
@@ -246,7 +262,30 @@ request_select_pane :: proc(session: ^Session, commands: ^[dynamic]byte, pane_id
 	append(commands, "select-pane -t %")
 	append_decimal(commands, pane_id)
 	append(commands, '\n')
-	session_queue_reply(session, .Ignored)
+	session_queue_reply(session, .Ignored, -1)
+	session_queue_pane_list(session, commands)
+}
+
+request_kill_window :: proc(session: ^Session, commands: ^[dynamic]byte, window_id: int) {
+	if !session_ready(session) || window_id < 0 do return
+	append(commands, "kill-window -t @")
+	append_decimal(commands, window_id)
+	append(commands, '\n')
+	session_queue_reply(session, .Ignored, -1)
+	session_queue_pane_list(session, commands)
+}
+
+request_rename_window :: proc(session: ^Session, commands: ^[dynamic]byte, window_id: int, name: []byte) {
+	if !session_ready(session) || window_id < 0 || len(name) == 0 do return
+	append(commands, "rename-window -t @")
+	append_decimal(commands, window_id)
+	append(commands, " -- \"")
+	for value in name {
+		append(commands, '\\')
+		append(commands, byte(value/64)+'0', byte(value/8%8)+'0', byte(value%8)+'0')
+	}
+	append(commands, '\"', '\n')
+	session_queue_reply(session, .Ignored, -1)
 	session_queue_pane_list(session, commands)
 }
 
@@ -277,7 +316,7 @@ session_reset_model :: proc(session: ^Session) {
 }
 
 session_consider_pane :: proc(session: ^Session, line: []byte) {
-	fields: [13][]byte
+	fields: [15][]byte
 	cursor := 0
 	for index in 0..<len(fields) {
 		field, ok := next_tab_field(line, &cursor)
@@ -294,10 +333,14 @@ session_consider_pane :: proc(session: ^Session, line: []byte) {
 	y, y_ok := parse_u64(fields[10])
 	columns, columns_ok := parse_u64(fields[11])
 	rows, rows_ok := parse_u64(fields[12])
+	cursor_column, cursor_column_ok := parse_u64(fields[13])
+	cursor_row, cursor_row_ok := parse_u64(fields[14])
 	if !session_ok || !window_active_ok || !window_ok || !window_index_ok || !pane_active_ok || !pane_ok ||
-	   !x_ok || !y_ok || !columns_ok || !rows_ok || columns == 0 || rows == 0 ||
+	   !x_ok || !y_ok || !columns_ok || !rows_ok || !cursor_column_ok || !cursor_row_ok ||
+	   columns == 0 || rows == 0 ||
 	   window_index > u64(max(int)) || x > u64(max(int)) || y > u64(max(int)) ||
-	   columns > u64(max(int)) || rows > u64(max(int)) {
+	   columns > u64(max(int)) || rows > u64(max(int)) || cursor_column > u64(max(int)) ||
+	   cursor_row > u64(max(int)) {
 		return
 	}
 	if session.session_id < 0 {
@@ -313,6 +356,7 @@ session_consider_pane :: proc(session: ^Session, line: []byte) {
 	}
 	append(&session.panes, Pane_Info{
 		id = pane_id, window_id = window_id, x = int(x), y = int(y), columns = int(columns), rows = int(rows), active = pane_active != 0,
+		cursor_column = int(cursor_column), cursor_row = int(cursor_row),
 	})
 	if session.fallback_pane_id < 0 {
 		session.fallback_pane_id = pane_id
@@ -366,32 +410,40 @@ next_tab_field :: proc(input: []byte, cursor: ^int) -> (field: []byte, ok: bool)
 }
 
 session_queue_capture :: proc(session: ^Session, commands: ^[dynamic]byte, pane_id: int) {
+	request_capture(session, commands, pane_id)
+}
+
+request_capture :: proc(session: ^Session, commands: ^[dynamic]byte, pane_id: int) {
+	if pane_id < 0 do return
 	append(commands, "capture-pane -p -e -t %")
 	append_decimal(commands, pane_id)
 	append(commands, '\n')
-	session_queue_reply(session, .Capture)
+	session_queue_reply(session, .Capture, pane_id)
 }
 
 session_queue_pane_list :: proc(session: ^Session, commands: ^[dynamic]byte) {
 	if session.refresh_queued do return
 	append(commands, LIST_PANES_COMMAND)
-	session_queue_reply(session, .Pane_List)
+	session_queue_reply(session, .Pane_List, -1)
 	session.refresh_queued = true
 }
 
-session_queue_reply :: proc(session: ^Session, purpose: Reply_Purpose) {
+session_queue_reply :: proc(session: ^Session, purpose: Reply_Purpose, pane_id: int) {
 	append(&session.reply_queue, purpose)
+	append(&session.reply_pane_ids, pane_id)
 }
 
-session_take_reply :: proc(session: ^Session) -> Reply_Purpose {
-	if session.reply_offset >= len(session.reply_queue) do return .Ignored
+session_take_reply :: proc(session: ^Session) -> (Reply_Purpose, int) {
+	if session.reply_offset >= len(session.reply_queue) do return .Ignored, -1
 	purpose := session.reply_queue[session.reply_offset]
+	pane_id := session.reply_pane_ids[session.reply_offset]
 	session.reply_offset += 1
 	if session.reply_offset == len(session.reply_queue) {
 		clear(&session.reply_queue)
+		clear(&session.reply_pane_ids)
 		session.reply_offset = 0
 	}
-	return purpose
+	return purpose, pane_id
 }
 
 notification_trailing_value :: proc(line: []byte, skip: int) -> []byte {

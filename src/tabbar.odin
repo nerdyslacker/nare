@@ -118,6 +118,31 @@ draw_workspace_tab_bar :: proc(
 	_ = xlib.Flush(window.display)
 }
 
+draw_workspace_search_bar :: proc(
+	window: ^x11.Window,
+	font: ^fonts.Manager,
+	text: string,
+	y, height: int,
+	background, foreground: u32,
+) {
+	if height <= 0 || window.width <= 0 do return
+	byte_count := window.width*height*size_of(u32)
+	data := libc.malloc(c.size_t(byte_count))
+	if data == nil do return
+	image := xlib.CreateImage(window.display, window.visual, u32(window.depth), .ZPixmap, 0, data, u32(window.width), u32(height), 32, i32(window.width*size_of(u32)))
+	if image == nil {
+		libc.free(data)
+		return
+	}
+	defer xlib.DestroyImage(image)
+	pixels := (([^]u32)(data))[:window.width*height]
+	background_pixel := drawing.rgb_to_pixel(window, background)
+	for &pixel in pixels do pixel = background_pixel
+	draw_tab_text(pixels, window, font, text, 8, 3+font.ascent, foreground, false, 0, window.width-8)
+	xlib.PutImage(window.display, xlib.Drawable(window.id), window.gc, image, 0, 0, 0, i32(y), u32(window.width), u32(height))
+	_ = xlib.Flush(window.display)
+}
+
 muted_root_tab_color :: proc(root, inactive: u32) -> u32 {
 	red := (((root>>16)&0xff)*2+((inactive>>16)&0xff))/3
 	green := (((root>>8)&0xff)*2+((inactive>>8)&0xff))/3

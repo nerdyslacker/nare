@@ -109,6 +109,28 @@ spawn :: proc(argv: []cstring, size: Size, term: string = "xterm-256color", work
 	return process, .None
 }
 
+spawn_detached :: proc(argv: []cstring) -> Error {
+	if len(argv) < 2 || argv[0] == nil || argv[len(argv)-1] != nil do return .Invalid_Command
+	child := posix.fork()
+	if child < 0 do return .Fork
+	if child == 0 {
+		if posix.setsid() < 0 do posix._exit(127)
+		grandchild := posix.fork()
+		if grandchild < 0 do posix._exit(127)
+		if grandchild > 0 do posix._exit(0)
+		_ = posix.execvp(argv[0], raw_data(argv))
+		posix._exit(127)
+	}
+	status: c.int
+	for {
+		result := posix.waitpid(child, &status, {})
+		if result < 0 && posix.errno() == .EINTR do continue
+		if result != child do return .Wait
+		break
+	}
+	return .None if posix.WIFEXITED(status) && posix.WEXITSTATUS(status) == 0 else .Child_Setup
+}
+
 child_exec :: proc(master: posix.FD, slave_name: cstring, argv: []cstring, size: Size, ready_fd: posix.FD, term, working_directory: cstring) -> ! {
 	if posix.setsid() < 0 {
 		posix._exit(127)

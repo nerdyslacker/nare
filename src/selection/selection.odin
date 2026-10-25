@@ -9,17 +9,19 @@ State :: struct {
 	dragging: bool,
 }
 
-begin :: proc(state: ^State, screen: ^vt.Screen, position: vt.Cursor) {
+begin :: proc(state: ^State, screen: ^vt.Screen, position: vt.Cursor, activate: bool = true) {
 	normalized := vt.screen_position(screen, position.row, position.column)
 	state.anchor = normalized
 	state.focus = normalized
-	state.active = true
+	state.active = activate
 	state.dragging = true
 }
 
 update :: proc(state: ^State, screen: ^vt.Screen, position: vt.Cursor) {
 	if !state.dragging do return
-	state.focus = vt.screen_position(screen, position.row, position.column)
+	normalized := vt.screen_position(screen, position.row, position.column)
+	if normalized != state.anchor do state.active = true
+	state.focus = normalized
 }
 
 finish :: proc(state: ^State, screen: ^vt.Screen, position: vt.Cursor) {
@@ -35,7 +37,7 @@ contains :: proc(state: ^State, screen: ^vt.Screen, row, column: int) -> bool {
 	if state == nil || !state.active do return false
 	position := vt.screen_position(screen, row, column)
 	first, last := bounds(state)
-	return !vt.cursor_after(first, position) && !vt.cursor_after(position, last)
+	return !vt.cursor_after(first, position) && !vt.cursor_after(position, last) && vt.screen_cell_selectable(screen, row, column)
 }
 
 bounds :: proc(state: ^State) -> (first, last: vt.Cursor) {

@@ -50,6 +50,7 @@ Event :: struct {
 	kind: Event_Kind,
 	data: [dynamic]byte,
 	pane_id: int,
+	capture_row: int,
 	window_id: int,
 	session_id: int,
 	age_ms: int,

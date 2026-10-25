@@ -90,6 +90,7 @@ Tmux_Settings :: struct {
 	default_target: Tmux_Target,
 	active_tab_color: u32,
 	auto_reconnect: bool,
+	explicit_launch: bool,
 }
 
 Error :: enum {
@@ -207,7 +208,7 @@ settings_init :: proc(settings: ^Settings) {
 		font_decrease = strings.clone("alt+minus"),
 		font_reset = strings.clone("alt+0"),
 		tmux_new_tab = strings.clone("alt+control+t"),
-		tmux_new_window = strings.clone(""),
+		tmux_new_window = strings.clone("alt+control+n"),
 		tmux_attach_last = strings.clone("alt+control+a"),
 		tmux_detach = strings.clone("alt+control+d"),
 		tmux_reconnect = strings.clone(""),
@@ -290,6 +291,9 @@ parse :: proc(settings: ^Settings, contents: string) -> Result {
 		if result := apply(settings, section, key, value); result != .None {
 			return {error = result, line = line_number}
 		}
+	}
+	for binding in settings.tmux_profile_bindings {
+		if tmux_profile(settings, binding.profile) == nil do return {error = .Invalid_Value, line = line_number}
 	}
 	return {}
 }
