@@ -429,6 +429,7 @@ kitty_error_text :: proc(err: graphics.Kitty_Error) -> string {
 	switch err {
 	case .Unsupported: return "ENOTSUP"
 	case .Image_Limit: return "E2BIG"
+	case .File_IO: return "EBADF:Failed to read image file"
 	case .Malformed, .Invalid_Data: return "EINVAL"
 	case .None: return ""
 	}

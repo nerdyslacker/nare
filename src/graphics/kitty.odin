@@ -1,9 +1,11 @@
 package graphics
 
 import base64 "core:encoding/base64"
+import "core:os"
 import "core:strconv"
 import "core:strings"
 import "core:time"
+import posix "core:sys/posix"
 import zlib "vendor:zlib"
 
 KITTY_BACKGROUND_Z_THRESHOLD :: i32(-1_073_741_824)
@@ -12,6 +14,8 @@ MAX_KITTY_COMPRESSED_BYTES :: MAX_IMAGE_BYTES+(MAX_IMAGE_BYTES>>12)+(MAX_IMAGE_B
 MAX_KITTY_ENCODED_BYTES :: ((MAX_KITTY_COMPRESSED_BYTES+2)/3)*4
 MAX_KITTY_CHUNKS :: 32_768
 MAX_KITTY_CHUNK_BYTES :: 128 * 1024
+MAX_KITTY_PATH_BYTES :: 4096
+MAX_KITTY_SHM_NAME_BYTES :: 255
 KITTY_TRANSFER_TIMEOUT :: 10*time.Second
 
 Kitty_Action :: enum {
@@ -29,7 +33,10 @@ Kitty_Error :: enum {
 	Unsupported,
 	Invalid_Data,
 	Image_Limit,
+	File_IO,
 }
+
+Kitty_Medium :: enum { Direct, File, Temporary_File, Shared_Memory }
 
 Kitty_Delete_Target :: enum {
 	Visible,
@@ -48,6 +55,7 @@ Kitty_Command :: struct {
 	format: Pixel_Format,
 	width, height: int,
 	data_size: int,
+	data_offset: i64,
 	image_id: u32,
 	placement_id: u32,
 	columns, rows: int,
@@ -62,6 +70,7 @@ Kitty_Command :: struct {
 	compressed: bool,
 	more: bool,
 	quiet: int,
+	medium: Kitty_Medium,
 }
 
 Kitty_Transfer :: struct {
@@ -153,6 +162,15 @@ kitty_receive_direct :: proc(
 
 	command = frame.command
 	if command.action == .Display || command.action == .Delete do return command, {}, true, .None
+	if command.medium != .Direct {
+		if command.more || frame.more_present do return command, {}, true, .Malformed
+		if command.medium == .Shared_Memory {
+			image, err = kitty_decode_shared_memory(command, frame.payload, limits)
+		} else {
+			image, err = kitty_decode_file(command, frame.payload, limits)
+		}
+		return command, image, true, err
+	}
 	encoded_limit, limit_error := kitty_encoded_limit(command, limits)
 	if limit_error != .None do return command, {}, true, limit_error
 	if command.more {
@@ -195,7 +213,7 @@ kitty_parse_direct_frame :: proc(data: []byte) -> (Kitty_Frame, Kitty_Error) {
 		payload = data[separator+1:]
 	}
 	seen_action, seen_format, seen_width, seen_height := false, false, false, false
-	seen_data_size := false
+	seen_data_size, seen_data_offset := false, false
 	seen_id, seen_placement, seen_columns, seen_rows := false, false, false, false
 	seen_medium, seen_compression, seen_more, seen_quiet := false, false, false, false
 	seen_source_x, seen_source_y, seen_source_width, seen_source_height := false, false, false, false
@@ -259,6 +277,12 @@ kitty_parse_direct_frame :: proc(data: []byte) -> (Kitty_Frame, Kitty_Error) {
 			data_size, ok := parse_kitty_uint(value)
 			if !ok || data_size == 0 || data_size > u64(MAX_KITTY_COMPRESSED_BYTES) do return Kitty_Frame{command = command}, .Malformed
 			command.data_size = int(data_size)
+		case 'O':
+			if seen_data_offset do return Kitty_Frame{command = command}, .Malformed
+			seen_data_offset = true
+			data_offset, ok := parse_kitty_uint(value)
+			if !ok || data_offset > u64(max(i64)) do return Kitty_Frame{command = command}, .Malformed
+			command.data_offset = i64(data_offset)
 		case 'i':
 			if seen_id do return Kitty_Frame{command = command}, .Malformed
 			seen_id = true
@@ -337,7 +361,14 @@ kitty_parse_direct_frame :: proc(data: []byte) -> (Kitty_Frame, Kitty_Error) {
 		case 't':
 			if seen_medium do return Kitty_Frame{command = command}, .Malformed
 			seen_medium = true
-			if value != "d" do unsupported = true
+			if len(value) != 1 do return Kitty_Frame{command = command}, .Malformed
+			switch value[0] {
+			case 'd': command.medium = .Direct
+			case 'f': command.medium = .File
+			case 't': command.medium = .Temporary_File
+			case 's': command.medium = .Shared_Memory
+			case: unsupported = true
+			}
 		case 'm':
 			if seen_more do return Kitty_Frame{command = command}, .Malformed
 			seen_more = true
@@ -407,13 +438,14 @@ kitty_parse_direct_frame :: proc(data: []byte) -> (Kitty_Frame, Kitty_Error) {
 		return Kitty_Frame{command = command}, .Unsupported
 	}
 	if command.action != .Delete && seen_delete do return Kitty_Frame{command = command}, .Malformed
+	if command.medium == .Direct && seen_data_offset do return Kitty_Frame{command = command}, .Malformed
 	if command.action == .Display {
 		if command.image_id == 0 || len(payload) != 0 || seen_format || seen_width || seen_height ||
-		   seen_data_size || seen_medium || seen_compression || seen_more {
+		   seen_data_size || seen_data_offset || seen_medium || seen_compression || seen_more {
 			return Kitty_Frame{command = command}, .Malformed
 		}
 	} else if command.action == .Delete {
-		if len(payload) != 0 || seen_format || seen_width || seen_height || seen_data_size || seen_medium ||
+		if len(payload) != 0 || seen_format || seen_width || seen_height || seen_data_size || seen_data_offset || seen_medium ||
 		   seen_compression || seen_more || seen_columns || seen_rows || seen_source_width ||
 		   seen_source_height || seen_destination_x || seen_destination_y || seen_cursor_policy {
 			return Kitty_Frame{command = command}, .Malformed
@@ -493,6 +525,10 @@ kitty_decode_payload :: proc(command: Kitty_Command, payload: []byte, limits: ^L
 		delete(decoded)
 		return {}, .Invalid_Data
 	}
+	return kitty_decode_bytes(command, decoded, limits)
+}
+
+kitty_decode_bytes :: proc(command: Kitty_Command, decoded: []byte, limits: ^Limits = nil) -> (Decoded_Image, Kitty_Error) {
 	if command.png {
 		image, png_error := decode_png(decoded, limits)
 		delete(decoded)
@@ -540,6 +576,141 @@ kitty_decode_payload :: proc(command: Kitty_Command, payload: []byte, limits: ^L
 		return {}, .Image_Limit
 	}
 	return image, .None
+}
+
+kitty_decode_file :: proc(command: Kitty_Command, payload: []byte, limits: ^Limits = nil) -> (Decoded_Image, Kitty_Error) {
+	if len(payload) == 0 || len(payload) > ((MAX_KITTY_PATH_BYTES+2)/3)*4 do return {}, .File_IO
+	decode_options: base64.Decode_Options = {.Strict}
+	if len(payload)%4 != 0 do decode_options += {.No_Padding}
+	path_bytes, decode_error := base64.decode(string(payload), options = decode_options)
+	if decode_error != nil || len(path_bytes) == 0 || len(path_bytes) > MAX_KITTY_PATH_BYTES {
+		delete(path_bytes)
+		return {}, .File_IO
+	}
+	defer delete(path_bytes)
+	for value in path_bytes do if value == 0 do return {}, .File_IO
+	path := string(path_bytes)
+	if path[0] != '/' do return {}, .File_IO
+	input_limit, limit_error := kitty_input_limit(command, limits)
+	if limit_error != .None do return {}, limit_error
+	if command.data_size > input_limit do return {}, .Image_Limit
+
+	file, open_error := os.open(path, {.Read, .Non_Blocking})
+	if open_error != nil do return {}, .File_IO
+	defer _ = os.close(file)
+	info, stat_error := os.fstat(file, context.temp_allocator)
+	if stat_error != nil || info.type != .Regular || info.size < 0 || kitty_sensitive_file_path(info.fullpath) {
+		return {}, .File_IO
+	}
+	if command.medium == .Temporary_File &&
+	   (!kitty_temporary_file_path(path) || !kitty_temporary_file_path(info.fullpath)) {
+		return {}, .File_IO
+	}
+
+	if command.data_offset < 0 || command.data_offset > info.size do return {}, .File_IO
+	remaining := info.size-command.data_offset
+	read_size := remaining
+	if command.data_size > 0 {
+		read_size = i64(command.data_size)
+		if read_size > remaining do return {}, .File_IO
+	}
+	if read_size <= 0 || read_size > i64(input_limit) || read_size > i64(max(int)) do return {}, .File_IO
+	data := make([]byte, int(read_size))
+	total := 0
+	for total < len(data) {
+		amount, read_error := os.read_at(file, data[total:], command.data_offset+i64(total))
+		total += amount
+		if read_error != nil do break
+	}
+	if total != len(data) {
+		delete(data)
+		return {}, .File_IO
+	}
+	if command.medium == .Temporary_File do _ = os.remove(info.fullpath)
+	return kitty_decode_bytes(command, data, limits)
+}
+
+kitty_decode_shared_memory :: proc(command: Kitty_Command, payload: []byte, limits: ^Limits = nil) -> (Decoded_Image, Kitty_Error) {
+	if len(payload) == 0 || len(payload) > ((MAX_KITTY_SHM_NAME_BYTES+2)/3)*4 do return {}, .File_IO
+	decode_options: base64.Decode_Options = {.Strict}
+	if len(payload)%4 != 0 do decode_options += {.No_Padding}
+	name_bytes, decode_error := base64.decode(string(payload), options = decode_options)
+	if decode_error != nil || len(name_bytes) < 2 || len(name_bytes) > MAX_KITTY_SHM_NAME_BYTES {
+		delete(name_bytes)
+		return {}, .File_IO
+	}
+	defer delete(name_bytes)
+	if name_bytes[0] != '/' do return {}, .File_IO
+	for value, index in name_bytes {
+		if value == 0 || index > 0 && value == '/' do return {}, .File_IO
+	}
+	input_limit, limit_error := kitty_input_limit(command, limits)
+	if limit_error != .None do return {}, limit_error
+	if command.data_size > input_limit do return {}, .Image_Limit
+
+	name := string(name_bytes)
+	name_c := strings.clone_to_cstring(name)
+	defer delete(name_c)
+	fd := posix.shm_open(name_c, {.CLOEXEC}, posix.mode_t{})
+	if fd < 0 do return {}, .File_IO
+	defer _ = posix.shm_unlink(name_c)
+	file := os.new_file(uintptr(int(fd)), name)
+	defer _ = os.close(file)
+	info, stat_error := os.fstat(file, context.temp_allocator)
+	if stat_error != nil || info.type != .Regular || info.size < 0 do return {}, .File_IO
+	if command.data_offset < 0 || command.data_offset > info.size do return {}, .File_IO
+	remaining := info.size-command.data_offset
+	read_size := remaining
+	if command.data_size > 0 {
+		read_size = i64(command.data_size)
+		if read_size > remaining do return {}, .File_IO
+	}
+	if read_size <= 0 || read_size > i64(input_limit) || read_size > i64(max(int)) do return {}, .File_IO
+	data := make([]byte, int(read_size))
+	total := 0
+	for total < len(data) {
+		amount, read_error := os.read_at(file, data[total:], command.data_offset+i64(total))
+		total += amount
+		if read_error != nil do break
+	}
+	if total != len(data) {
+		delete(data)
+		return {}, .File_IO
+	}
+	return kitty_decode_bytes(command, data, limits)
+}
+
+kitty_input_limit :: proc(command: Kitty_Command, limits: ^Limits = nil) -> (int, Kitty_Error) {
+	if command.png {
+		if command.compressed do return 0, .Unsupported
+		return MAX_PNG_BYTES, .None
+	}
+	_, byte_count, layout_error := image_layout_with_limits(command.width, command.height, command.format, limits)
+	if command.width <= 0 || command.height <= 0 do return 0, .Malformed
+	if layout_error != .None do return 0, .Image_Limit
+	if command.compressed do return kitty_compressed_bound(byte_count), .None
+	return byte_count, .None
+}
+
+kitty_path_in_directory :: proc(path, directory: string) -> bool {
+	if directory == "" || !strings.has_prefix(path, directory) do return false
+	if len(path) == len(directory) do return true
+	return directory[len(directory)-1] == '/' || path[len(directory)] == '/'
+}
+
+kitty_sensitive_file_path :: proc(path: string) -> bool {
+	if kitty_path_in_directory(path, "/proc") || kitty_path_in_directory(path, "/sys") do return true
+	return kitty_path_in_directory(path, "/dev") && !kitty_path_in_directory(path, "/dev/shm")
+}
+
+kitty_temporary_file_path :: proc(path: string) -> bool {
+	if !strings.contains(path, "tty-graphics-protocol") do return false
+	if kitty_path_in_directory(path, "/tmp") || kitty_path_in_directory(path, "/var/tmp") ||
+	   kitty_path_in_directory(path, "/dev/shm") {
+		return true
+	}
+	temporary_directory := os.get_env("TMPDIR", context.temp_allocator)
+	return temporary_directory != "" && kitty_path_in_directory(path, temporary_directory)
 }
 
 kitty_payload_layout :: proc(command: Kitty_Command, limits: ^Limits = nil) -> (stride, byte_count, encoded_limit: int, err: Kitty_Error) {
