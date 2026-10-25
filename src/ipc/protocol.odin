@@ -3,13 +3,20 @@ package ipc
 import "core:strings"
 
 MAGIC :: "NARE"
-VERSION :: u16(1)
+VERSION :: u16(2)
 HEADER_SIZE :: 16
 MAX_PAYLOAD_BYTES :: 128 * 1024
 MAX_ARGUMENTS :: 256
 MAX_STRING_BYTES :: 32 * 1024
 MAX_ERROR_MESSAGE_BYTES :: 1024
+MAX_TITLE_BYTES :: 1024
 MAX_FRAMES_PER_FEED :: 256
+
+CREATE_OVERRIDE_FONT_SIZE :: u16(1 << 0)
+CREATE_OVERRIDE_RENDERER :: u16(1 << 1)
+CREATE_OVERRIDE_LIGATURES :: u16(1 << 2)
+CREATE_OVERRIDE_TITLE :: u16(1 << 3)
+CREATE_OVERRIDE_MASK :: CREATE_OVERRIDE_FONT_SIZE | CREATE_OVERRIDE_RENDERER | CREATE_OVERRIDE_LIGATURES | CREATE_OVERRIDE_TITLE
 
 Kind :: enum u16 {
 	Create = 1,
@@ -40,6 +47,12 @@ Remote_Error :: struct {
 	message: string,
 }
 
+Renderer_Override :: enum u8 {
+	CPU = 1,
+	GPU,
+	Auto,
+}
+
 Frame :: struct {
 	kind: Kind,
 	request_id: u32,
@@ -54,6 +67,14 @@ Create_Request :: struct {
 	wait: bool,
 	working_directory: string,
 	arguments: [dynamic]string,
+	override_font_size: bool,
+	font_size: u16,
+	override_renderer: bool,
+	renderer: Renderer_Override,
+	override_ligatures: bool,
+	ligatures: bool,
+	override_title: bool,
+	title: string,
 }
 
 frame_destroy :: proc(frame: ^Frame) {
@@ -76,6 +97,7 @@ create_request_destroy :: proc(request: ^Create_Request) {
 	delete(request.working_directory)
 	for argument in request.arguments do delete(argument)
 	delete(request.arguments)
+	delete(request.title)
 	request^ = {}
 }
 
@@ -278,6 +300,30 @@ encode_create :: proc(request: ^Create_Request, request_id: u32, output: ^[dynam
 		append_u32(&payload, u32(len(argument)))
 		append(&payload, ..transmute([]byte)argument)
 	}
+	overrides: u16
+	if request.override_font_size {
+		if request.font_size == 0 do return .Limit
+		overrides |= CREATE_OVERRIDE_FONT_SIZE
+	}
+	if request.override_renderer {
+		if request.renderer < .CPU || request.renderer > .Auto do return .Limit
+		overrides |= CREATE_OVERRIDE_RENDERER
+	}
+	if request.override_ligatures do overrides |= CREATE_OVERRIDE_LIGATURES
+	if request.override_title {
+		if len(request.title) == 0 || len(request.title) > MAX_TITLE_BYTES || contains_nul(request.title) do return .Limit
+		overrides |= CREATE_OVERRIDE_TITLE
+	}
+	if overrides != 0 {
+		append_u16(&payload, overrides)
+		if request.override_font_size do append_u16(&payload, request.font_size)
+		if request.override_renderer do append(&payload, byte(request.renderer))
+		if request.override_ligatures do append(&payload, byte(1) if request.ligatures else byte(0))
+		if request.override_title {
+			append_u16(&payload, u16(len(request.title)))
+			append(&payload, ..transmute([]byte)request.title)
+		}
+	}
 	return append_frame(output, .Create, request_id, payload[:])
 }
 
@@ -316,10 +362,49 @@ decode_create :: proc(frame: ^Frame, request: ^Create_Request) -> Error {
 		append(&decoded.arguments, strings.clone(string(argument)))
 		offset += len(argument)
 	}
-	if offset != len(frame.payload) {
+	if offset == len(frame.payload) {
+		request^ = decoded
+		return .None
+	}
+	overrides, overrides_ok := read_u16(frame.payload[:], offset)
+	if !overrides_ok || overrides == 0 || overrides & ~CREATE_OVERRIDE_MASK != 0 {
 		create_request_destroy(&decoded)
 		return .Malformed
 	}
+	offset += 2
+	if overrides & CREATE_OVERRIDE_FONT_SIZE != 0 {
+		font_size, ok := read_u16(frame.payload[:], offset)
+		if !ok || font_size == 0 {create_request_destroy(&decoded); return .Malformed}
+		decoded.override_font_size = true
+		decoded.font_size = font_size
+		offset += 2
+	}
+	if overrides & CREATE_OVERRIDE_RENDERER != 0 {
+		if offset >= len(frame.payload) {create_request_destroy(&decoded); return .Malformed}
+		renderer := Renderer_Override(frame.payload[offset])
+		if renderer < .CPU || renderer > .Auto {create_request_destroy(&decoded); return .Malformed}
+		decoded.override_renderer = true
+		decoded.renderer = renderer
+		offset += 1
+	}
+	if overrides & CREATE_OVERRIDE_LIGATURES != 0 {
+		if offset >= len(frame.payload) || frame.payload[offset] > 1 {create_request_destroy(&decoded); return .Malformed}
+		decoded.override_ligatures = true
+		decoded.ligatures = frame.payload[offset] == 1
+		offset += 1
+	}
+	if overrides & CREATE_OVERRIDE_TITLE != 0 {
+		title_size, ok := read_u16(frame.payload[:], offset)
+		if !ok || title_size == 0 || title_size > MAX_TITLE_BYTES {create_request_destroy(&decoded); return .Malformed}
+		offset += 2
+		if int(title_size) > len(frame.payload)-offset {create_request_destroy(&decoded); return .Malformed}
+		title := string(frame.payload[offset:offset+int(title_size)])
+		if contains_nul(title) {create_request_destroy(&decoded); return .Malformed}
+		decoded.override_title = true
+		decoded.title = strings.clone(title)
+		offset += int(title_size)
+	}
+	if offset != len(frame.payload) {create_request_destroy(&decoded); return .Malformed}
 	request^ = decoded
 	return .None
 }

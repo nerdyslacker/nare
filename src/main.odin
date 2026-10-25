@@ -45,7 +45,7 @@ app_main :: proc() -> int {
 	}
 	defer command_destroy(&command)
 	if launch.mode == .Server do return server_run(&options, launch.socket_path)
-	if launch.mode == .Client do return client_run(command[:], options.working_directory, launch.socket_path, launch.wait)
+	if launch.mode == .Client do return client_run(command[:], &options, launch.arguments[:], launch.socket_path, launch.wait)
 
 	title := strings.clone_to_cstring(options.title)
 	defer delete(title)

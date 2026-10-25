@@ -62,6 +62,7 @@ nare --server
 nare --client
 nare --client -e htop
 nare --client --no-wait /path/to/project
+nare --client --font-size=18 --ligatures=false --title=work
 ```
 
 By default the private socket is `$XDG_RUNTIME_DIR/nare.sock`. Both endpoints verify same-user peer credentials. `--server-socket=PATH` selects an explicit path for supervised or test setups.
@@ -70,4 +71,6 @@ The server owns all X11 windows, PTYs, terminal state, and rendering. A waiting 
 
 An explicitly launched server stays alive when its last window closes. Stop it with `SIGINT` or `SIGTERM`; service managers may impose a different lifetime policy.
 
-The server's configuration controls window appearance. Client requests currently transfer the command and working directory; per-client rendering overrides are not implemented yet. Panes and simultaneous server windows at the same font size share font faces, shaping resources, and the bounded glyph cache, while each pane keeps independent CPU/GPU and X11 renderer state.
+The server's configuration supplies window defaults. Clients may explicitly override font size, renderer, ligatures, and title with their normal command-line flags; other appearance settings remain server-owned. Panes and simultaneous server windows at the same font size share font faces, shaping resources, and the bounded glyph cache, while each pane keeps independent CPU/GPU and X11 renderer state.
+
+In the recorded CPU benchmark, server mode used 22.7% less proportional memory at two windows, 37.6% less at five, and 41.9% less at ten. Concurrent batch creation was slower because one server initializes windows serially, so server mode remains an opt-in memory-oriented tradeoff rather than the default.

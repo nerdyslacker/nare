@@ -106,6 +106,33 @@ server_destroy :: proc(server: ^Server) {
 	server^ = {}
 }
 
+server_workspace_overrides :: proc(request: ^ipc.Create_Request) -> (overrides: Workspace_Overrides, ok: bool) {
+	ok = true
+	if request.override_font_size {
+		if request.font_size < config.MIN_FONT_SIZE || request.font_size > config.MAX_FONT_SIZE do return overrides, false
+		overrides.override_font_size = true
+		overrides.font_size = int(request.font_size)
+	}
+	if request.override_renderer {
+		overrides.override_renderer = true
+		switch request.renderer {
+		case .CPU: overrides.renderer = .CPU
+		case .GPU: overrides.renderer = .GPU
+		case .Auto: overrides.renderer = .Auto
+		case: return overrides, false
+		}
+	}
+	if request.override_ligatures {
+		overrides.override_ligatures = true
+		overrides.ligatures = request.ligatures
+	}
+	if request.override_title {
+		overrides.override_title = true
+		overrides.title = request.title
+	}
+	return
+}
+
 server_launch_window :: proc(server: ^Server, client: ^Server_Client, frame: ^ipc.Frame) -> bool {
 	if client.window != nil || len(server.windows) >= MAX_SERVER_WINDOWS {
 		return server_queue_error(client, frame.request_id, .Server_Busy, "server window limit reached")
@@ -115,10 +142,15 @@ server_launch_window :: proc(server: ^Server, client: ^Server_Client, frame: ^ip
 	if ipc.decode_create(frame, &request) != .None {
 		return server_queue_error(client, frame.request_id, .Invalid_Request, "invalid create request")
 	}
+	overrides, overrides_ok := server_workspace_overrides(&request)
+	if !overrides_ok {
+		return server_queue_error(client, frame.request_id, .Invalid_Request, "invalid create overrides")
+	}
 	window := new(Server_Window)
 	for argument in request.arguments do append(&window.command, strings.clone_to_cstring(argument))
 	append(&window.command, nil)
-	title := strings.clone_to_cstring(server.settings.title)
+	title_value := overrides.title if overrides.override_title else server.settings.title
+	title := strings.clone_to_cstring(title_value)
 	root, window_error := x11.open(title)
 	delete(title)
 	if window_error != .None {
@@ -129,7 +161,7 @@ server_launch_window :: proc(server: ^Server, client: ^Server_Client, frame: ^ip
 	window.root = root
 	x11.set_opacity(&window.root, server.settings.window.background_opacity)
 	x11.set_decorations(&window.root, server.settings.window.decorations)
-	if !workspace_init(&window.workspace, &window.root, window.command[:], server.settings, request.working_directory, &server.font_cache) {
+	if !workspace_init(&window.workspace, &window.root, window.command[:], server.settings, request.working_directory, &server.font_cache, overrides) {
 		x11.close(&window.root)
 		command_destroy(&window.command)
 		free(window)

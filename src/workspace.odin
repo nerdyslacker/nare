@@ -100,6 +100,20 @@ Workspace :: struct {
 	font_cache: ^Workspace_Font_Cache,
 	local_font_cache: Workspace_Font_Cache,
 	font_entry: ^Workspace_Font_Cache_Entry,
+	renderer: drawing.Kind,
+	ligatures: bool,
+	title: string,
+}
+
+Workspace_Overrides :: struct {
+	override_font_size: bool,
+	font_size: int,
+	override_renderer: bool,
+	renderer: drawing.Kind,
+	override_ligatures: bool,
+	ligatures: bool,
+	override_title: bool,
+	title: string,
 }
 
 Workspace_Font_Cache_Entry :: struct {
@@ -198,15 +212,25 @@ workspace_init :: proc(
 	settings: ^config.Settings,
 	initial_cwd: string = "",
 	font_cache: ^Workspace_Font_Cache = nil,
+	overrides: Workspace_Overrides = {},
 ) -> bool {
+	font_size := overrides.font_size if overrides.override_font_size else settings.font_size
+	renderer := overrides.renderer if overrides.override_renderer else settings.renderer
+	ligatures := overrides.ligatures if overrides.override_ligatures else settings.ligatures
+	title := overrides.title if overrides.override_title else settings.title
 	workspace^ = Workspace{
-		root = root, settings = settings, command = command, initial_font_size = settings.font_size, font_size = settings.font_size,
+		root = root, settings = settings, command = command, initial_font_size = font_size, font_size = font_size,
 		renaming_tab = -1, last_click_tab = -2, last_cursor_toggle = time.now(), tab_reveal_active = true,
+		renderer = renderer, ligatures = ligatures, title = strings.clone(title),
 	}
-	if font_cache == nil do font_cache = &workspace.local_font_cache
-	workspace.font_cache = font_cache
-	workspace.font_entry = workspace_font_cache_acquire(font_cache, settings, workspace.font_size)
-	if workspace.font_entry == nil do return false
+	selected_font_cache := font_cache
+	if selected_font_cache == nil do selected_font_cache = &workspace.local_font_cache
+	workspace.font_cache = selected_font_cache
+	workspace.font_entry = workspace_font_cache_acquire(selected_font_cache, settings, workspace.font_size)
+	if workspace.font_entry == nil {
+		delete(workspace.title)
+		return false
+	}
 	x11.set_surface_colors(root, settings.theme.background, settings.ui_colors.active_border)
 	pane := workspace_new_pane_command(workspace, command, initial_cwd, settings.tmux.explicit_launch)
 	created := workspace_append_new_tab(workspace, pane)
@@ -214,6 +238,7 @@ workspace_init :: proc(
 		workspace_font_cache_release(workspace.font_cache, workspace.font_entry)
 		workspace.font_entry = nil
 		if workspace.font_cache == &workspace.local_font_cache do workspace_font_cache_destroy(&workspace.local_font_cache)
+		delete(workspace.title)
 		return false
 	}
 	search_surface, search_ok := x11.create_child(root, 0, 0, 1, 1)
@@ -303,7 +328,7 @@ workspace_new_pane_command :: proc(workspace: ^Workspace, command: []cstring, cw
 	if !ok { free(pane); return nil }
 	pane.surface = surface
 	if drawing.init(
-		&pane.renderer, &pane.surface, workspace.settings.renderer, workspace.settings.ligatures,
+		&pane.renderer, &pane.surface, workspace.renderer, workspace.ligatures,
 		workspace.settings.font, workspace.font_size, workspace.settings.font_bold,
 		workspace.settings.bold_font, workspace.settings.italic_font, workspace.settings.bold_italic_font,
 		workspace.settings.cell_width_percent, workspace.settings.cell_height_percent,
@@ -341,7 +366,7 @@ workspace_new_tmux_view :: proc(workspace: ^Workspace, owner: ^Pane, pane_id: in
 	if !ok {free(pane); return nil}
 	pane.surface = surface
 	if drawing.init(
-		&pane.renderer, &pane.surface, workspace.settings.renderer, workspace.settings.ligatures,
+		&pane.renderer, &pane.surface, workspace.renderer, workspace.ligatures,
 		workspace.settings.font, workspace.font_size, workspace.settings.font_bold,
 		workspace.settings.bold_font, workspace.settings.italic_font, workspace.settings.bold_italic_font,
 		workspace.settings.cell_width_percent, workspace.settings.cell_height_percent,
@@ -427,6 +452,7 @@ workspace_destroy :: proc(workspace: ^Workspace) {
 	delete(workspace.tabs)
 	delete(workspace.tab_bounds)
 	delete(workspace.rename_buffer)
+	delete(workspace.title)
 	workspace_font_cache_release(workspace.font_cache, workspace.font_entry)
 	workspace.font_entry = nil
 	if workspace.font_cache == &workspace.local_font_cache do workspace_font_cache_destroy(&workspace.local_font_cache)
@@ -555,7 +581,6 @@ workspace_layout :: proc(workspace: ^Workspace) {
 		}
 	}
 	workspace_draw_tabs(workspace)
-	x11.focus_window(workspace.root)
 }
 
 workspace_tmux_pane_info :: proc(owner: ^Pane, pane_id: int) -> ^tmux.Pane_Info {
@@ -593,7 +618,7 @@ workspace_draw_tabs :: proc(workspace: ^Workspace) {
 	if height == 0 do return
 	labels := make([]Tab_Draw_Label, len(workspace.tabs), context.temp_allocator)
 	for tab, index in workspace.tabs {
-		title := workspace.settings.title
+		title := workspace.title
 		active_root := false
 		if tab_is_tmux(tab) && tab.tmux_title != "" do title = tab.tmux_title
 		else if tab.custom_title != "" do title = tab.custom_title
@@ -924,7 +949,7 @@ workspace_begin_rename :: proc(workspace: ^Workspace, index: int) {
 	tab := workspace.tabs[index]
 	title := tab.custom_title
 	if tab_is_tmux(tab) do title = tab.tmux_title
-	if title == "" && len(tab.panes) > 0 do title = current_window_title(&tab.panes[tab.active].terminal, workspace.settings.title)
+	if title == "" && len(tab.panes) > 0 do title = current_window_title(&tab.panes[tab.active].terminal, workspace.title)
 	append(&workspace.rename_buffer, ..transmute([]byte)title)
 	x11.focus_window(workspace.root)
 	workspace_draw_tabs(workspace)
@@ -994,7 +1019,7 @@ workspace_handle_search_input :: proc(workspace: ^Workspace, pane: ^Pane, event:
 		if tab_is_tmux(tab) && tab.tmux_title != "" {
 			x11.set_title(workspace.root, tab.tmux_title)
 		} else {
-			x11.set_title(workspace.root, current_window_title(&pane.terminal, workspace.settings.title))
+			x11.set_title(workspace.root, current_window_title(&pane.terminal, workspace.title))
 		}
 	case .Enter:
 		if .Shift in event.modifiers do features.previous(&pane.search_state, screen)
@@ -1191,7 +1216,7 @@ workspace_font_size :: proc(workspace: ^Workspace, size: int) {
 	for tab in workspace.tabs do for pane in tab.panes {
 		drawing.destroy(&pane.renderer, &pane.surface)
 		font_error := drawing.init(
-			&pane.renderer, &pane.surface, workspace.settings.renderer, workspace.settings.ligatures,
+			&pane.renderer, &pane.surface, workspace.renderer, workspace.ligatures,
 			workspace.settings.font, new_size, workspace.settings.font_bold,
 			workspace.settings.bold_font, workspace.settings.italic_font, workspace.settings.bold_italic_font,
 			workspace.settings.cell_width_percent, workspace.settings.cell_height_percent,
@@ -1231,7 +1256,7 @@ workspace_select_tab :: proc(workspace: ^Workspace, index: int) {
 	if tab_is_tmux(tab) && tab.tmux_title != "" {
 		x11.set_title(workspace.root, tab.tmux_title)
 	} else if len(tab.panes) > 0 {
-		x11.set_title(workspace.root, current_window_title(&tab.panes[tab.active].terminal, workspace.settings.title))
+		x11.set_title(workspace.root, current_window_title(&tab.panes[tab.active].terminal, workspace.title))
 	}
 	workspace_layout(workspace)
 }
@@ -1442,7 +1467,7 @@ workspace_drain :: proc(workspace: ^Workspace, pane: ^Pane) -> bool {
 						config.replace_string(&pane.display_title, pane.terminal.title)
 					}
 					if pane == workspace_active_pane(workspace) {
-						x11.set_title(workspace.root, current_window_title(&pane.terminal, workspace.settings.title))
+						x11.set_title(workspace.root, current_window_title(&pane.terminal, workspace.title))
 					}
 					workspace_draw_tabs(workspace)
 				}
@@ -1756,7 +1781,7 @@ workspace_feed_pty :: proc(workspace: ^Workspace, pane: ^Pane, data: []byte) -> 
 			pane.tmux_reconnect_attempts = 0
 			pane.last_tmux_reconcile = time.now()
 			title := string(pane.tmux_session.title[:])
-			if title == "" do title = workspace.settings.title
+			if title == "" do title = workspace.title
 			x11.set_title(workspace.root, title)
 			workspace_draw_tabs(workspace)
 		case .Model_Changed:
@@ -1935,7 +1960,7 @@ workspace_tmux_deactivate :: proc(workspace: ^Workspace, pane: ^Pane) {
 	pane.local_display_title = ""
 	pane.root_foreground = pane.local_root_foreground
 	workspace_reset_view_state(pane)
-	x11.set_title(workspace.root, current_window_title(&pane.terminal, workspace.settings.title))
+	x11.set_title(workspace.root, current_window_title(&pane.terminal, workspace.title))
 }
 
 workspace_tmux_reset_display :: proc(workspace: ^Workspace, pane: ^Pane) -> bool {

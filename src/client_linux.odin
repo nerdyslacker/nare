@@ -4,7 +4,9 @@ package main
 
 import "core:fmt"
 import "core:os"
+import "core:strings"
 import "core:sys/posix"
+import config "config"
 import ipc "ipc"
 
 client_connect :: proc(socket_path: string) -> (posix.FD, ipc.Socket_Error) {
@@ -16,7 +18,30 @@ client_connect :: proc(socket_path: string) -> (posix.FD, ipc.Socket_Error) {
 	return ipc.connect_socket(path)
 }
 
-client_run :: proc(command: []cstring, working_directory, socket_path: string, wait: bool) -> int {
+client_apply_overrides :: proc(request: ^ipc.Create_Request, settings: ^config.Settings, arguments: []string) {
+	for argument in arguments {
+		if argument == "-e" do break
+		if strings.has_prefix(argument, "--font-size=") {
+			request.override_font_size = true
+			request.font_size = u16(settings.font_size)
+		} else if strings.has_prefix(argument, "--renderer=") {
+			request.override_renderer = true
+			switch settings.renderer {
+			case .CPU: request.renderer = .CPU
+			case .GPU: request.renderer = .GPU
+			case .Auto: request.renderer = .Auto
+			}
+		} else if strings.has_prefix(argument, "--ligatures=") {
+			request.override_ligatures = true
+			request.ligatures = settings.ligatures
+		} else if strings.has_prefix(argument, "--title=") {
+			request.override_title = true
+			request.title = settings.title
+		}
+	}
+}
+
+client_run :: proc(command: []cstring, settings: ^config.Settings, arguments: []string, socket_path: string, wait: bool) -> int {
 	fd, connect_error := client_connect(socket_path)
 	if connect_error != .None {
 		fmt.eprintf("could not connect to server: %v\n", connect_error)
@@ -25,7 +50,7 @@ client_run :: proc(command: []cstring, working_directory, socket_path: string, w
 	connection: ipc.Connection
 	ipc.connection_init(&connection, fd)
 	defer ipc.connection_destroy(&connection)
-	directory := working_directory
+	directory := settings.working_directory
 	if directory == "" {
 		current_directory, directory_error := os.getwd(context.temp_allocator)
 		if directory_error != nil {
@@ -35,6 +60,7 @@ client_run :: proc(command: []cstring, working_directory, socket_path: string, w
 		directory = current_directory
 	}
 	request := ipc.Create_Request{wait = wait, working_directory = directory}
+	client_apply_overrides(&request, settings, arguments)
 	for argument in command {
 		if argument == nil do break
 		append(&request.arguments, string(argument))
