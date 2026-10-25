@@ -122,6 +122,9 @@ Window :: struct {
 	cell_w:    int,
 	cell_h:    int,
 	focused:   bool,
+	mapped:    bool,
+	pending_focus: bool,
+	previous_focus: xlib.Window,
 	mouse_tracking: int,
 	pointer_motion: bool,
 	primary_atom: xlib.Atom,
@@ -139,7 +142,7 @@ Window :: struct {
 	incoming_selection: Incoming_Selection,
 }
 
-open :: proc(title: cstring = "nare") -> (window: Window, err: Error) {
+open :: proc(title: cstring = "nare", mapped: bool = true) -> (window: Window, err: Error) {
 	display := xlib.OpenDisplay(nil)
 	if display == nil do return window, .Open_Display
 	window.display = display
@@ -206,7 +209,10 @@ open :: proc(title: cstring = "nare") -> (window: Window, err: Error) {
 	}
 	set_window_metadata(&window)
 	xlib.StoreName(display, window.id, title)
-	_ = xlib.MapWindow(display, window.id)
+	if mapped {
+		_ = xlib.MapWindow(display, window.id)
+		window.mapped = true
+	}
 	_ = xlib.Flush(display)
 	return window, .None
 }
@@ -246,6 +252,19 @@ next_event :: proc(window: ^Window) -> (result: Event, available: bool) {
 	#partial switch event.type {
 	case .ClientMessage:
 		if xlib.Atom(event.xclient.data.l[0]) == window.wm_delete do result.kind = .Close
+	case .MapNotify:
+		if event.xmap.window == window.id {
+			window.mapped = true
+			if window.pending_focus {
+				window.pending_focus = false
+				focus_window(window)
+			}
+		}
+	case .UnmapNotify:
+		if event.xunmap.window == window.id {
+			window.mapped = false
+			window.pending_focus = false
+		}
 	case .Expose:
 		if event.xexpose.count == 0 do result.kind = .Redraw
 	case .ConfigureNotify:

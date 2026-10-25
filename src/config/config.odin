@@ -20,6 +20,8 @@ Tab_Edge :: enum { Top, Bottom }
 Tab_Style :: enum { Separator, Hidden }
 Cursor_Shape :: enum { Block, Beam, Underline }
 Tmux_Target :: enum { New_Tab, New_Window }
+Quake_Horizontal_Align :: enum { Left, Center, Right }
+Quake_Animation :: enum { None, Slide, Fade }
 
 Window_Settings :: struct {
 	background_opacity: f32,
@@ -61,6 +63,20 @@ Bindings :: struct {
 	copy, paste, font_increase, font_decrease, font_reset: string,
 	tmux_new_tab, tmux_new_window, tmux_attach_last: string,
 	tmux_detach, tmux_reconnect: string,
+}
+
+Quake_Settings :: struct {
+	enabled: bool,
+	monitor: string,
+	width_percent, height_percent: int,
+	horizontal_align: Quake_Horizontal_Align,
+	x_offset, y_offset: int,
+	hide_on_focus_loss: bool,
+	start_hidden: bool,
+	animation: Quake_Animation,
+	animation_duration_ms: int,
+	keep_above: bool,
+	skip_taskbar: bool,
 }
 
 Tmux_Profile :: struct {
@@ -135,6 +151,7 @@ Settings :: struct {
 	bindings: Bindings,
 	cursor: Cursor_Settings,
 	tmux: Tmux_Settings,
+	quake: Quake_Settings,
 	tmux_profiles: [dynamic]Tmux_Profile,
 	tmux_profile_bindings: [dynamic]Tmux_Profile_Binding,
 }
@@ -215,6 +232,11 @@ settings_init :: proc(settings: ^Settings) {
 	}
 	settings.cursor = {shape = .Block, blink = true, blink_interval_ms = 500, beam_width = 2, underline_height = 2}
 	settings.tmux = {enabled = true, auto_detect = true, default_target = .New_Tab, active_tab_color = 0x13ba19, auto_reconnect = true}
+	settings.quake = {
+		monitor = strings.clone("focused"), width_percent = 100, height_percent = 40,
+		horizontal_align = .Center, animation = .Slide, animation_duration_ms = 140,
+		keep_above = true, skip_taskbar = true,
+	}
 }
 
 settings_destroy :: proc(settings: ^Settings) {
@@ -227,6 +249,7 @@ settings_destroy :: proc(settings: ^Settings) {
 	delete(settings.shell_output_pipe)
 	delete(settings.term)
 	delete(settings.working_directory)
+	delete(settings.quake.monitor)
 	delete(settings.tabs.separator)
 	delete(settings.tabs.title_template)
 	destroy_bindings(&settings.bindings)
@@ -274,7 +297,7 @@ parse :: proc(settings: ^Settings, contents: string) -> Result {
 		if line[0] == '[' {
 			if len(line) < 3 || line[len(line)-1] != ']' do return {error = .Syntax, line = line_number}
 			section = strings.trim_space(line[1:len(line)-1])
-			if section != "main" && section != "scrollback" && section != "url" && section != "shell" && section != "security" && section != "graphics" && section != "window" && section != "tabs" && section != "colors" && section != "bindings" && section != "cursor" && section != "tmux" && !tmux_profile_section(section) {
+			if section != "main" && section != "scrollback" && section != "url" && section != "shell" && section != "security" && section != "graphics" && section != "window" && section != "tabs" && section != "colors" && section != "bindings" && section != "cursor" && section != "tmux" && section != "quake" && !tmux_profile_section(section) {
 				return {error = .Unknown_Section, line = line_number}
 			}
 			if tmux_profile_section(section) {
@@ -585,6 +608,58 @@ apply :: proc(settings: ^Settings, section, key, value: string) -> Error {
 			settings.cursor.underline_height = parsed
 		case: return .Unknown_Key
 		}
+	} else if section == "quake" {
+		switch key {
+		case "enabled":
+			parsed, ok := parse_bool(value); if !ok do return .Invalid_Value
+			settings.quake.enabled = parsed
+		case "monitor":
+			if !valid_quake_monitor(value) do return .Invalid_Value
+			replace_string(&settings.quake.monitor, value)
+		case "position": if value != "top" do return .Invalid_Value
+		case "width-percent":
+			parsed, ok := strconv.parse_int(value); if !ok || parsed < 10 || parsed > 100 do return .Invalid_Value
+			settings.quake.width_percent = parsed
+		case "height-percent":
+			parsed, ok := strconv.parse_int(value); if !ok || parsed < 10 || parsed > 100 do return .Invalid_Value
+			settings.quake.height_percent = parsed
+		case "horizontal-align":
+			switch value {
+			case "left": settings.quake.horizontal_align = .Left
+			case "center": settings.quake.horizontal_align = .Center
+			case "right": settings.quake.horizontal_align = .Right
+			case: return .Invalid_Value
+			}
+		case "x-offset":
+			parsed, ok := strconv.parse_int(value); if !ok || parsed < -10000 || parsed > 10000 do return .Invalid_Value
+			settings.quake.x_offset = parsed
+		case "y-offset":
+			parsed, ok := strconv.parse_int(value); if !ok || parsed < -10000 || parsed > 10000 do return .Invalid_Value
+			settings.quake.y_offset = parsed
+		case "hide-on-focus-loss":
+			parsed, ok := parse_bool(value); if !ok do return .Invalid_Value
+			settings.quake.hide_on_focus_loss = parsed
+		case "start-hidden":
+			parsed, ok := parse_bool(value); if !ok do return .Invalid_Value
+			settings.quake.start_hidden = parsed
+		case "animation":
+			switch value {
+			case "none": settings.quake.animation = .None
+			case "slide": settings.quake.animation = .Slide
+			case "fade": settings.quake.animation = .Fade
+			case: return .Invalid_Value
+			}
+		case "animation-duration-ms":
+			parsed, ok := strconv.parse_int(value); if !ok || parsed < 0 || parsed > 2000 do return .Invalid_Value
+			settings.quake.animation_duration_ms = parsed
+		case "keep-above":
+			parsed, ok := parse_bool(value); if !ok do return .Invalid_Value
+			settings.quake.keep_above = parsed
+		case "skip-taskbar":
+			parsed, ok := parse_bool(value); if !ok do return .Invalid_Value
+			settings.quake.skip_taskbar = parsed
+		case: return .Unknown_Key
+		}
 	} else if section == "tmux" {
 		switch key {
 		case "enabled":
@@ -657,6 +732,19 @@ destroy_bindings :: proc(bindings: ^Bindings) {
 	delete(bindings.tmux_new_tab); delete(bindings.tmux_new_window); delete(bindings.tmux_attach_last)
 	delete(bindings.tmux_detach); delete(bindings.tmux_reconnect)
 	bindings^ = {}
+}
+
+valid_quake_monitor :: proc(value: string) -> bool {
+	if value == "focused" || value == "primary" do return true
+	if value == "" || len(value) > 128 do return false
+	for character in value {
+		if (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') ||
+		   (character >= '0' && character <= '9') || character == '-' || character == '_' || character == '.' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 tmux_profile :: proc(settings: ^Settings, name: string) -> ^Tmux_Profile {

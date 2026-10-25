@@ -50,6 +50,32 @@ set_decorations :: proc(window: ^Window, enabled: bool) {
 	)
 }
 
+set_quake_hints :: proc(window: ^Window, keep_above, skip_taskbar: bool) {
+	attributes := xlib.XSetWindowAttributes{override_redirect = true}
+	xlib.ChangeWindowAttributes(window.display, window.id, {.CWOverrideRedirect}, &attributes)
+	set_decorations(window, false)
+	type_atom := xlib.InternAtom(window.display, "_NET_WM_WINDOW_TYPE", false)
+	utility_atom := xlib.InternAtom(window.display, "_NET_WM_WINDOW_TYPE_UTILITY", false)
+	state_atom := xlib.InternAtom(window.display, "_NET_WM_STATE", false)
+	above_atom := xlib.InternAtom(window.display, "_NET_WM_STATE_ABOVE", false)
+	skip_taskbar_atom := xlib.InternAtom(window.display, "_NET_WM_STATE_SKIP_TASKBAR", false)
+	skip_pager_atom := xlib.InternAtom(window.display, "_NET_WM_STATE_SKIP_PAGER", false)
+	if type_atom != 0 && utility_atom != 0 {
+		values := [1]xlib.Atom{utility_atom}
+		_ = xlib.ChangeProperty(window.display, window.id, type_atom, xlib.XA_ATOM, 32, xlib.PropModeReplace, raw_data(values[:]), 1)
+	}
+	states: [3]xlib.Atom
+	count := 0
+	if keep_above && above_atom != 0 { states[count] = above_atom; count += 1 }
+	if skip_taskbar && skip_taskbar_atom != 0 { states[count] = skip_taskbar_atom; count += 1 }
+	if skip_taskbar && skip_pager_atom != 0 { states[count] = skip_pager_atom; count += 1 }
+	if state_atom != 0 {
+		_ = xlib.ChangeProperty(window.display, window.id, state_atom, xlib.XA_ATOM, 32, xlib.PropModeReplace, raw_data(states[:]), i32(count))
+	}
+	class_hint := xlib.XClassHint{res_name = "nare-quake", res_class = "nare"}
+	xlib.SetClassHint(window.display, window.id, &class_hint)
+}
+
 window_icon_data :: proc(image: ^graphics.Decoded_Image, size: int) -> []uint {
 	if image == nil || image.width <= 0 || image.height <= 0 || size <= 0 || size > 256 do return nil
 	channels := graphics.bytes_per_pixel(image.format)

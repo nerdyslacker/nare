@@ -10,6 +10,7 @@ import features "features"
 import fonts "font"
 import keyboard "input"
 import pty "pty"
+import quake "quake"
 import drawing "render"
 import selection "selection"
 import tmux "tmux"
@@ -103,6 +104,7 @@ Workspace :: struct {
 	renderer: drawing.Kind,
 	ligatures: bool,
 	title: string,
+	quake: ^quake.Controller,
 }
 
 Workspace_Overrides :: struct {
@@ -180,18 +182,21 @@ PRIVILEGE_CHECK_INTERVAL :: 250*time.Millisecond
 TMUX_RECONCILE_INTERVAL :: 2*time.Second
 TMUX_MAX_RECONNECT_ATTEMPTS :: 8
 
-workspace_run :: proc(root: ^x11.Window, command: []cstring, settings: ^config.Settings) -> int {
+workspace_run :: proc(root: ^x11.Window, command: []cstring, settings: ^config.Settings, quake_controller: ^quake.Controller = nil) -> int {
 	workspace: Workspace
 	if !workspace_init(&workspace, root, command, settings) {
 		fmt.eprintln("could not create terminal session")
 		return 1
 	}
+	workspace.quake = quake_controller
 	defer workspace_destroy(&workspace)
 	for workspace_service(&workspace) {
 		fds: [dynamic]posix.pollfd
 		targets: [dynamic]Workspace_Poll_Target
 		workspace_append_poll(&workspace, &fds, &targets)
-		if posix.poll(raw_data(fds), u64(len(fds)), 50) < 0 {
+		poll_timeout := 50
+		if workspace.quake != nil do poll_timeout = quake.poll_timeout_ms(workspace.quake, poll_timeout)
+		if posix.poll(raw_data(fds), u64(len(fds)), i32(poll_timeout)) < 0 {
 			delete(fds)
 			delete(targets)
 			if posix.errno() == .EINTR do continue
@@ -254,6 +259,7 @@ workspace_init :: proc(
 
 workspace_service :: proc(workspace: ^Workspace) -> bool {
 	if workspace == nil || len(workspace.tabs) == 0 do return false
+	if workspace.quake != nil && !quake.service(workspace.quake) do return false
 	for tab in workspace.tabs {
 		for pane in tab.panes {
 			if pane.visible do x11.set_mouse_tracking(&pane.surface, pane.terminal.modes.mouse_tracking, workspace.settings.scrollbar_enabled)
@@ -283,6 +289,10 @@ workspace_append_poll :: proc(
 ) {
 	append(fds, {fd = posix.FD(x11.connection_fd(workspace.root)), events = {.IN}})
 	append(targets, {workspace = workspace})
+	if workspace.quake != nil && quake.poll_fd(workspace.quake) >= 0 {
+		append(fds, {fd = quake.poll_fd(workspace.quake), events = {.IN}})
+		append(targets, {workspace = workspace})
+	}
 	for tab in workspace.tabs {
 		for pane in tab.panes {
 			if pane.exited || pane.tmux_disconnected || pane.tmux_owner != nil do continue
@@ -864,6 +874,7 @@ workspace_event :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
 			process_osc52_actions(workspace.root, &pane.terminal, &pane.osc52)
 		}
 	case .Focus:
+		if workspace.quake != nil do quake.note_focus(workspace.quake, event.focused)
 		pane := workspace_find_pane(workspace, event.source)
 		if pane == nil && event.source == workspace.root.id do pane = workspace_active_pane(workspace)
 		if pane != nil && pane.terminal.modes.focus_reporting {

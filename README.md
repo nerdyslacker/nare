@@ -27,18 +27,19 @@
 - OSC 0/2/7/8/52/133 and XTGETTCAP support, including prompt navigation and command-output copy or piping.
 - Runtime configuration, bounded image and transfer resources, and bundled terminfo.
 - Optional local server/client mode with isolated windows, bounded authenticated IPC, and waiting or detached client launches.
+- Optional X11 drop-down mode with monitor-relative geometry and same-user command forwarding.
 
 ## Dependencies
 
 Void Linux and LazyLinux use the same XBPS packages:
 
 ```sh
-sudo xbps-install -S base-devel libX11-devel fontconfig-devel freetype-devel harfbuzz-devel libglvnd-devel ncurses
+sudo xbps-install -S base-devel libX11-devel libXrandr-devel fontconfig-devel freetype-devel harfbuzz-devel libglvnd-devel ncurses
 ```
 
 Install Odin `dev-2026-10` separately and make sure `odin` is in `PATH`.
 
-The binary requires `libX11 fontconfig freetype libharfbuzz libglvnd`. A usable font is required (`dejavu-fonts-ttf` is a small default), and `xdg-utils` enables the default URL opener.
+The binary requires `libX11 libXrandr fontconfig freetype libharfbuzz libglvnd`. A usable font is required (`dejavu-fonts-ttf` is a small default), and `xdg-utils` enables the default URL opener.
 
 Build and run:
 
@@ -73,4 +74,19 @@ An explicitly launched server stays alive when its last window closes. Stop it w
 
 The server's configuration supplies window defaults. Clients may explicitly override font size, renderer, ligatures, and title with their normal command-line flags; other appearance settings remain server-owned. Panes and simultaneous server windows at the same font size share font faces, shaping resources, and the bounded glyph cache, while each pane keeps independent CPU/GPU and X11 renderer state.
 
-In the recorded CPU benchmark, server mode used 22.7% less proportional memory at two windows, 37.6% less at five, and 41.9% less at ten. Concurrent batch creation was slower because one server initializes windows serially, so server mode remains an opt-in memory-oriented tradeoff rather than the default.
+## Quake mode
+
+Quake mode is a special top-level window around the normal nare workspace. Hiding it does not close PTYs, discard tabs or scrollback, or detach native tmux control-mode sessions.
+
+```sh
+nare --quake          # toggle an existing instance, or start one visible
+```
+
+The private Unix socket is scoped to the current UID and `DISPLAY`, uses peer-credential checks, and exists only while the quake GUI runs. Configuration lives under `[quake]` in `nare.conf`. `monitor` accepts `focused`, `primary`, or an XRandR output name; a missing output falls back to the primary output and then the first connected output. Geometry is intersected with `_NET_WORKAREA`, clamped to the selected monitor, and refreshed after output changes.
+
+Nare does not install a focused-window Quake binding. For a global X11 shortcut, use an external hotkey daemon such as sxhkd:
+
+```text
+alt + grave
+    nare --quake
+```

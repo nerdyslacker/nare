@@ -8,6 +8,7 @@ import config "config"
 import features "features"
 import keyboard "input"
 import pty "pty"
+import quake "quake"
 import drawing "render"
 import selection "selection"
 import vt "vt"
@@ -22,6 +23,8 @@ Launch_Options :: struct {
 	wait: bool,
 	socket_path: string,
 	arguments: [dynamic]string,
+	quake_requested: bool,
+	quake_command: quake.Command,
 }
 
 main :: proc() {
@@ -46,10 +49,14 @@ app_main :: proc() -> int {
 	defer command_destroy(&command)
 	if launch.mode == .Server do return server_run(&options, launch.socket_path)
 	if launch.mode == .Client do return client_run(command[:], &options, launch.arguments[:], launch.socket_path, launch.wait)
+	quake_mode := launch.quake_requested || options.quake.enabled
+	quake_command := quake.Command.Show
+	if launch.quake_requested do quake_command = launch.quake_command
+	if quake_mode && quake.send_command(quake_command) do return 0
 
 	title := strings.clone_to_cstring(options.title)
 	defer delete(title)
-	window, window_err := x11.open(title)
+	window, window_err := x11.open(title, !quake_mode)
 	if window_err != .None {
 		fmt.eprintln(x11.error_string(window_err))
 		return 1
@@ -58,7 +65,40 @@ app_main :: proc() -> int {
 	x11.set_opacity(&window, options.window.background_opacity)
 	x11.set_decorations(&window, options.window.decorations)
 	drawing.set_theme(options.theme)
-	return workspace_run(&window, command[:], &options)
+	if !quake_mode do return workspace_run(&window, command[:], &options)
+	x11.set_quake_hints(&window, options.quake.keep_above, options.quake.skip_taskbar)
+	align: quake.Horizontal_Align
+	switch options.quake.horizontal_align {
+	case .Left: align = .Left
+	case .Center: align = .Center
+	case .Right: align = .Right
+	}
+	animation: quake.Animation
+	switch options.quake.animation {
+	case .None: animation = .None
+	case .Slide: animation = .Slide
+	case .Fade: animation = .Fade
+	}
+	controller: quake.Controller
+	quake_options := quake.Options{
+		monitor = options.quake.monitor,
+		width_percent = options.quake.width_percent,
+		height_percent = options.quake.height_percent,
+		horizontal_align = align,
+		x_offset = options.quake.x_offset,
+		y_offset = options.quake.y_offset,
+		hide_on_focus_loss = options.quake.hide_on_focus_loss,
+		animation = animation,
+		animation_duration_ms = options.quake.animation_duration_ms,
+	}
+	visible := !options.quake.start_hidden || launch.quake_requested
+	if open_error := quake.open(&controller, &window, quake_options, visible); open_error != .None {
+		if quake.send_command(quake_command) do return 0
+		fmt.eprintln("could not create quake command endpoint")
+		return 1
+	}
+	defer quake.close(&controller)
+	return workspace_run(&window, command[:], &options, &controller)
 }
 
 launch_options :: proc(args: []string) -> (options: Launch_Options, err: string) {
@@ -76,6 +116,10 @@ launch_options :: proc(args: []string) -> (options: Launch_Options, err: string)
 		case "--client":
 			if options.mode == .Server do return options, strings.clone(usage())
 			options.mode = .Client
+		case "--quake":
+			if options.quake_requested do return options, strings.clone(usage())
+			options.quake_requested = true
+			options.quake_command = .Toggle
 		case "--no-wait":
 			options.wait = false
 		case "--server-socket":
@@ -93,6 +137,7 @@ launch_options :: proc(args: []string) -> (options: Launch_Options, err: string)
 	}
 	if options.mode != .Client && !options.wait do return options, strings.clone(usage())
 	if options.mode == .Standalone && options.socket_path != "" do return options, strings.clone(usage())
+	if options.quake_requested && options.mode != .Standalone do return options, strings.clone(usage())
 	return options, ""
 }
 
@@ -275,7 +320,7 @@ apply_argument :: proc(options: ^config.Settings, argument: string) -> config.Er
 }
 
 usage :: proc() -> string {
-	return "usage: nare [--server|--client [--no-wait]] [--server-socket=PATH] [DIRECTORY|--working-directory=PATH] [--config=PATH|--no-config] [--renderer=cpu|gpu|auto] [--font=FAMILY] [--font-size=PIXELS] [--ligatures=true|false] [--title=TITLE] [--scrollback-lines=COUNT] [--url-opener=COMMAND] [--output-pipe=COMMAND] [--term=NAME] [--osc52=disabled|copy-enabled|paste-enabled|enabled] [--tmux [SESSION]|--tmux-profile=NAME] [--ssh=HOST] [--session=NAME] [--new-tab|--new-window] [-e COMMAND [ARG...]]"
+	return "usage: nare [--quake] [--server|--client [--no-wait]] [--server-socket=PATH] [DIRECTORY|--working-directory=PATH] [--config=PATH|--no-config] [--renderer=cpu|gpu|auto] [--font=FAMILY] [--font-size=PIXELS] [--ligatures=true|false] [--title=TITLE] [--scrollback-lines=COUNT] [--url-opener=COMMAND] [--output-pipe=COMMAND] [--term=NAME] [--osc52=disabled|copy-enabled|paste-enabled|enabled] [--tmux [SESSION]|--tmux-profile=NAME] [--ssh=HOST] [--session=NAME] [--new-tab|--new-window] [-e COMMAND [ARG...]]"
 }
 
 OSC52_Request :: struct {
