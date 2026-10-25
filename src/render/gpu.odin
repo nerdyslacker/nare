@@ -17,6 +17,16 @@ Image_Texture :: struct {
 	last_used: u64,
 }
 
+GPU_Image_Stats :: struct {
+	texture_lookups: u64,
+	cache_hits: u64,
+	uploads: u64,
+	uploaded_bytes: u64,
+	evictions: u64,
+	releases: u64,
+	draws: u64,
+}
+
 GPU :: struct {
 	ctx: rawptr,
 	surface_texture: u32,
@@ -31,6 +41,15 @@ GPU :: struct {
 	image_texture_bytes: int,
 	image_texture_budget: int,
 	image_texture_clock: u64,
+	image_stats: GPU_Image_Stats,
+}
+
+gpu_image_stats :: proc(gpu: ^GPU) -> GPU_Image_Stats {
+	return gpu.image_stats if gpu != nil else GPU_Image_Stats{}
+}
+
+gpu_reset_image_stats :: proc(gpu: ^GPU) {
+	if gpu != nil do gpu.image_stats = {}
 }
 
 when GPU_ENABLED {
@@ -365,6 +384,7 @@ when GPU_ENABLED {
 		for index := len(gpu.image_textures)-1; index >= 0; index -= 1 {
 			if registry == nil || graphics.find_image(registry, gpu.image_textures[index].image_id) == nil {
 				gpu_remove_image_texture(gpu, index)
+				gpu.image_stats.releases += 1
 			}
 		}
 		if registry == nil do return true
@@ -372,8 +392,10 @@ when GPU_ENABLED {
 			if command.kind != .Image do continue
 			resource := graphics.find_image(registry, command.image_id)
 			if resource == nil do continue
+			gpu.image_stats.texture_lookups += 1
 			entry := gpu_find_image_texture(gpu, resource.id)
 			if entry != nil {
+				gpu.image_stats.cache_hits += 1
 				gpu_touch_image_texture(gpu, entry)
 				continue
 			}
@@ -391,6 +413,7 @@ when GPU_ENABLED {
 			oldest := image_texture_eviction_index(gpu.image_textures[:])
 			if oldest < 0 do return false
 			gpu_remove_image_texture(gpu, oldest)
+			gpu.image_stats.evictions += 1
 		}
 
 		texture: u32
@@ -430,6 +453,8 @@ when GPU_ENABLED {
 			last_used = gpu.image_texture_clock,
 		})
 		gpu.image_texture_bytes += byte_count
+		gpu.image_stats.uploads += 1
+		gpu.image_stats.uploaded_bytes += u64(byte_count)
 		return true
 	}
 
@@ -522,6 +547,7 @@ when GPU_ENABLED {
 				top := max(0, max(command.clip_top, command.y))
 				bottom := min(gpu.height, min(command.clip_bottom, command.y+command.height))
 				if left >= right || top >= bottom do continue
+				gpu.image_stats.draws += 1
 				u0, v0, u1, v1 := image_texture_coordinates(command, resource.width, resource.height, left, top, right, bottom)
 				BindTexture(GL_TEXTURE_2D, entry.texture)
 				Enable(GL_TEXTURE_2D)

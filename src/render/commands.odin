@@ -7,6 +7,7 @@ import vt "../vt"
 import x11 "../x11"
 
 Command_Kind :: enum { Rectangle, Image, Glyph }
+Image_Layer :: enum { Below_Background, Below_Text, Above_Text }
 
 Command :: struct {
 	kind: Command_Kind,
@@ -38,15 +39,21 @@ build_row_commands :: proc(
 	clear(output)
 	y := row * window.cell_h
 	for column in 0..<screen.columns {
+		append_rectangle(output, column*window.cell_w, y, window.cell_w, window.cell_h, active_theme.background)
+	}
+	append_image_commands(output, window, screen, row, .Below_Background)
+	for column in 0..<screen.columns {
 		cell := vt.cell_at(screen, row, column)
 		_, background := display_colors(
 			cell,
 			selection.contains(selection_state, screen, row, column),
 			block_cursor(terminal, screen, row, column),
 		)
-		append_rectangle(output, column*window.cell_w, y, window.cell_w, window.cell_h, background)
+		if background != active_theme.background {
+			append_rectangle(output, column*window.cell_w, y, window.cell_w, window.cell_h, background)
+		}
 	}
-	append_image_commands(output, window, screen, row, false)
+	append_image_commands(output, window, screen, row, .Below_Text)
 	for column in 0..<screen.columns {
 		cell := vt.cell_at(screen, row, column)
 		foreground, _ := display_colors(
@@ -123,7 +130,7 @@ build_row_commands :: proc(
 		delete(clusters)
 		delete(text)
 	}
-	append_image_commands(output, window, screen, row, true)
+	append_image_commands(output, window, screen, row, .Above_Text)
 	append_cursor_commands(output, window, terminal, screen, row)
 	append_scrollbar_commands(output, window, screen, row, scrollbar)
 }
@@ -133,13 +140,13 @@ append_image_commands :: proc(
 	window: ^x11.Window,
 	screen: ^vt.Screen,
 	row: int,
-	above_text: bool,
+	layer: Image_Layer,
 ) {
 	if screen.image_registry == nil do return
 	start := len(output^)
 	row_top, row_bottom := row*window.cell_h, (row+1)*window.cell_h
 	for placement in screen.image_registry.placements {
-		if placement.screen != screen.image_screen || (placement.z >= 0) != above_text do continue
+		if placement.screen != screen.image_screen || image_placement_layer(screen.image_registry, placement) != layer do continue
 		x, y, width, height := image_destination(
 			placement,
 			window.cell_w,
@@ -175,6 +182,15 @@ append_image_commands :: proc(
 		}
 		output^[position] = current
 	}
+}
+
+image_placement_layer :: proc(registry: ^graphics.Registry, placement: graphics.Placement) -> Image_Layer {
+	resource := graphics.find_image(registry, placement.image_id)
+	if resource != nil && resource.protocol == .Kitty && placement.z < graphics.KITTY_BACKGROUND_Z_THRESHOLD {
+		return .Below_Background
+	}
+	if placement.z < 0 do return .Below_Text
+	return .Above_Text
 }
 
 image_destination :: proc(
