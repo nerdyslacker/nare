@@ -92,6 +92,7 @@ Workspace :: struct {
 	last_click_tab: int,
 	last_cursor_toggle: time.Time,
 	last_privilege_check: time.Time,
+	scroll_redraw_source: xlib.Window,
 }
 
 PRIVILEGE_CHECK_INTERVAL :: 250*time.Millisecond
@@ -128,6 +129,12 @@ workspace_run :: proc(root: ^x11.Window, command: []cstring, settings: ^config.S
 			event, available := x11.next_event(root)
 			if !available do break
 			if !workspace_event(&workspace, event) do return 0
+		}
+		if workspace.scroll_redraw_source != 0 {
+			if pane := workspace_find_pane(&workspace, workspace.scroll_redraw_source); pane != nil && pane.visible {
+				workspace_redraw(&workspace, pane, true)
+			}
+			workspace.scroll_redraw_source = 0
 		}
 		workspace_reap(&workspace)
 		workspace_tmux_reconnect_tick(&workspace)
@@ -670,8 +677,12 @@ workspace_event :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
 		if local_mouse && (mouse.button == 4 || mouse.button == 5) {
 			if mouse.action == .Press {
 				direction := 1 if mouse.button == 4 else -1
+				previous_offset := pane.scrollback_state.offset
 				features.scrollback_scroll(&pane.scrollback_state, vt.terminal_screen(&pane.terminal), direction)
-				workspace_redraw(workspace, pane, true)
+				if pane.scrollback_state.offset != previous_offset {
+					selection.clear(&pane.selection_state)
+					workspace.scroll_redraw_source = pane.surface.id
+				}
 			}
 			return true
 		}
@@ -1125,13 +1136,16 @@ workspace_focus_pane :: proc(workspace: ^Workspace, pane: ^Pane) {
 	found := false
 	for candidate, index in tab.panes do if candidate == pane {tab.active = index; found = true; break}
 	if !found do return
-	pane.terminal.cursor_phase_visible = true
-	workspace.last_cursor_toggle = time.now()
-	if tab.active != previous && tab_is_tmux(tab) && tmux.session_ready(&tab.tmux_owner.tmux_session) {
-		tmux.request_select_pane(&tab.tmux_owner.tmux_session, &tab.tmux_owner.pending, pane.tmux_pane_id)
+	changed := tab.active != previous
+	if changed {
+		pane.terminal.cursor_phase_visible = true
+		workspace.last_cursor_toggle = time.now()
+		if tab_is_tmux(tab) && tmux.session_ready(&tab.tmux_owner.tmux_session) {
+			tmux.request_select_pane(&tab.tmux_owner.tmux_session, &tab.tmux_owner.pending, pane.tmux_pane_id)
+		}
 	}
 	x11.focus_window(workspace.root)
-	workspace_layout(workspace)
+	if changed do workspace_layout(workspace)
 }
 
 workspace_close_pane :: proc(workspace: ^Workspace) {
