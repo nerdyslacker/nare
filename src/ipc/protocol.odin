@@ -8,6 +8,8 @@ HEADER_SIZE :: 16
 MAX_PAYLOAD_BYTES :: 128 * 1024
 MAX_ARGUMENTS :: 256
 MAX_STRING_BYTES :: 32 * 1024
+MAX_ERROR_MESSAGE_BYTES :: 1024
+MAX_FRAMES_PER_FEED :: 256
 
 Kind :: enum u16 {
 	Create = 1,
@@ -24,6 +26,18 @@ Error :: enum {
 	Malformed,
 	Unsupported_Version,
 	Unsupported_Kind,
+}
+
+Remote_Error_Code :: enum u16 {
+	Invalid_Request = 1,
+	Launch_Failed,
+	Server_Busy,
+	Internal,
+}
+
+Remote_Error :: struct {
+	code: Remote_Error_Code,
+	message: string,
 }
 
 Frame :: struct {
@@ -65,12 +79,22 @@ create_request_destroy :: proc(request: ^Create_Request) {
 	request^ = {}
 }
 
+remote_error_destroy :: proc(remote_error: ^Remote_Error) {
+	delete(remote_error.message)
+	remote_error^ = {}
+}
+
 append_u16 :: proc(output: ^[dynamic]byte, value: u16) {
 	append(output, byte(value), byte(value >> 8))
 }
 
 append_u32 :: proc(output: ^[dynamic]byte, value: u32) {
 	append(output, byte(value), byte(value >> 8), byte(value >> 16), byte(value >> 24))
+}
+
+append_u64 :: proc(output: ^[dynamic]byte, value: u64) {
+	append_u32(output, u32(value))
+	append_u32(output, u32(value >> 32))
 }
 
 read_u16 :: proc(data: []byte, offset: int) -> (u16, bool) {
@@ -84,6 +108,12 @@ read_u32 :: proc(data: []byte, offset: int) -> (u32, bool) {
 	       u32(data[offset+1]) << 8 |
 	       u32(data[offset+2]) << 16 |
 	       u32(data[offset+3]) << 24, true
+}
+
+read_u64 :: proc(data: []byte, offset: int) -> (u64, bool) {
+	low, low_ok := read_u32(data, offset)
+	high, high_ok := read_u32(data, offset+4)
+	return u64(low) | u64(high) << 32, low_ok && high_ok
 }
 
 valid_kind :: proc(value: u16) -> (Kind, bool) {
@@ -109,11 +139,82 @@ append_frame :: proc(output: ^[dynamic]byte, kind: Kind, request_id: u32, payloa
 	return .None
 }
 
+append_created :: proc(output: ^[dynamic]byte, request_id: u32, session_id: u64) -> Error {
+	payload: [8]byte
+	encoded: [dynamic]byte
+	defer delete(encoded)
+	append_u64(&encoded, session_id)
+	copy(payload[:], encoded[:])
+	return append_frame(output, .Created, request_id, payload[:])
+}
+
+decode_created :: proc(frame: ^Frame) -> (u64, Error) {
+	if frame.kind != .Created || len(frame.payload) != 8 do return 0, .Malformed
+	session_id, ok := read_u64(frame.payload[:], 0)
+	if !ok || session_id == 0 do return 0, .Malformed
+	return session_id, .None
+}
+
+append_exit :: proc(output: ^[dynamic]byte, request_id: u32, status: i32) -> Error {
+	payload: [dynamic]byte
+	defer delete(payload)
+	append_u32(&payload, cast(u32)status)
+	return append_frame(output, .Exit, request_id, payload[:])
+}
+
+decode_exit :: proc(frame: ^Frame) -> (i32, Error) {
+	if frame.kind != .Exit || len(frame.payload) != 4 do return 0, .Malformed
+	status, ok := read_u32(frame.payload[:], 0)
+	if !ok do return 0, .Malformed
+	return cast(i32)status, .None
+}
+
+valid_remote_error_code :: proc(value: u16) -> (Remote_Error_Code, bool) {
+	switch value {
+	case u16(Remote_Error_Code.Invalid_Request): return .Invalid_Request, true
+	case u16(Remote_Error_Code.Launch_Failed): return .Launch_Failed, true
+	case u16(Remote_Error_Code.Server_Busy): return .Server_Busy, true
+	case u16(Remote_Error_Code.Internal): return .Internal, true
+	}
+	return {}, false
+}
+
+append_error :: proc(
+	output: ^[dynamic]byte,
+	request_id: u32,
+	code: Remote_Error_Code,
+	message: string,
+) -> Error {
+	if len(message) == 0 || len(message) > MAX_ERROR_MESSAGE_BYTES || contains_nul(message) do return .Limit
+	payload: [dynamic]byte
+	defer delete(payload)
+	append_u16(&payload, u16(code))
+	append_u16(&payload, u16(len(message)))
+	append(&payload, message)
+	return append_frame(output, .Error, request_id, payload[:])
+}
+
+decode_error :: proc(frame: ^Frame, remote_error: ^Remote_Error) -> Error {
+	if frame.kind != .Error || len(frame.payload) < 4 do return .Malformed
+	code_value, code_ok := read_u16(frame.payload[:], 0)
+	message_size, size_ok := read_u16(frame.payload[:], 2)
+	code, supported := valid_remote_error_code(code_value)
+	if !code_ok || !size_ok || !supported || message_size == 0 || message_size > MAX_ERROR_MESSAGE_BYTES ||
+	   int(message_size) != len(frame.payload)-4 {
+		return .Malformed
+	}
+	message := string(frame.payload[4:])
+	if contains_nul(message) do return .Malformed
+	remote_error^ = {code = code, message = strings.clone(message)}
+	return .None
+}
+
 decoder_feed :: proc(decoder: ^Decoder, data: []byte, frames: ^[dynamic]Frame) -> Error {
 	if len(data) > HEADER_SIZE+MAX_PAYLOAD_BYTES || len(decoder.buffer) > HEADER_SIZE+MAX_PAYLOAD_BYTES-len(data) {
 		return .Limit
 	}
 	append(&decoder.buffer, ..data)
+	initial_count := len(frames^)
 	for len(decoder.buffer) >= HEADER_SIZE {
 		if decoder.buffer[0] != 'N' || decoder.buffer[1] != 'A' ||
 		   decoder.buffer[2] != 'R' || decoder.buffer[3] != 'E' {
@@ -143,6 +244,7 @@ decoder_feed :: proc(decoder: ^Decoder, data: []byte, frames: ^[dynamic]Frame) -
 		}
 		total_size := HEADER_SIZE+int(payload_size)
 		if len(decoder.buffer) < total_size do break
+		if len(frames^)-initial_count >= MAX_FRAMES_PER_FEED do return .Limit
 		frame := Frame{kind = kind, request_id = request_id}
 		append(&frame.payload, ..decoder.buffer[HEADER_SIZE:total_size])
 		append(frames, frame)

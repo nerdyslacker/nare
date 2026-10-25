@@ -3,14 +3,19 @@
 package ipc
 
 import "core:c"
+import "core:fmt"
 import "core:strings"
 import "core:sys/posix"
 
 Socket_Error :: enum {
 	None,
 	Invalid_Path,
+	Runtime_Directory,
 	Create,
 	Bind,
+	In_Use,
+	Unsafe_Existing_Path,
+	Stale_Cleanup,
 	Permissions,
 	Listen,
 	Connect,
@@ -30,6 +35,35 @@ Peer_Credentials :: struct {
 	pid: posix.pid_t,
 	uid: posix.uid_t,
 	gid: posix.gid_t,
+}
+
+private_mode :: proc(mode: posix.mode_t) -> bool {
+	public_bits := posix.mode_t{.IRGRP, .IWGRP, .IXGRP, .IROTH, .IWOTH, .IXOTH}
+	return mode & public_bits == {}
+}
+
+runtime_socket_path :: proc(runtime_directory: string) -> (string, Socket_Error) {
+	if len(runtime_directory) == 0 || runtime_directory[0] != '/' || contains_nul(runtime_directory) {
+		return "", .Runtime_Directory
+	}
+	path := strings.clone_to_cstring(runtime_directory)
+	status: posix.stat_t
+	result := posix.lstat(path, &status)
+	delete(path)
+	if result != .OK || !posix.S_ISDIR(status.st_mode) || status.st_uid != posix.geteuid() ||
+	   !private_mode(status.st_mode) {
+		return "", .Runtime_Directory
+	}
+	separator := ""
+	if runtime_directory[len(runtime_directory)-1] != '/' do separator = "/"
+	socket_path := fmt.aprintf("%s%snare.sock", runtime_directory, separator)
+	address, valid := socket_address(socket_path)
+	_ = address
+	if !valid {
+		delete(socket_path)
+		return "", .Invalid_Path
+	}
+	return socket_path, .None
 }
 
 socket_address :: proc(path: string) -> (posix.sockaddr_un, bool) {
@@ -67,8 +101,48 @@ listener_open :: proc(path: string) -> (Listener, Socket_Error) {
 	bind_result := posix.bind(fd, (^posix.sockaddr)(&address), posix.socklen_t(size_of(address)))
 	_ = posix.umask(old_mask)
 	if bind_result != .OK {
-		_ = posix.close(fd)
-		return {fd = -1}, .Bind
+		bind_errno := posix.errno()
+		if bind_errno != .EADDRINUSE {
+			_ = posix.close(fd)
+			return {fd = -1}, .Bind
+		}
+		probe := posix.socket(.UNIX, .STREAM)
+		if probe < 0 {
+			_ = posix.close(fd)
+			return {fd = -1}, .Create
+		}
+		connect_result := posix.connect(probe, (^posix.sockaddr)(&address), posix.socklen_t(size_of(address)))
+		connect_errno := posix.errno()
+		_ = posix.close(probe)
+		if connect_result == .OK {
+			_ = posix.close(fd)
+			return {fd = -1}, .In_Use
+		}
+		if connect_errno != .ECONNREFUSED {
+			_ = posix.close(fd)
+			return {fd = -1}, .Bind
+		}
+		path_c := strings.clone_to_cstring(path)
+		status: posix.stat_t
+		stat_result := posix.lstat(path_c, &status)
+		if stat_result != .OK || !posix.S_ISSOCK(status.st_mode) || status.st_uid != posix.geteuid() {
+			delete(path_c)
+			_ = posix.close(fd)
+			return {fd = -1}, .Unsafe_Existing_Path
+		}
+		if posix.unlink(path_c) != .OK {
+			delete(path_c)
+			_ = posix.close(fd)
+			return {fd = -1}, .Stale_Cleanup
+		}
+		delete(path_c)
+		old_mask = posix.umask(mask)
+		bind_result = posix.bind(fd, (^posix.sockaddr)(&address), posix.socklen_t(size_of(address)))
+		_ = posix.umask(old_mask)
+		if bind_result != .OK {
+			_ = posix.close(fd)
+			return {fd = -1}, .Bind
+		}
 	}
 	path_c := strings.clone_to_cstring(path)
 	permission_result := posix.chmod(path_c, {.IRUSR, .IWUSR})
@@ -88,6 +162,13 @@ listener_open :: proc(path: string) -> (Listener, Socket_Error) {
 		return {fd = -1}, .Listen
 	}
 	return {fd = fd, path = strings.clone(path)}, .None
+}
+
+listener_open_runtime :: proc(runtime_directory: string) -> (Listener, Socket_Error) {
+	path, path_error := runtime_socket_path(runtime_directory)
+	if path_error != .None do return {fd = -1}, path_error
+	defer delete(path)
+	return listener_open(path)
 }
 
 listener_close :: proc(listener: ^Listener) {
