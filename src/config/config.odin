@@ -22,6 +22,8 @@ Cursor_Shape :: enum { Block, Beam, Underline }
 Tmux_Target :: enum { New_Tab, New_Window }
 Quake_Horizontal_Align :: enum { Left, Center, Right }
 Quake_Animation :: enum { None, Slide, Fade }
+Status_Position :: enum { Top, Bottom }
+Status_Module :: enum { Mode, Session, Size, Tabs, Clock, Battery, Resource }
 
 Window_Settings :: struct {
 	background_opacity: f32,
@@ -63,6 +65,19 @@ Bindings :: struct {
 	copy, paste, font_increase, font_decrease, font_reset: string,
 	tmux_new_tab, tmux_new_window, tmux_attach_last: string,
 	tmux_detach, tmux_reconnect: string,
+	toggle_statusbar: string,
+}
+
+Statusbar_Settings :: struct {
+	enabled: bool,
+	position: Status_Position,
+	height: int,
+	left, center, right: [dynamic]Status_Module,
+	separator: string,
+	show_in_quake: bool,
+	background, foreground, accent: u32,
+	clock_format: string,
+	clock_update_ms, battery_update_ms, resource_update_ms: int,
 }
 
 Quake_Settings :: struct {
@@ -152,6 +167,7 @@ Settings :: struct {
 	cursor: Cursor_Settings,
 	tmux: Tmux_Settings,
 	quake: Quake_Settings,
+	statusbar: Statusbar_Settings,
 	tmux_profiles: [dynamic]Tmux_Profile,
 	tmux_profile_bindings: [dynamic]Tmux_Profile_Binding,
 }
@@ -229,7 +245,16 @@ settings_init :: proc(settings: ^Settings) {
 		tmux_attach_last = strings.clone("alt+control+a"),
 		tmux_detach = strings.clone("alt+control+d"),
 		tmux_reconnect = strings.clone("alt+control+r"),
+		toggle_statusbar = strings.clone("alt+shift+b"),
 	}
+	settings.statusbar = {
+		position = .Bottom, height = 24, separator = strings.clone(" | "), show_in_quake = true,
+		background = 0x071c33, foreground = 0xb9c7da, accent = 0x13ba19,
+		clock_format = strings.clone("%H:%M"), clock_update_ms = 1000,
+		battery_update_ms = 5000, resource_update_ms = 2000,
+	}
+	append(&settings.statusbar.left, .Mode, .Session)
+	append(&settings.statusbar.right, .Resource, .Battery, .Size, .Clock)
 	settings.cursor = {shape = .Block, blink = true, blink_interval_ms = 500, beam_width = 2, underline_height = 2}
 	settings.tmux = {enabled = true, auto_detect = true, default_target = .New_Tab, active_tab_color = 0x13ba19, auto_reconnect = true}
 	settings.quake = {
@@ -252,6 +277,11 @@ settings_destroy :: proc(settings: ^Settings) {
 	delete(settings.quake.monitor)
 	delete(settings.tabs.separator)
 	delete(settings.tabs.title_template)
+	delete(settings.statusbar.left)
+	delete(settings.statusbar.center)
+	delete(settings.statusbar.right)
+	delete(settings.statusbar.separator)
+	delete(settings.statusbar.clock_format)
 	destroy_bindings(&settings.bindings)
 	for &profile in settings.tmux_profiles do destroy_tmux_profile(&profile)
 	delete(settings.tmux_profiles)
@@ -297,7 +327,7 @@ parse :: proc(settings: ^Settings, contents: string) -> Result {
 		if line[0] == '[' {
 			if len(line) < 3 || line[len(line)-1] != ']' do return {error = .Syntax, line = line_number}
 			section = strings.trim_space(line[1:len(line)-1])
-			if section != "main" && section != "scrollback" && section != "url" && section != "shell" && section != "security" && section != "graphics" && section != "window" && section != "tabs" && section != "colors" && section != "bindings" && section != "cursor" && section != "tmux" && section != "quake" && !tmux_profile_section(section) {
+			if section != "main" && section != "scrollback" && section != "url" && section != "shell" && section != "security" && section != "graphics" && section != "window" && section != "tabs" && section != "colors" && section != "bindings" && section != "cursor" && section != "tmux" && section != "quake" && section != "statusbar" && section != "statusbar.clock" && section != "statusbar.battery" && section != "statusbar.resource" && !tmux_profile_section(section) {
 				return {error = .Unknown_Section, line = line_number}
 			}
 			if tmux_profile_section(section) {
@@ -576,11 +606,57 @@ apply :: proc(settings: ^Settings, section, key, value: string) -> Error {
 		case "tmux-attach-last": replace_string(&settings.bindings.tmux_attach_last, value)
 		case "tmux-detach": replace_string(&settings.bindings.tmux_detach, value)
 		case "tmux-reconnect": replace_string(&settings.bindings.tmux_reconnect, value)
+		case "toggle-statusbar": replace_string(&settings.bindings.toggle_statusbar, value)
 		case:
 			if !strings.has_prefix(key, "tmux-profile.") do return .Unknown_Key
 			name := key[len("tmux-profile."):]
 			if !valid_tmux_name(name) || !set_tmux_profile_binding(settings, name, value) do return .Invalid_Value
 		}
+	} else if section == "statusbar" {
+		switch key {
+		case "enabled":
+			parsed, ok := parse_bool(value); if !ok do return .Invalid_Value
+			settings.statusbar.enabled = parsed
+		case "position":
+			switch value {
+			case "top": settings.statusbar.position = .Top
+			case "bottom": settings.statusbar.position = .Bottom
+			case: return .Invalid_Value
+			}
+		case "height":
+			parsed, ok := strconv.parse_int(value); if !ok || parsed < 16 || parsed > 128 do return .Invalid_Value
+			settings.statusbar.height = parsed
+		case "left": if !parse_status_modules(&settings.statusbar.left, value) do return .Invalid_Value
+		case "center": if !parse_status_modules(&settings.statusbar.center, value) do return .Invalid_Value
+		case "right": if !parse_status_modules(&settings.statusbar.right, value) do return .Invalid_Value
+		case "separator":
+			parsed, ok := parse_string(value); if !ok || len(parsed) > 32 do return .Invalid_Value
+			replace_string(&settings.statusbar.separator, parsed)
+		case "show-in-quake":
+			parsed, ok := parse_bool(value); if !ok do return .Invalid_Value
+			settings.statusbar.show_in_quake = parsed
+		case "background", "foreground", "accent":
+			parsed, ok := parse_color(value); if !ok do return .Invalid_Value
+			if key == "background" do settings.statusbar.background = parsed
+			else if key == "foreground" do settings.statusbar.foreground = parsed
+			else do settings.statusbar.accent = parsed
+		case: return .Unknown_Key
+		}
+	} else if section == "statusbar.clock" {
+		switch key {
+		case "format":
+			parsed, ok := parse_string(value); if !ok || len(parsed) > 128 do return .Invalid_Value
+			replace_string(&settings.statusbar.clock_format, parsed)
+		case "update-ms":
+			parsed, ok := strconv.parse_int(value); if !ok || parsed < 250 || parsed > 60000 do return .Invalid_Value
+			settings.statusbar.clock_update_ms = parsed
+		case: return .Unknown_Key
+		}
+	} else if section == "statusbar.battery" || section == "statusbar.resource" {
+		if key != "update-ms" do return .Unknown_Key
+		parsed, ok := strconv.parse_int(value); if !ok || parsed < 500 || parsed > 60000 do return .Invalid_Value
+		if section == "statusbar.battery" do settings.statusbar.battery_update_ms = parsed
+		else do settings.statusbar.resource_update_ms = parsed
 	} else if section == "cursor" {
 		switch key {
 		case "shape":
@@ -731,7 +807,40 @@ destroy_bindings :: proc(bindings: ^Bindings) {
 	delete(bindings.copy); delete(bindings.paste); delete(bindings.font_increase); delete(bindings.font_decrease); delete(bindings.font_reset)
 	delete(bindings.tmux_new_tab); delete(bindings.tmux_new_window); delete(bindings.tmux_attach_last)
 	delete(bindings.tmux_detach); delete(bindings.tmux_reconnect)
+	delete(bindings.toggle_statusbar)
 	bindings^ = {}
+}
+
+parse_status_modules :: proc(target: ^[dynamic]Status_Module, value: string) -> bool {
+	parsed: [dynamic]Status_Module
+	defer delete(parsed)
+	remaining := value
+	for remaining != "" {
+		separator := strings.index_byte(remaining, ',')
+		name := remaining
+		if separator >= 0 {
+			name = remaining[:separator]
+			remaining = remaining[separator+1:]
+		} else {
+			remaining = ""
+		}
+		name = strings.trim_space(name)
+		module: Status_Module
+		switch name {
+		case "mode": module = .Mode
+		case "session": module = .Session
+		case "size": module = .Size
+		case "tabs": module = .Tabs
+		case "clock": module = .Clock
+		case "battery": module = .Battery
+		case "resource", "resources": module = .Resource
+		case: return false
+		}
+		append(&parsed, module)
+	}
+	clear(target)
+	append(target, ..parsed[:])
+	return true
 }
 
 valid_quake_monitor :: proc(value: string) -> bool {

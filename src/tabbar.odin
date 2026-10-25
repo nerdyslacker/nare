@@ -2,6 +2,7 @@ package main
 
 import c "core:c"
 import libc "core:c/libc"
+import "core:unicode/utf8"
 import fonts "font"
 import drawing "render"
 import x11 "x11"
@@ -141,6 +142,70 @@ draw_workspace_search_bar :: proc(
 	draw_tab_text(pixels, window, font, text, 8, 3+font.ascent, foreground, false, 0, window.width-8)
 	xlib.PutImage(window.display, xlib.Drawable(window.id), window.gc, image, 0, 0, 0, i32(y), u32(window.width), u32(height))
 	_ = xlib.Flush(window.display)
+}
+
+draw_workspace_statusbar :: proc(
+	window: ^x11.Window,
+	font: ^fonts.Manager,
+	left, center, right: string,
+	y, height: int,
+	background, foreground, accent: u32,
+) {
+	if height <= 0 || window.width <= 0 do return
+	byte_count := window.width*height*size_of(u32)
+	data := libc.malloc(c.size_t(byte_count))
+	if data == nil do return
+	image := xlib.CreateImage(window.display, window.visual, u32(window.depth), .ZPixmap, 0, data, u32(window.width), u32(height), 32, i32(window.width*size_of(u32)))
+	if image == nil {
+		libc.free(data)
+		return
+	}
+	defer xlib.DestroyImage(image)
+	pixels := (([^]u32)(data))[:window.width*height]
+	background_pixel := drawing.rgb_to_pixel(window, background)
+	for &pixel in pixels do pixel = background_pixel
+	fill_tab_rect(pixels, window, 0, 0, window.width, min(2, height), accent)
+	padding := 8
+	baseline := max(font.ascent+2, (height-font.cell_height)/2+font.ascent)
+	right_text := ui_fit_text(font, right, max(0, window.width-padding*2))
+	right_width := tab_text_width(font, right_text, false)
+	right_x := max(padding, window.width-padding-right_width)
+	if right_text != "" do draw_tab_text(pixels, window, font, right_text, right_x, baseline, foreground, false, right_x, window.width-padding)
+	left_available := max(0, right_x-padding*2)
+	left_text := ui_fit_text(font, left, left_available)
+	left_width := tab_text_width(font, left_text, false)
+	left_end := padding+left_width
+	if left_text != "" do draw_tab_text(pixels, window, font, left_text, padding, baseline, foreground, false, padding, left_end)
+	if center != "" {
+		center_left := min(right_x, left_end+padding)
+		center_right := max(center_left, right_x-padding)
+		center_text := ui_fit_text(font, center, center_right-center_left)
+		center_width := tab_text_width(font, center_text, false)
+		center_x := clamp((window.width-center_width)/2, center_left, max(center_left, center_right-center_width))
+		draw_tab_text(pixels, window, font, center_text, center_x, baseline, foreground, false, center_left, center_right)
+	}
+	xlib.PutImage(window.display, xlib.Drawable(window.id), window.gc, image, 0, 0, 0, i32(y), u32(window.width), u32(height))
+	_ = xlib.Flush(window.display)
+}
+
+ui_fit_text :: proc(font: ^fonts.Manager, text: string, available: int) -> string {
+	if available <= 0 do return ""
+	if tab_text_width(font, text, false) <= available do return text
+	ellipsis := "…"
+	ellipsis_width := tab_text_width(font, ellipsis, false)
+	if ellipsis_width > available do return ""
+	output := make([dynamic]byte, 0, len(text), context.temp_allocator)
+	width := 0
+	for codepoint in text {
+		glyph := fonts.glyph_for_codepoint(font, codepoint, .Regular)
+		advance := glyph.advance if glyph != nil else font.cell_width
+		if width+advance+ellipsis_width > available do break
+		encoded, count := utf8.encode_rune(codepoint)
+		append(&output, ..encoded[:count])
+		width += advance
+	}
+	append(&output, ..transmute([]byte)ellipsis)
+	return string(output[:])
 }
 
 muted_root_tab_color :: proc(root, inactive: u32) -> u32 {

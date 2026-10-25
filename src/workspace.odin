@@ -105,6 +105,7 @@ Workspace :: struct {
 	ligatures: bool,
 	title: string,
 	quake: ^quake.Controller,
+	statusbar: Statusbar_State,
 }
 
 Workspace_Overrides :: struct {
@@ -184,11 +185,10 @@ TMUX_MAX_RECONNECT_ATTEMPTS :: 8
 
 workspace_run :: proc(root: ^x11.Window, command: []cstring, settings: ^config.Settings, quake_controller: ^quake.Controller = nil) -> int {
 	workspace: Workspace
-	if !workspace_init(&workspace, root, command, settings) {
+	if !workspace_init(&workspace, root, command, settings, quake_controller = quake_controller) {
 		fmt.eprintln("could not create terminal session")
 		return 1
 	}
-	workspace.quake = quake_controller
 	defer workspace_destroy(&workspace)
 	for workspace_service(&workspace) {
 		fds: [dynamic]posix.pollfd
@@ -218,6 +218,7 @@ workspace_init :: proc(
 	initial_cwd: string = "",
 	font_cache: ^Workspace_Font_Cache = nil,
 	overrides: Workspace_Overrides = {},
+	quake_controller: ^quake.Controller = nil,
 ) -> bool {
 	font_size := overrides.font_size if overrides.override_font_size else settings.font_size
 	renderer := overrides.renderer if overrides.override_renderer else settings.renderer
@@ -226,8 +227,9 @@ workspace_init :: proc(
 	workspace^ = Workspace{
 		root = root, settings = settings, command = command, initial_font_size = font_size, font_size = font_size,
 		renaming_tab = -1, last_click_tab = -2, last_cursor_toggle = time.now(), tab_reveal_active = true,
-		renderer = renderer, ligatures = ligatures, title = strings.clone(title),
+		renderer = renderer, ligatures = ligatures, title = strings.clone(title), quake = quake_controller,
 	}
+	workspace.statusbar.visible = settings.statusbar.enabled
 	selected_font_cache := font_cache
 	if selected_font_cache == nil do selected_font_cache = &workspace.local_font_cache
 	workspace.font_cache = selected_font_cache
@@ -251,6 +253,7 @@ workspace_init :: proc(
 		workspace.search_surface = search_surface
 		x11.show_child(&workspace.search_surface, false)
 	}
+	statusbar_tick(workspace, true)
 	workspace_layout(workspace)
 	workspace_refresh_privileged_tabs(workspace, true)
 	x11.set_mouse_tracking(root, 0, settings.scrollbar_enabled)
@@ -320,6 +323,7 @@ workspace_dispatch_poll :: proc(target: Workspace_Poll_Target, events: posix.Pol
 workspace_finish_cycle :: proc(workspace: ^Workspace) {
 	workspace_cursor_tick(workspace)
 	workspace_refresh_privileged_tabs(workspace, false)
+	statusbar_tick(workspace)
 }
 
 workspace_exit_status :: proc(workspace: ^Workspace) -> int {
@@ -463,6 +467,7 @@ workspace_destroy :: proc(workspace: ^Workspace) {
 	delete(workspace.tab_bounds)
 	delete(workspace.rename_buffer)
 	delete(workspace.title)
+	statusbar_destroy(&workspace.statusbar)
 	workspace_font_cache_release(workspace.font_cache, workspace.font_entry)
 	workspace.font_entry = nil
 	if workspace.font_cache == &workspace.local_font_cache do workspace_font_cache_destroy(&workspace.local_font_cache)
@@ -525,10 +530,12 @@ workspace_layout :: proc(workspace: ^Workspace) {
 	root := workspace.root
 	x11.set_surface_colors(root, workspace.settings.theme.background, workspace.settings.ui_colors.active_border)
 	tab_bar := workspace_tab_bar_height(workspace)
+	status_bar := statusbar_height(workspace)
 	padding := workspace.settings.window.padding
 	content_y := padding
 	if workspace.settings.tabs.edge == .Top do content_y += tab_bar
-	content_height := max(1, root.height-tab_bar-padding*2)
+	if workspace.settings.statusbar.position == .Top do content_y += status_bar
+	content_height := max(1, root.height-tab_bar-status_bar-padding*2)
 	content_width := max(1, root.width-padding*2)
 	for tab, tab_index in workspace.tabs {
 		active_tab := tab_index == workspace.active
@@ -624,6 +631,7 @@ workspace_search_bar_height :: proc(workspace: ^Workspace) -> int {
 
 workspace_draw_tabs :: proc(workspace: ^Workspace) {
 	defer workspace_draw_search_bar(workspace)
+	defer workspace_draw_statusbar(workspace)
 	height := workspace_tab_bar_height(workspace)
 	if height == 0 do return
 	labels := make([]Tab_Draw_Label, len(workspace.tabs), context.temp_allocator)
@@ -1093,6 +1101,12 @@ workspace_shortcut :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
 	tab := workspace_active_tab(workspace)
 	if tab == nil do return false
 	bindings := &workspace.settings.bindings
+	if event_matches(event, bindings.toggle_statusbar) {
+		workspace.statusbar.visible = !workspace.statusbar.visible
+		if workspace.statusbar.visible do statusbar_tick(workspace, true)
+		workspace_layout(workspace)
+		return true
+	}
 	if event_matches(event, bindings.tmux_new_tab) {
 		_ = workspace_new_tmux_tab(workspace, nil, false)
 		return true
