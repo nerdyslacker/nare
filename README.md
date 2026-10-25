@@ -20,7 +20,7 @@
 - Fontconfig, FreeType, and HarfBuzz rendering with font fallback, combining and wide characters, color glyphs, and configurable ligatures.
 - Automatic OpenGL rendering with CPU fallback and a separate CPU-only build.
 - Native tabs and split/stack pane layouts with configurable shortcuts and a red tab warning for root foreground sessions.
-- Automatic tmux `-CC` detection with native window tabs and split-pane views, local/SSH launch profiles, resizing, and detach/restoration.
+- Automatic tmux `-CC` detection with native window tabs and split-pane views, local/SSH profiles, bounded reconnect, external-state reconciliation, and detach/restoration.
 - Bounded, resize-reflowing scrollback with incremental search, smooth wheel navigation, and a draggable scrollbar.
 - X11 PRIMARY and CLIPBOARD selection, bracketed paste, large INCR transfers, OSC 8 links, and keyboard URL hints.
 - Kitty Graphics, Sixel, and iTerm2 inline images with scaling, transparency, clipping, scrolling, and CPU/GPU composition.

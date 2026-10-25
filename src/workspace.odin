@@ -44,6 +44,15 @@ Pane :: struct {
 	local_display_title: string,
 	local_tab_title: string,
 	local_root_foreground: bool,
+	reconnect_command: [dynamic]cstring,
+	tmux_disconnected: bool,
+	tmux_disconnect_pending: bool,
+	tmux_detach_requested: bool,
+	tmux_reconnect_disabled: bool,
+	tmux_reconnecting: bool,
+	tmux_reconnect_attempts: int,
+	tmux_disconnected_since: time.Time,
+	last_tmux_reconcile: time.Time,
 }
 
 Split_Axis :: enum { Rows, Columns }
@@ -86,6 +95,8 @@ Workspace :: struct {
 }
 
 PRIVILEGE_CHECK_INTERVAL :: 250*time.Millisecond
+TMUX_RECONCILE_INTERVAL :: 2*time.Second
+TMUX_MAX_RECONNECT_ATTEMPTS :: 8
 
 workspace_run :: proc(root: ^x11.Window, command: []cstring, settings: ^config.Settings) -> int {
 	workspace := Workspace{
@@ -119,6 +130,8 @@ workspace_run :: proc(root: ^x11.Window, command: []cstring, settings: ^config.S
 			if !workspace_event(&workspace, event) do return 0
 		}
 		workspace_reap(&workspace)
+		workspace_tmux_reconnect_tick(&workspace)
+		workspace_tmux_reconcile_tick(&workspace)
 		if len(workspace.tabs) == 0 do break
 		fds: [dynamic]posix.pollfd
 		owners: [dynamic]^Pane
@@ -126,7 +139,7 @@ workspace_run :: proc(root: ^x11.Window, command: []cstring, settings: ^config.S
 		append(&owners, nil)
 		for tab in workspace.tabs {
 			for pane in tab.panes {
-				if pane.exited || pane.tmux_owner != nil do continue
+				if pane.exited || pane.tmux_disconnected || pane.tmux_owner != nil do continue
 				events: posix.Poll_Event = {.IN}
 				if pane.pending_offset < len(pane.pending) do events += {.OUT}
 				append(&fds, {fd = pane.process.master, events = events})
@@ -145,7 +158,10 @@ workspace_run :: proc(root: ^x11.Window, command: []cstring, settings: ^config.S
 				if !workspace_drain(&workspace, pane) do pane.exited = true
 			}
 			if .OUT in fds[index].revents do workspace_write(pane)
-			if .ERR in fds[index].revents || .NVAL in fds[index].revents do pane.exited = true
+			if .ERR in fds[index].revents || .NVAL in fds[index].revents {
+				if len(pane.reconnect_command) > 0 && !pane.tmux_reconnect_disabled do workspace_tmux_disconnect(&workspace, pane)
+				else do pane.exited = true
+			}
 		}
 		workspace_cursor_tick(&workspace)
 		workspace_refresh_privileged_tabs(&workspace, false)
@@ -182,6 +198,10 @@ workspace_new_pane_command :: proc(workspace: ^Workspace, command: []cstring, cw
 	}
 	pane.process = process
 	pane.tmux_expected = tmux_expected
+	if tmux_expected {
+		for argument in command[:len(command)-1] do append_command_argument(&pane.reconnect_command, string(argument))
+		append(&pane.reconnect_command, nil)
+	}
 	if !vt.terminal_init(&pane.terminal, columns, rows, workspace.settings.scrollback_lines, workspace.settings.osc52_policy, &workspace.settings.graphics_limits) {
 		pty.shutdown(&pane.process); drawing.destroy(&pane.renderer, &pane.surface); x11.destroy_child(&pane.surface); free(pane); return nil
 	}
@@ -265,6 +285,7 @@ pane_destroy :: proc(pane: ^Pane) {
 		delete(pane.local_display_title)
 		delete(pane.local_tab_title)
 		delete(pane.pending)
+		command_destroy(&pane.reconnect_command)
 	}
 	drawing.destroy(&pane.renderer, &pane.surface)
 	x11.destroy_child(&pane.surface)
@@ -456,6 +477,8 @@ workspace_draw_tabs :: proc(workspace: ^Workspace) {
 			else if !active_pane.root_foreground && active_pane.terminal.title != "" do title = active_pane.terminal.title
 		}
 		if tab.custom_title == "" && active_root do title = root_tab_title(title)
+		if tab_is_tmux(tab) && tab.tmux_owner.tmux_disconnected do title = fmt.tprintf("%s (disconnected)", title)
+		else if tab_is_tmux(tab) && tab.tmux_owner.tmux_reconnecting do title = fmt.tprintf("%s (reconnecting)", title)
 		if workspace.renaming_tab == index do title = fmt.tprintf("Rename: %s_", string(workspace.rename_buffer[:]))
 		with_index, _ := strings.replace_all(workspace.settings.tabs.title_template, "{index}", fmt.tprintf("%d", index+1), context.temp_allocator)
 		label, _ := strings.replace_all(with_index, "{title}", title, context.temp_allocator)
@@ -723,7 +746,8 @@ workspace_tab_bar_mouse :: proc(workspace: ^Workspace, mouse: keyboard.Mouse_Eve
 	if mouse.button == 2 {
 		if index >= 0 {
 			tab := workspace.tabs[index]
-			if tab_is_tmux(tab) do tmux.request_kill_window(&tab.tmux_owner.tmux_session, &tab.tmux_owner.pending, tab.tmux_window_id)
+			if tab_is_tmux(tab) && tab.tmux_owner.tmux_disconnected do workspace_remove_tmux_group(workspace, tab.tmux_owner)
+			else if tab_is_tmux(tab) do tmux.request_kill_window(&tab.tmux_owner.tmux_session, &tab.tmux_owner.pending, tab.tmux_window_id)
 			else do workspace_close_tab(workspace, index)
 		}
 		return true
@@ -915,7 +939,14 @@ workspace_shortcut :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
 		return true
 	}
 	if event_matches(event, bindings.tmux_reconnect) {
-		x11.set_title(workspace.root, "nare - tmux reconnect is not implemented")
+		if tab_is_tmux(tab) {
+			if tab.tmux_owner.tmux_disconnected {
+				tab.tmux_owner.tmux_reconnect_attempts = 0
+				_ = workspace_tmux_reconnect(workspace, tab.tmux_owner)
+			} else {
+				tmux.request_refresh(&tab.tmux_owner.tmux_session, &tab.tmux_owner.pending)
+			}
+		}
 		return true
 	}
 	for &binding in workspace.settings.tmux_profile_bindings {
@@ -932,7 +963,10 @@ workspace_shortcut :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
 		pane := tab.panes[tab.active]
 		owner := tab.tmux_owner
 		if event_matches(event, bindings.tmux_detach) {
-			if tmux.session_ready(&owner.tmux_session) do tmux.append_detach_command(&owner.tmux_session, &owner.pending)
+			if tmux.session_ready(&owner.tmux_session) {
+				owner.tmux_detach_requested = true
+				tmux.append_detach_command(&owner.tmux_session, &owner.pending)
+			}
 			return true
 		}
 		if event_matches(event, bindings.previous_tab) { workspace_switch_tab(workspace, -1); return true }
@@ -1124,6 +1158,10 @@ workspace_close_tab :: proc(workspace: ^Workspace, index: int) {
 	if index < 0 || index >= len(workspace.tabs) do return
 	if tab_is_tmux(workspace.tabs[index]) {
 		tab := workspace.tabs[index]
+		if tab.tmux_owner.tmux_disconnected {
+			workspace_remove_tmux_group(workspace, tab.tmux_owner)
+			return
+		}
 		tmux.request_kill_window(&tab.tmux_owner.tmux_session, &tab.tmux_owner.pending, tab.tmux_window_id)
 		return
 	}
@@ -1167,8 +1205,12 @@ workspace_reap :: proc(workspace: ^Workspace) {
 	changed := false
 	for tab in workspace.tabs do for pane in tab.panes {
 		if pane.tmux_owner != nil do continue
+		if pane.tmux_disconnected do continue
 		if !pane.exited {
-			if done, _ := pty.reap(&pane.process); done { pane.exited = true; pty.shutdown(&pane.process) }
+			if done, _ := pty.reap(&pane.process); done {
+				if len(pane.reconnect_command) > 0 && !pane.tmux_reconnect_disabled do workspace_tmux_disconnect(workspace, pane)
+				else {pane.exited = true; pty.shutdown(&pane.process)}
+			}
 		}
 	}
 	for tab in workspace.tabs {
@@ -1257,8 +1299,80 @@ workspace_drain :: proc(workspace: ^Workspace, pane: ^Pane) -> bool {
 				}
 				pane.terminal.title_changed = false
 			}
+			if pane.tmux_disconnect_pending || result != .Would_Block && len(pane.reconnect_command) > 0 && !pane.tmux_reconnect_disabled {
+				workspace_tmux_disconnect(workspace, pane)
+				return true
+			}
 			return result == .Would_Block
 		}
+	}
+}
+
+workspace_tmux_disconnect :: proc(workspace: ^Workspace, owner: ^Pane) {
+	if owner == nil || owner.tmux_disconnected do return
+	pty.shutdown(&owner.process)
+	tmux.session_disconnect(&owner.tmux_session)
+	clear(&owner.pending)
+	owner.pending_offset = 0
+	owner.exited = false
+	owner.tmux_disconnected = true
+	owner.tmux_reconnecting = false
+	owner.tmux_disconnect_pending = false
+	owner.tmux_disconnected_since = time.now()
+	workspace_draw_tabs(workspace)
+}
+
+workspace_tmux_reconnect_delay :: proc(attempt: int) -> time.Duration {
+	shift := clamp(attempt, 0, 4)
+	return time.Duration(250*(1<<uint(shift)))*time.Millisecond
+}
+
+workspace_tmux_reconnect :: proc(workspace: ^Workspace, owner: ^Pane) -> bool {
+	if owner == nil || !owner.tmux_disconnected || len(owner.reconnect_command) < 2 do return false
+	columns := max(1, owner.tmux_client_columns)
+	rows := max(1, owner.tmux_client_rows)
+	if columns == 1 || rows == 1 do columns, rows = x11.grid_size(&owner.surface)
+	process, err := pty.spawn(
+		owner.reconnect_command[:],
+		pty_size(columns, rows, owner.surface.width, owner.surface.height),
+		workspace.settings.term,
+		workspace.settings.working_directory,
+	)
+	owner.tmux_reconnect_attempts += 1
+	owner.tmux_disconnected_since = time.now()
+	if err != .None {
+		workspace_draw_tabs(workspace)
+		return false
+	}
+	owner.process = process
+	owner.exited = false
+	owner.tmux_disconnected = false
+	owner.tmux_reconnecting = true
+	owner.tmux_disconnect_pending = false
+	owner.tmux_reconnect_disabled = false
+	tmux.session_reset_transport(&owner.tmux_session)
+	workspace_draw_tabs(workspace)
+	return true
+}
+
+workspace_tmux_reconnect_tick :: proc(workspace: ^Workspace) {
+	if !workspace.settings.tmux.auto_reconnect do return
+	for tab in workspace.tabs do for owner in tab.panes {
+		if owner.tmux_owner != nil || !owner.tmux_disconnected || owner.tmux_reconnect_disabled ||
+		   owner.tmux_reconnect_attempts >= TMUX_MAX_RECONNECT_ATTEMPTS || len(owner.reconnect_command) < 2 {
+			continue
+		}
+		if time.since(owner.tmux_disconnected_since) < workspace_tmux_reconnect_delay(owner.tmux_reconnect_attempts) do continue
+		_ = workspace_tmux_reconnect(workspace, owner)
+	}
+}
+
+workspace_tmux_reconcile_tick :: proc(workspace: ^Workspace) {
+	for tab in workspace.tabs do for owner in tab.panes {
+		if owner.tmux_owner != nil || owner.tmux_disconnected || !tmux.session_ready(&owner.tmux_session) do continue
+		if time.since(owner.last_tmux_reconcile) < TMUX_RECONCILE_INTERVAL do continue
+		owner.last_tmux_reconcile = time.now()
+		tmux.request_refresh(&owner.tmux_session, &owner.pending)
 	}
 }
 
@@ -1333,8 +1447,10 @@ workspace_tmux_reconcile :: proc(workspace: ^Workspace, owner: ^Pane) -> bool {
 	for info in owner.tmux_session.panes do if info.id == owner.tmux_pane_id {owner_pane_exists = true; break}
 	if !owner_pane_exists {
 		owner.tmux_pane_id = owner.tmux_session.pane_id
-		_ = workspace_tmux_reset_display(workspace, owner)
-		tmux.request_capture(&owner.tmux_session, &owner.pending, owner.tmux_pane_id)
+		if !owner.tmux_reconnecting {
+			_ = workspace_tmux_reset_display(workspace, owner)
+			tmux.request_capture(&owner.tmux_session, &owner.pending, owner.tmux_pane_id)
+		}
 	}
 	for index := len(workspace.tabs)-1; index >= 0; index -= 1 {
 		tab := workspace.tabs[index]
@@ -1361,6 +1477,7 @@ workspace_tmux_reconcile :: proc(workspace: ^Workspace, owner: ^Pane) -> bool {
 		for info in owner.tmux_session.panes {
 			if info.window_id != window.id do continue
 			pane: ^Pane
+			created := false
 			for old, old_index in old_panes do if old == owner && !used[old_index] && old.tmux_pane_id == info.id {
 				pane = owner
 				used[old_index] = true
@@ -1377,9 +1494,15 @@ workspace_tmux_reconcile :: proc(workspace: ^Workspace, owner: ^Pane) -> bool {
 			if pane == nil {
 				pane = workspace_new_tmux_view(workspace, owner, info.id)
 				if pane == nil do continue
-				tmux.request_capture(&owner.tmux_session, &owner.pending, info.id)
+				created = true
 			}
 			pane.tmux_pane_id = info.id
+			if created {
+				tmux.request_capture(&owner.tmux_session, &owner.pending, info.id)
+			} else if owner.tmux_reconnecting {
+				_ = workspace_tmux_reset_display(workspace, pane)
+				tmux.request_capture(&owner.tmux_session, &owner.pending, info.id)
+			}
 			append(&tab.panes, pane)
 			if info.active do tab.active = len(tab.panes)-1
 		}
@@ -1468,15 +1591,21 @@ workspace_feed_pty :: proc(workspace: ^Workspace, pane: ^Pane, data: []byte) -> 
 		switch action {
 		case .Activated:
 			if workspace_tmux_activate(workspace, pane) {
-				workspace_tmux_mark_active_tab(workspace, pane)
+				if !pane.tmux_reconnecting do workspace_tmux_mark_active_tab(workspace, pane)
 				dirty = true
 				workspace_draw_tabs(workspace)
 			} else {
 				pane.tmux_session.state = .Failed
 			}
+		case .Capabilities_Changed:
+			workspace_draw_tabs(workspace)
 		case .Pane_Selected:
 			config.replace_string(&pane.display_title, string(pane.tmux_session.title[:]))
-			if !workspace_tmux_apply_selection(workspace, pane) do _ = workspace_tmux_reconcile(workspace, pane)
+			if pane.tmux_reconnecting || !workspace_tmux_apply_selection(workspace, pane) do _ = workspace_tmux_reconcile(workspace, pane)
+			pane.tmux_reconnecting = false
+			pane.tmux_disconnected = false
+			pane.tmux_reconnect_attempts = 0
+			pane.last_tmux_reconcile = time.now()
 			title := string(pane.tmux_session.title[:])
 			if title == "" do title = workspace.settings.title
 			x11.set_title(workspace.root, title)
@@ -1484,6 +1613,10 @@ workspace_feed_pty :: proc(workspace: ^Workspace, pane: ^Pane, data: []byte) -> 
 		case .Model_Changed:
 			config.replace_string(&pane.display_title, string(pane.tmux_session.title[:]))
 			_ = workspace_tmux_reconcile(workspace, pane)
+			pane.tmux_reconnecting = false
+			pane.tmux_disconnected = false
+			pane.tmux_reconnect_attempts = 0
+			pane.last_tmux_reconcile = time.now()
 		case .Title_Changed:
 			config.replace_string(&pane.display_title, string(pane.tmux_session.title[:]))
 			_ = workspace_tmux_reconcile(workspace, pane)
@@ -1517,13 +1650,31 @@ workspace_feed_pty :: proc(workspace: ^Workspace, pane: ^Pane, data: []byte) -> 
 				if target.visible do workspace_redraw(workspace, target, true)
 			}
 		case .Deactivated:
-			workspace_tmux_deactivate(workspace, pane)
-			workspace_tmux_restore_tab(workspace, pane)
-			dirty = true
-			workspace_draw_tabs(workspace)
+			if pane.tmux_detach_requested {
+				pane.tmux_detach_requested = false
+				pane.tmux_reconnect_disabled = true
+				workspace_tmux_deactivate(workspace, pane)
+				workspace_tmux_restore_tab(workspace, pane)
+				dirty = true
+				workspace_draw_tabs(workspace)
+			} else if len(pane.reconnect_command) > 0 {
+				pane.tmux_disconnect_pending = true
+			} else {
+				workspace_tmux_deactivate(workspace, pane)
+				workspace_tmux_restore_tab(workspace, pane)
+				dirty = true
+				workspace_draw_tabs(workspace)
+			}
+		case .Command_Error:
+			x11.set_title(workspace.root, "nare - tmux command failed")
+			tmux.request_refresh(&pane.tmux_session, &pane.pending)
 		case .Failed:
-			config.replace_string(&pane.display_title, "tmux protocol error")
-			workspace_draw_tabs(workspace)
+			if len(pane.reconnect_command) > 0 {
+				pane.tmux_disconnect_pending = true
+			} else {
+				config.replace_string(&pane.display_title, "tmux protocol error")
+				workspace_draw_tabs(workspace)
+			}
 		case .None:
 		}
 	}
@@ -1639,7 +1790,6 @@ workspace_tmux_deactivate :: proc(workspace: ^Workspace, pane: ^Pane) {
 }
 
 workspace_tmux_reset_display :: proc(workspace: ^Workspace, pane: ^Pane) -> bool {
-	if !pane.has_local_terminal do return false
 	columns, rows := x11.grid_size(&pane.surface)
 	replacement: vt.Terminal
 	if !vt.terminal_init(&replacement, columns, rows, workspace.settings.scrollback_lines, workspace.settings.osc52_policy, &workspace.settings.graphics_limits) do return false

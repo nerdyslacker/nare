@@ -2,9 +2,9 @@ package tmux
 
 LIST_PANES_COMMAND :: "list-panes -s -F '#{session_id}\t#{session_name}\t#{window_active}\t#{window_id}\t#{window_index}\t#{window_name}\t#{window_layout}\t#{pane_active}\t#{pane_id}\t#{pane_left}\t#{pane_top}\t#{pane_width}\t#{pane_height}\t#{cursor_x}\t#{cursor_y}\t.'\n"
 
-Session_State :: enum { Inactive, Initial_Reply, Pane_List, Capture, Ready, Failed }
-Session_Action :: enum { None, Activated, Model_Changed, Pane_Selected, Capture_Complete, Title_Changed, Output, Deactivated, Failed }
-Reply_Purpose :: enum { Ignored, Initial, Pane_List, Capture }
+Session_State :: enum { Inactive, Initial_Reply, Capabilities, Pane_List, Capture, Ready, Disconnected, Failed }
+Session_Action :: enum { None, Activated, Capabilities_Changed, Model_Changed, Pane_Selected, Capture_Complete, Command_Error, Title_Changed, Output, Deactivated, Failed }
+Reply_Purpose :: enum { Ignored, Initial, Capabilities, Pane_List, Capture }
 
 Pane_Info :: struct {
 	id: int,
@@ -31,6 +31,8 @@ Session :: struct {
 	columns: int,
 	rows: int,
 	title: [dynamic]byte,
+	version: [dynamic]byte,
+	version_major, version_minor: int,
 	session_id: int,
 	windows: [dynamic]Window_Info,
 	panes: [dynamic]Pane_Info,
@@ -47,6 +49,10 @@ Session :: struct {
 	active_reply: Reply_Purpose,
 	active_capture_pane_id: int,
 	active_capture_row: int,
+	capability_data: [dynamic]byte,
+	previous_model_signature: [dynamic]byte,
+	model_signature_scratch: [dynamic]byte,
+	previous_model_valid: bool,
 	reply_open: bool,
 	refresh_queued: bool,
 }
@@ -55,6 +61,10 @@ session_destroy :: proc(session: ^Session) {
 	destroy(&session.stream)
 	session_clear_model(session)
 	delete(session.title)
+	delete(session.version)
+	delete(session.capability_data)
+	delete(session.previous_model_signature)
+	delete(session.model_signature_scratch)
 	delete(session.fallback_title)
 	delete(session.windows)
 	delete(session.panes)
@@ -67,6 +77,7 @@ session_handle :: proc(session: ^Session, event: ^Event, commands: ^[dynamic]byt
 	#partial switch event.kind {
 	case .Activated:
 		session.previous_pane_id = -1
+		session.previous_model_valid = false
 		session_reset_model(session)
 		clear(&session.reply_queue)
 		clear(&session.reply_pane_ids)
@@ -88,6 +99,8 @@ session_handle :: proc(session: ^Session, event: ^Event, commands: ^[dynamic]byt
 		}
 		if session.active_reply == .Pane_List {
 			session.previous_pane_id = session.pane_id
+			session.previous_model_valid = session.pane_id >= 0
+			session_model_signature(session, &session.previous_model_signature)
 			session_reset_model(session)
 			session.state = .Pane_List
 			session.refresh_queued = false
@@ -101,13 +114,26 @@ session_handle :: proc(session: ^Session, event: ^Event, commands: ^[dynamic]byt
 		session.active_reply = .Ignored
 		#partial switch purpose {
 		case .Initial:
+			session_queue_capabilities(session, commands)
+			session.state = .Capabilities
+		case .Capabilities:
+			session_apply_capabilities(session)
 			session_queue_pane_list(session, commands)
 			session.state = .Pane_List
+			return .Capabilities_Changed
 		case .Pane_List:
 			if session.pane_id < 0 do session_use_fallback(session)
 			if session.pane_id < 0 {
 				session.state = .Failed
 				return .Failed
+			}
+			session_model_signature(session, &session.model_signature_scratch)
+			if session.previous_model_valid && session_signatures_equal(
+				session.previous_model_signature[:],
+				session.model_signature_scratch[:],
+			) {
+				session.state = .Ready
+				return .None
 			}
 			if session.pane_id == session.previous_pane_id {
 				session.state = .Ready
@@ -117,16 +143,20 @@ session_handle :: proc(session: ^Session, event: ^Event, commands: ^[dynamic]byt
 			return .Pane_Selected
 		case .Capture:
 			if event.kind == .Reply_Error {
-				session.state = .Failed
-				return .Failed
+				session.state = .Ready
+				return .Command_Error
 			}
 			session.state = .Ready
 			event.pane_id = session.active_capture_pane_id
 			return .Capture_Complete
+		case .Ignored:
+			if event.kind == .Reply_Error do return .Command_Error
 		case:
 		}
 	case .Reply_Data:
-		if session.active_reply == .Pane_List {
+		if session.active_reply == .Capabilities {
+			if len(session.capability_data) == 0 do append(&session.capability_data, ..event.data[:])
+		} else if session.active_reply == .Pane_List {
 			session_consider_pane(session, event.data[:])
 		} else if session.active_reply == .Capture {
 			event.pane_id = session.active_capture_pane_id
@@ -164,12 +194,38 @@ session_handle :: proc(session: ^Session, event: ^Event, commands: ^[dynamic]byt
 	return .None
 }
 
+session_disconnect :: proc(session: ^Session) {
+	destroy(&session.stream)
+	clear(&session.reply_queue)
+	clear(&session.reply_pane_ids)
+	clear(&session.capability_data)
+	session.reply_offset = 0
+	session.reply_open = false
+	session.refresh_queued = false
+	session.state = .Disconnected
+}
+
+session_reset_transport :: proc(session: ^Session) {
+	destroy(&session.stream)
+	clear(&session.reply_queue)
+	clear(&session.reply_pane_ids)
+	clear(&session.capability_data)
+	session.reply_offset = 0
+	session.reply_open = false
+	session.refresh_queued = false
+	session.state = .Inactive
+}
+
 session_active :: proc(session: ^Session) -> bool {
-	return session.state != .Inactive
+	return session.state != .Inactive && session.state != .Disconnected && session.state != .Failed
 }
 
 session_ready :: proc(session: ^Session) -> bool {
 	return session.state == .Ready && session.pane_id >= 0
+}
+
+request_refresh :: proc(session: ^Session, commands: ^[dynamic]byte) {
+	if session_ready(session) do session_queue_pane_list(session, commands)
 }
 
 append_input_commands :: proc(session: ^Session, commands: ^[dynamic]byte, pane_id: int, data: []byte) {
@@ -268,6 +324,16 @@ request_select_pane :: proc(session: ^Session, commands: ^[dynamic]byte, pane_id
 
 request_kill_window :: proc(session: ^Session, commands: ^[dynamic]byte, window_id: int) {
 	if !session_ready(session) || window_id < 0 do return
+	if window_id == session.window_id {
+		for window in session.windows {
+			if window.id == window_id do continue
+			append(commands, "select-window -t @")
+			append_decimal(commands, window.id)
+			append(commands, '\n')
+			session_queue_reply(session, .Ignored, -1)
+			break
+		}
+	}
 	append(commands, "kill-window -t @")
 	append_decimal(commands, window_id)
 	append(commands, '\n')
@@ -313,6 +379,31 @@ session_reset_model :: proc(session: ^Session) {
 	session.fallback_rows = 0
 	session.fallback_session_id = -1
 	clear(&session.fallback_title)
+}
+
+session_queue_capabilities :: proc(session: ^Session, commands: ^[dynamic]byte) {
+	clear(&session.capability_data)
+	append(commands, "display-message -p '#{version}'\n")
+	session_queue_reply(session, .Capabilities, -1)
+}
+
+session_apply_capabilities :: proc(session: ^Session) {
+	clear(&session.version)
+	append(&session.version, ..session.capability_data[:])
+	session.version_major, session.version_minor = 0, 0
+	index := 0
+	for index < len(session.version) && (session.version[index] < '0' || session.version[index] > '9') do index += 1
+	for index < len(session.version) && session.version[index] >= '0' && session.version[index] <= '9' {
+		session.version_major = session.version_major*10+int(session.version[index]-'0')
+		index += 1
+	}
+	if index < len(session.version) && session.version[index] == '.' {
+		index += 1
+		for index < len(session.version) && session.version[index] >= '0' && session.version[index] <= '9' {
+			session.version_minor = session.version_minor*10+int(session.version[index]-'0')
+			index += 1
+		}
+	}
 }
 
 session_consider_pane :: proc(session: ^Session, line: []byte) {
@@ -387,6 +478,53 @@ session_clear_model :: proc(session: ^Session) {
 session_find_window :: proc(session: ^Session, id: int) -> ^Window_Info {
 	for &window in session.windows do if window.id == id do return &window
 	return nil
+}
+
+// Cursor coordinates are intentionally excluded: pane output already updates the
+// display, and cursor-only changes must not rebuild the native pane layout.
+session_model_signature :: proc(session: ^Session, output: ^[dynamic]byte) {
+	clear(output)
+	session_signature_int(output, session.session_id)
+	session_signature_int(output, session.window_id)
+	session_signature_int(output, session.pane_id)
+	session_signature_bytes(output, session.title[:])
+	session_signature_int(output, len(session.windows))
+	for window in session.windows {
+		session_signature_int(output, window.id)
+		session_signature_int(output, window.index)
+		append(output, byte(1) if window.active else byte(0))
+		session_signature_bytes(output, window.name[:])
+		session_signature_bytes(output, window.layout[:])
+	}
+	session_signature_int(output, len(session.panes))
+	for pane in session.panes {
+		session_signature_int(output, pane.id)
+		session_signature_int(output, pane.window_id)
+		session_signature_int(output, pane.x)
+		session_signature_int(output, pane.y)
+		session_signature_int(output, pane.columns)
+		session_signature_int(output, pane.rows)
+		append(output, byte(1) if pane.active else byte(0))
+	}
+}
+
+session_signature_int :: proc(output: ^[dynamic]byte, value: int) {
+	append_decimal(output, value)
+	append(output, ':')
+}
+
+session_signature_bytes :: proc(output: ^[dynamic]byte, value: []byte) {
+	append_decimal(output, len(value))
+	append(output, ':')
+	append(output, ..value)
+}
+
+session_signatures_equal :: proc(left, right: []byte) -> bool {
+	if len(left) != len(right) do return false
+	for value, index in left {
+		if value != right[index] do return false
+	}
+	return true
 }
 
 session_use_fallback :: proc(session: ^Session) {

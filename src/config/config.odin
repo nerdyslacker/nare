@@ -211,7 +211,7 @@ settings_init :: proc(settings: ^Settings) {
 		tmux_new_window = strings.clone("alt+control+n"),
 		tmux_attach_last = strings.clone("alt+control+a"),
 		tmux_detach = strings.clone("alt+control+d"),
-		tmux_reconnect = strings.clone(""),
+		tmux_reconnect = strings.clone("alt+control+r"),
 	}
 	settings.cursor = {shape = .Block, blink = true, blink_interval_ms = 500, beam_width = 2, underline_height = 2}
 	settings.tmux = {enabled = true, auto_detect = true, default_target = .New_Tab, active_tab_color = 0x13ba19, auto_reconnect = true}
