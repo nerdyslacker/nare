@@ -23,7 +23,7 @@ Tmux_Target :: enum { New_Tab, New_Window }
 Quake_Horizontal_Align :: enum { Left, Center, Right }
 Quake_Animation :: enum { None, Slide, Fade }
 Status_Position :: enum { Top, Bottom }
-Status_Module :: enum { Mode, Session, Size, Tabs, Clock, Battery, Resource }
+Status_Module :: enum { Mode, Session, Host, Size, Tabs, Clock, Battery, Resource }
 
 Window_Settings :: struct {
 	background_opacity: f32,
@@ -122,6 +122,7 @@ Tmux_Settings :: struct {
 	active_tab_color: u32,
 	auto_reconnect: bool,
 	explicit_launch: bool,
+	explicit_ssh_host: string,
 }
 
 Error :: enum {
@@ -282,6 +283,7 @@ settings_destroy :: proc(settings: ^Settings) {
 	delete(settings.statusbar.right)
 	delete(settings.statusbar.separator)
 	delete(settings.statusbar.clock_format)
+	delete(settings.tmux.explicit_ssh_host)
 	destroy_bindings(&settings.bindings)
 	for &profile in settings.tmux_profiles do destroy_tmux_profile(&profile)
 	delete(settings.tmux_profiles)
@@ -829,6 +831,7 @@ parse_status_modules :: proc(target: ^[dynamic]Status_Module, value: string) -> 
 		switch name {
 		case "mode": module = .Mode
 		case "session": module = .Session
+		case "host": module = .Host
 		case "size": module = .Size
 		case "tabs": module = .Tabs
 		case "clock": module = .Clock

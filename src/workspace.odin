@@ -43,6 +43,7 @@ Pane :: struct {
 	exited: bool,
 	root_foreground: bool,
 	display_title: string,
+	remote_host: string,
 	local_display_title: string,
 	local_tab_title: string,
 	local_root_foreground: bool,
@@ -117,6 +118,7 @@ Workspace_Overrides :: struct {
 	ligatures: bool,
 	override_title: bool,
 	title: string,
+	remote_host: string,
 }
 
 Workspace_Font_Cache_Entry :: struct {
@@ -240,6 +242,8 @@ workspace_init :: proc(
 	}
 	x11.set_surface_colors(root, settings.theme.background, settings.ui_colors.active_border)
 	pane := workspace_new_pane_command(workspace, command, initial_cwd, settings.tmux.explicit_launch)
+	remote_host := overrides.remote_host if overrides.remote_host != "" else settings.tmux.explicit_ssh_host
+	if pane != nil && remote_host != "" do config.replace_string(&pane.remote_host, remote_host)
 	created := workspace_append_new_tab(workspace, pane)
 	if !created {
 		workspace_font_cache_release(workspace.font_cache, workspace.font_entry)
@@ -443,6 +447,7 @@ pane_destroy :: proc(pane: ^Pane) {
 	features.shell_destroy(&pane.shell_state)
 	features.scrollback_destroy(&pane.scrollback_state)
 	delete(pane.display_title)
+	delete(pane.remote_host)
 	if pane.tmux_owner == nil {
 		delete(pane.local_display_title)
 		delete(pane.local_tab_title)
@@ -1886,7 +1891,9 @@ workspace_new_tmux_tab :: proc(workspace: ^Workspace, profile: ^config.Tmux_Prof
 	defer command_destroy(&command)
 	append_tmux_launch_command(&command, profile, attach_last)
 	append(&command, nil)
-	return workspace_new_tab_command(workspace, command[:], true)
+	pane := workspace_new_pane_command(workspace, command[:], "", true)
+	if pane != nil && profile != nil && profile.ssh_host != "" do config.replace_string(&pane.remote_host, profile.ssh_host)
+	return workspace_append_new_tab(workspace, pane)
 }
 
 workspace_new_tmux_window :: proc(workspace: ^Workspace, profile: ^config.Tmux_Profile, attach_last: bool) -> bool {

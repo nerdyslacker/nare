@@ -248,6 +248,7 @@ command_from_args :: proc(args: []string) -> (options: config.Settings, command:
 		}
 		options.tmux.enabled = true
 		options.tmux.explicit_launch = true
+		if launch_profile.ssh_host != "" do config.replace_string(&options.tmux.explicit_ssh_host, launch_profile.ssh_host)
 		append_tmux_launch_command(&command, &launch_profile, false)
 		append(&command, nil)
 		return options, command, ""

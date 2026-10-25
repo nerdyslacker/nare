@@ -14,7 +14,7 @@ import vt "vt"
 
 Statusbar_State :: struct {
 	visible: bool,
-	clock, battery, resource: string,
+	clock, battery, resource, local_host: string,
 	last_clock, last_battery, last_resource: time.Time,
 	cpu_total, cpu_idle: u64,
 	cpu_ready: bool,
@@ -24,6 +24,7 @@ statusbar_destroy :: proc(state: ^Statusbar_State) {
 	delete(state.clock)
 	delete(state.battery)
 	delete(state.resource)
+	delete(state.local_host)
 	state^ = {}
 }
 
@@ -199,14 +200,21 @@ statusbar_module_text :: proc(workspace: ^Workspace, module: config.Status_Modul
 	tab := workspace_active_tab(workspace)
 	pane := workspace_active_pane(workspace)
 	if tab == nil || pane == nil do return ""
+	owner := pane_tmux_owner(pane)
+	remote := owner != nil && owner.remote_host != ""
 	switch module {
-	case .Mode: return "tmux" if tab_is_tmux(tab) else "local"
+	case .Mode:
+		if tab_is_tmux(tab) do return "tmux+ssh" if remote else "tmux"
+		return "ssh" if remote else "local"
 	case .Session:
 		if tab_is_tmux(tab) && len(tab.tmux_owner.tmux_session.title) > 0 do return statusbar_sanitize(string(tab.tmux_owner.tmux_session.title[:]))
 		if tab.custom_title != "" do return statusbar_sanitize(tab.custom_title)
 		if pane.display_title != "" do return statusbar_sanitize(pane.display_title)
 		if pane.terminal.title != "" do return statusbar_sanitize(pane.terminal.title)
 		return statusbar_sanitize(workspace.title)
+	case .Host:
+		if remote do return statusbar_sanitize(owner.remote_host)
+		return statusbar_local_hostname(&workspace.statusbar)
 	case .Size:
 		screen := vt.terminal_screen(&pane.terminal)
 		return fmt.tprintf("%dx%d", screen.columns, screen.rows)
@@ -216,6 +224,16 @@ statusbar_module_text :: proc(workspace: ^Workspace, module: config.Status_Modul
 	case .Resource: return workspace.statusbar.resource
 	}
 	return ""
+}
+
+statusbar_local_hostname :: proc(state: ^Statusbar_State) -> string {
+	if state.local_host != "" do return state.local_host
+	buffer: [256]c.char
+	if posix.gethostname(&buffer[0], len(buffer)) != .OK do return ""
+	buffer[len(buffer)-1] = 0
+	value := statusbar_sanitize(string(cstring(&buffer[0])))
+	if value != "" do config.replace_string(&state.local_host, value)
+	return state.local_host
 }
 
 statusbar_sanitize :: proc(value: string) -> string {

@@ -130,6 +130,10 @@ server_workspace_overrides :: proc(request: ^ipc.Create_Request) -> (overrides: 
 		overrides.override_title = true
 		overrides.title = request.title
 	}
+	if request.ssh_host != "" {
+		if !config.valid_tmux_name(request.ssh_host) do return overrides, false
+		overrides.remote_host = request.ssh_host
+	}
 	return
 }
 

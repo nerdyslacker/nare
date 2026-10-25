@@ -60,6 +60,7 @@ client_run :: proc(command: []cstring, settings: ^config.Settings, arguments: []
 		directory = current_directory
 	}
 	request := ipc.Create_Request{wait = wait, working_directory = directory}
+	if settings.tmux.explicit_ssh_host != "" do request.ssh_host = settings.tmux.explicit_ssh_host
 	client_apply_overrides(&request, settings, arguments)
 	for argument in command {
 		if argument == nil do break

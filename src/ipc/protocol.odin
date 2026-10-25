@@ -3,7 +3,7 @@ package ipc
 import "core:strings"
 
 MAGIC :: "NARE"
-VERSION :: u16(2)
+VERSION :: u16(3)
 HEADER_SIZE :: 16
 MAX_PAYLOAD_BYTES :: 128 * 1024
 MAX_ARGUMENTS :: 256
@@ -16,7 +16,8 @@ CREATE_OVERRIDE_FONT_SIZE :: u16(1 << 0)
 CREATE_OVERRIDE_RENDERER :: u16(1 << 1)
 CREATE_OVERRIDE_LIGATURES :: u16(1 << 2)
 CREATE_OVERRIDE_TITLE :: u16(1 << 3)
-CREATE_OVERRIDE_MASK :: CREATE_OVERRIDE_FONT_SIZE | CREATE_OVERRIDE_RENDERER | CREATE_OVERRIDE_LIGATURES | CREATE_OVERRIDE_TITLE
+CREATE_SSH_HOST :: u16(1 << 4)
+CREATE_OVERRIDE_MASK :: CREATE_OVERRIDE_FONT_SIZE | CREATE_OVERRIDE_RENDERER | CREATE_OVERRIDE_LIGATURES | CREATE_OVERRIDE_TITLE | CREATE_SSH_HOST
 
 Kind :: enum u16 {
 	Create = 1,
@@ -75,6 +76,7 @@ Create_Request :: struct {
 	ligatures: bool,
 	override_title: bool,
 	title: string,
+	ssh_host: string,
 }
 
 frame_destroy :: proc(frame: ^Frame) {
@@ -98,6 +100,7 @@ create_request_destroy :: proc(request: ^Create_Request) {
 	for argument in request.arguments do delete(argument)
 	delete(request.arguments)
 	delete(request.title)
+	delete(request.ssh_host)
 	request^ = {}
 }
 
@@ -314,6 +317,10 @@ encode_create :: proc(request: ^Create_Request, request_id: u32, output: ^[dynam
 		if len(request.title) == 0 || len(request.title) > MAX_TITLE_BYTES || contains_nul(request.title) do return .Limit
 		overrides |= CREATE_OVERRIDE_TITLE
 	}
+	if request.ssh_host != "" {
+		if len(request.ssh_host) > 128 || contains_nul(request.ssh_host) do return .Limit
+		overrides |= CREATE_SSH_HOST
+	}
 	if overrides != 0 {
 		append_u16(&payload, overrides)
 		if request.override_font_size do append_u16(&payload, request.font_size)
@@ -322,6 +329,10 @@ encode_create :: proc(request: ^Create_Request, request_id: u32, output: ^[dynam
 		if request.override_title {
 			append_u16(&payload, u16(len(request.title)))
 			append(&payload, ..transmute([]byte)request.title)
+		}
+		if request.ssh_host != "" {
+			append_u16(&payload, u16(len(request.ssh_host)))
+			append(&payload, ..transmute([]byte)request.ssh_host)
 		}
 	}
 	return append_frame(output, .Create, request_id, payload[:])
@@ -403,6 +414,16 @@ decode_create :: proc(frame: ^Frame, request: ^Create_Request) -> Error {
 		decoded.override_title = true
 		decoded.title = strings.clone(title)
 		offset += int(title_size)
+	}
+	if overrides & CREATE_SSH_HOST != 0 {
+		host_size, ok := read_u16(frame.payload[:], offset)
+		if !ok || host_size == 0 || host_size > 128 {create_request_destroy(&decoded); return .Malformed}
+		offset += 2
+		if int(host_size) > len(frame.payload)-offset {create_request_destroy(&decoded); return .Malformed}
+		host := string(frame.payload[offset:offset+int(host_size)])
+		if contains_nul(host) {create_request_destroy(&decoded); return .Malformed}
+		decoded.ssh_host = strings.clone(host)
+		offset += int(host_size)
 	}
 	if offset != len(frame.payload) {create_request_destroy(&decoded); return .Malformed}
 	request^ = decoded
