@@ -13,6 +13,8 @@ MIN_FONT_SIZE :: 6
 MAX_FONT_SIZE :: 96
 MAX_SCROLLBACK_LINES :: 1_000_000
 MAX_TERM_BYTES :: 64
+MAX_TMUX_PROFILES :: 32
+MAX_TMUX_PROFILE_BINDINGS :: 64
 
 Tab_Edge :: enum { Top, Bottom }
 Tab_Style :: enum { Separator, Hidden }
@@ -57,7 +59,21 @@ Bindings :: struct {
 	focus_left, focus_right, focus_up, focus_down: string,
 	toggle_stack, swap_pane, move_tab_left, move_tab_right: string,
 	copy, paste, font_increase, font_decrease, font_reset: string,
-	tmux_detach: string,
+	tmux_new_tab, tmux_new_window, tmux_attach_last: string,
+	tmux_detach, tmux_reconnect: string,
+}
+
+Tmux_Profile :: struct {
+	name: string,
+	ssh_host: string,
+	session: string,
+	target: Tmux_Target,
+	target_set: bool,
+}
+
+Tmux_Profile_Binding :: struct {
+	profile: string,
+	chord: string,
 }
 
 Cursor_Settings :: struct {
@@ -118,6 +134,8 @@ Settings :: struct {
 	bindings: Bindings,
 	cursor: Cursor_Settings,
 	tmux: Tmux_Settings,
+	tmux_profiles: [dynamic]Tmux_Profile,
+	tmux_profile_bindings: [dynamic]Tmux_Profile_Binding,
 }
 
 settings_init :: proc(settings: ^Settings) {
@@ -188,7 +206,11 @@ settings_init :: proc(settings: ^Settings) {
 		font_increase = strings.clone("alt+equal"),
 		font_decrease = strings.clone("alt+minus"),
 		font_reset = strings.clone("alt+0"),
+		tmux_new_tab = strings.clone("alt+control+t"),
+		tmux_new_window = strings.clone(""),
+		tmux_attach_last = strings.clone("alt+control+a"),
 		tmux_detach = strings.clone("alt+control+d"),
+		tmux_reconnect = strings.clone(""),
 	}
 	settings.cursor = {shape = .Block, blink = true, blink_interval_ms = 500, beam_width = 2, underline_height = 2}
 	settings.tmux = {enabled = true, auto_detect = true, default_target = .New_Tab, active_tab_color = 0x13ba19, auto_reconnect = true}
@@ -207,6 +229,13 @@ settings_destroy :: proc(settings: ^Settings) {
 	delete(settings.tabs.separator)
 	delete(settings.tabs.title_template)
 	destroy_bindings(&settings.bindings)
+	for &profile in settings.tmux_profiles do destroy_tmux_profile(&profile)
+	delete(settings.tmux_profiles)
+	for &binding in settings.tmux_profile_bindings {
+		delete(binding.profile)
+		delete(binding.chord)
+	}
+	delete(settings.tmux_profile_bindings)
 	settings^ = {}
 }
 
@@ -244,8 +273,12 @@ parse :: proc(settings: ^Settings, contents: string) -> Result {
 		if line[0] == '[' {
 			if len(line) < 3 || line[len(line)-1] != ']' do return {error = .Syntax, line = line_number}
 			section = strings.trim_space(line[1:len(line)-1])
-			if section != "main" && section != "scrollback" && section != "url" && section != "shell" && section != "security" && section != "graphics" && section != "window" && section != "tabs" && section != "colors" && section != "bindings" && section != "cursor" && section != "tmux" {
+			if section != "main" && section != "scrollback" && section != "url" && section != "shell" && section != "security" && section != "graphics" && section != "window" && section != "tabs" && section != "colors" && section != "bindings" && section != "cursor" && section != "tmux" && !tmux_profile_section(section) {
 				return {error = .Unknown_Section, line = line_number}
+			}
+			if tmux_profile_section(section) {
+				name := section[len("tmux.profile."):]
+				if !valid_tmux_name(name) || ensure_tmux_profile(settings, name) == nil do return {error = .Invalid_Value, line = line_number}
 			}
 			continue
 		}
@@ -511,8 +544,15 @@ apply :: proc(settings: ^Settings, section, key, value: string) -> Error {
 		case "font-increase": replace_string(&settings.bindings.font_increase, value)
 		case "font-decrease": replace_string(&settings.bindings.font_decrease, value)
 		case "font-reset": replace_string(&settings.bindings.font_reset, value)
+		case "tmux-new-tab": replace_string(&settings.bindings.tmux_new_tab, value)
+		case "tmux-new-window": replace_string(&settings.bindings.tmux_new_window, value)
+		case "tmux-attach-last": replace_string(&settings.bindings.tmux_attach_last, value)
 		case "tmux-detach": replace_string(&settings.bindings.tmux_detach, value)
-		case: return .Unknown_Key
+		case "tmux-reconnect": replace_string(&settings.bindings.tmux_reconnect, value)
+		case:
+			if !strings.has_prefix(key, "tmux-profile.") do return .Unknown_Key
+			name := key[len("tmux-profile."):]
+			if !valid_tmux_name(name) || !set_tmux_profile_binding(settings, name, value) do return .Invalid_Value
 		}
 	} else if section == "cursor" {
 		switch key {
@@ -567,6 +607,26 @@ apply :: proc(settings: ^Settings, section, key, value: string) -> Error {
 			settings.tmux.auto_reconnect = parsed
 		case: return .Unknown_Key
 		}
+	} else if tmux_profile_section(section) {
+		name := section[len("tmux.profile."):]
+		profile := ensure_tmux_profile(settings, name)
+		if profile == nil do return .Invalid_Value
+		switch key {
+		case "ssh-host":
+			if !valid_tmux_name(value) do return .Invalid_Value
+			replace_string(&profile.ssh_host, value)
+		case "session":
+			if !valid_tmux_name(value) do return .Invalid_Value
+			replace_string(&profile.session, value)
+		case "target":
+			switch value {
+			case "new-tab": profile.target = .New_Tab
+			case "new-window": profile.target = .New_Window
+			case: return .Invalid_Value
+			}
+			profile.target_set = true
+		case: return .Unknown_Key
+		}
 	} else {
 		return .Unknown_Section
 	}
@@ -590,8 +650,61 @@ destroy_bindings :: proc(bindings: ^Bindings) {
 	delete(bindings.focus_left); delete(bindings.focus_right); delete(bindings.focus_up); delete(bindings.focus_down)
 	delete(bindings.toggle_stack); delete(bindings.swap_pane); delete(bindings.move_tab_left); delete(bindings.move_tab_right)
 	delete(bindings.copy); delete(bindings.paste); delete(bindings.font_increase); delete(bindings.font_decrease); delete(bindings.font_reset)
-	delete(bindings.tmux_detach)
+	delete(bindings.tmux_new_tab); delete(bindings.tmux_new_window); delete(bindings.tmux_attach_last)
+	delete(bindings.tmux_detach); delete(bindings.tmux_reconnect)
 	bindings^ = {}
+}
+
+tmux_profile :: proc(settings: ^Settings, name: string) -> ^Tmux_Profile {
+	for &profile in settings.tmux_profiles do if profile.name == name do return &profile
+	return nil
+}
+
+tmux_profile_target :: proc(settings: ^Settings, profile: ^Tmux_Profile) -> Tmux_Target {
+	if profile != nil && profile.target_set do return profile.target
+	return settings.tmux.default_target
+}
+
+ensure_tmux_profile :: proc(settings: ^Settings, name: string) -> ^Tmux_Profile {
+	if profile := tmux_profile(settings, name); profile != nil do return profile
+	if len(settings.tmux_profiles) >= MAX_TMUX_PROFILES do return nil
+	append(&settings.tmux_profiles, Tmux_Profile{name = strings.clone(name)})
+	return &settings.tmux_profiles[len(settings.tmux_profiles)-1]
+}
+
+set_tmux_profile_binding :: proc(settings: ^Settings, name, chord: string) -> bool {
+	for &binding in settings.tmux_profile_bindings {
+		if binding.profile == name {
+			replace_string(&binding.chord, chord)
+			return true
+		}
+	}
+	if len(settings.tmux_profile_bindings) >= MAX_TMUX_PROFILE_BINDINGS do return false
+	append(&settings.tmux_profile_bindings, Tmux_Profile_Binding{profile = strings.clone(name), chord = strings.clone(chord)})
+	return true
+}
+
+tmux_profile_section :: proc(section: string) -> bool {
+	return strings.has_prefix(section, "tmux.profile.") && len(section) > len("tmux.profile.")
+}
+
+valid_tmux_name :: proc(value: string) -> bool {
+	if value == "" || len(value) > 128 || value[0] == '-' do return false
+	for character in value {
+		if character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' ||
+		   character >= '0' && character <= '9' || character == '_' || character == '-' || character == '.' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+destroy_tmux_profile :: proc(profile: ^Tmux_Profile) {
+	delete(profile.name)
+	delete(profile.ssh_host)
+	delete(profile.session)
+	profile^ = {}
 }
 
 parse_string :: proc(value: string) -> (string, bool) {

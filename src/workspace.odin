@@ -23,6 +23,7 @@ Pane :: struct {
 	local_terminal: vt.Terminal,
 	has_local_terminal: bool,
 	tmux_session: tmux.Session,
+	tmux_expected: bool,
 	pending: [dynamic]byte,
 	pending_offset: int,
 	selection_state: selection.State,
@@ -139,6 +140,10 @@ workspace_run :: proc(root: ^x11.Window, command: []cstring, settings: ^config.S
 }
 
 workspace_new_pane :: proc(workspace: ^Workspace, cwd: string = "") -> ^Pane {
+	return workspace_new_pane_command(workspace, workspace.command, cwd, false)
+}
+
+workspace_new_pane_command :: proc(workspace: ^Workspace, command: []cstring, cwd: string = "", tmux_expected: bool = false) -> ^Pane {
 	pane := new(Pane)
 	surface, ok := x11.create_child(workspace.root, 0, 0, workspace.root.width, workspace.root.height)
 	if !ok { free(pane); return nil }
@@ -154,11 +159,12 @@ workspace_new_pane :: proc(workspace: ^Workspace, cwd: string = "") -> ^Pane {
 	columns, rows := x11.grid_size(&pane.surface)
 	directory := cwd
 	if directory == "" do directory = workspace.settings.working_directory
-	process, process_error := pty.spawn(workspace.command, pty_size(columns, rows, pane.surface.width, pane.surface.height), workspace.settings.term, directory)
+	process, process_error := pty.spawn(command, pty_size(columns, rows, pane.surface.width, pane.surface.height), workspace.settings.term, directory)
 	if process_error != .None {
 		drawing.destroy(&pane.renderer, &pane.surface); x11.destroy_child(&pane.surface); free(pane); return nil
 	}
 	pane.process = process
+	pane.tmux_expected = tmux_expected
 	if !vt.terminal_init(&pane.terminal, columns, rows, workspace.settings.scrollback_lines, workspace.settings.osc52_policy, &workspace.settings.graphics_limits) {
 		pty.shutdown(&pane.process); drawing.destroy(&pane.renderer, &pane.surface); x11.destroy_child(&pane.surface); free(pane); return nil
 	}
@@ -200,6 +206,15 @@ workspace_destroy :: proc(workspace: ^Workspace) {
 
 workspace_new_tab :: proc(workspace: ^Workspace) -> bool {
 	pane := workspace_new_pane(workspace)
+	return workspace_append_new_tab(workspace, pane)
+}
+
+workspace_new_tab_command :: proc(workspace: ^Workspace, command: []cstring, tmux_expected: bool = false) -> bool {
+	pane := workspace_new_pane_command(workspace, command, "", tmux_expected)
+	return workspace_append_new_tab(workspace, pane)
+}
+
+workspace_append_new_tab :: proc(workspace: ^Workspace, pane: ^Pane) -> bool {
 	if pane == nil do return false
 	tab := new(Tab)
 	append(&tab.panes, pane)
@@ -660,6 +675,32 @@ workspace_shortcut :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
 	tab := workspace_active_tab(workspace)
 	if tab == nil do return false
 	bindings := &workspace.settings.bindings
+	if event_matches(event, bindings.tmux_new_tab) {
+		_ = workspace_new_tmux_tab(workspace, nil, false)
+		return true
+	}
+	if event_matches(event, bindings.tmux_attach_last) {
+		_ = workspace_new_tmux_tab(workspace, nil, true)
+		return true
+	}
+	if event_matches(event, bindings.tmux_new_window) {
+		x11.set_title(workspace.root, "nare - tmux new-window is not implemented")
+		return true
+	}
+	if event_matches(event, bindings.tmux_reconnect) {
+		x11.set_title(workspace.root, "nare - tmux reconnect is not implemented")
+		return true
+	}
+	for &binding in workspace.settings.tmux_profile_bindings {
+		if !event_matches(event, binding.chord) do continue
+		profile := config.tmux_profile(workspace.settings, binding.profile)
+		if profile != nil && config.tmux_profile_target(workspace.settings, profile) == .New_Tab {
+			_ = workspace_new_tmux_tab(workspace, profile, false)
+		} else if profile != nil {
+			x11.set_title(workspace.root, "nare - tmux profile new-window target is not implemented")
+		}
+		return true
+	}
 	if tmux.session_active(&tab.panes[tab.active].tmux_session) {
 		pane := tab.panes[tab.active]
 		if event_matches(event, bindings.tmux_detach) {
@@ -740,6 +781,7 @@ event_matches :: proc(event: x11.Event, chord: string) -> bool {
 	case:
 		if len(key) != 1 || event.key != .Text || event.input_size != 1 do return false
 		actual := event.input[0]
+		if want_control && actual >= 1 && actual <= 26 do actual = 'a'+actual-1
 		if actual >= 'A' && actual <= 'Z' do actual += 'a'-'A'
 		return actual == key[0]
 	}
@@ -927,7 +969,7 @@ workspace_drain :: proc(workspace: ^Workspace, pane: ^Pane) -> bool {
 }
 
 workspace_feed_pty :: proc(workspace: ^Workspace, pane: ^Pane, data: []byte) -> bool {
-	if !workspace.settings.tmux.enabled || !workspace.settings.tmux.auto_detect {
+	if !workspace.settings.tmux.enabled || (!workspace.settings.tmux.auto_detect && !pane.tmux_expected) {
 		selection.clear(&pane.selection_state)
 		vt.terminal_feed(&pane.terminal, data)
 		process_osc52_actions(workspace.root, &pane.terminal, &pane.osc52)
@@ -987,6 +1029,35 @@ workspace_feed_pty :: proc(workspace: ^Workspace, pane: ^Pane, data: []byte) -> 
 		}
 	}
 	return dirty
+}
+
+workspace_new_tmux_tab :: proc(workspace: ^Workspace, profile: ^config.Tmux_Profile, attach_last: bool) -> bool {
+	if !workspace.settings.tmux.enabled do return false
+	command: [dynamic]cstring
+	defer command_destroy(&command)
+	if profile != nil && profile.ssh_host != "" {
+		append_command_argument(&command, "ssh")
+		append_command_argument(&command, "-t")
+		append_command_argument(&command, profile.ssh_host)
+	}
+	append_command_argument(&command, "tmux")
+	append_command_argument(&command, "-CC")
+	if attach_last {
+		append_command_argument(&command, "attach-session")
+	} else {
+		append_command_argument(&command, "new-session")
+		append_command_argument(&command, "-A")
+		if profile != nil && profile.session != "" {
+			append_command_argument(&command, "-s")
+			append_command_argument(&command, profile.session)
+		}
+	}
+	append(&command, nil)
+	return workspace_new_tab_command(workspace, command[:], true)
+}
+
+append_command_argument :: proc(command: ^[dynamic]cstring, argument: string) {
+	append(command, strings.clone_to_cstring(argument))
 }
 
 workspace_tmux_activate :: proc(workspace: ^Workspace, pane: ^Pane) -> bool {
