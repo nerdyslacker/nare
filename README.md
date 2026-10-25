@@ -68,4 +68,6 @@ By default the private socket is `$XDG_RUNTIME_DIR/nare.sock`. Both endpoints ve
 
 The server owns all X11 windows, PTYs, terminal state, and rendering. A waiting client exits with its terminal child's status; disconnecting that client closes its associated window. `--no-wait` transfers the window lifetime to the server after creation. A server crash or shutdown closes every server-owned window and session; this mode does not promise persistence or reconnection.
 
-The server's configuration controls window appearance. Client requests currently transfer the command and working directory; per-client rendering overrides and cross-window glyph-cache sharing are not implemented yet.
+An explicitly launched server stays alive when its last window closes. Stop it with `SIGINT` or `SIGTERM`; service managers may impose a different lifetime policy.
+
+The server's configuration controls window appearance. Client requests currently transfer the command and working directory; per-client rendering overrides are not implemented yet. Panes and simultaneous server windows at the same font size share font faces, shaping resources, and the bounded glyph cache, while each pane keeps independent CPU/GPU and X11 renderer state.

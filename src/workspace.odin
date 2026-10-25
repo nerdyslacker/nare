@@ -7,6 +7,7 @@ import "core:sys/posix"
 import "core:time"
 import config "config"
 import features "features"
+import fonts "font"
 import keyboard "input"
 import pty "pty"
 import drawing "render"
@@ -96,6 +97,64 @@ Workspace :: struct {
 	scroll_redraw_source: xlib.Window,
 	exit_status: int,
 	exit_status_set: bool,
+	font_cache: ^Workspace_Font_Cache,
+	local_font_cache: Workspace_Font_Cache,
+	font_entry: ^Workspace_Font_Cache_Entry,
+}
+
+Workspace_Font_Cache_Entry :: struct {
+	manager: fonts.Manager,
+	pixel_size: int,
+	references: int,
+}
+
+Workspace_Font_Cache :: struct {
+	entries: [dynamic]^Workspace_Font_Cache_Entry,
+}
+
+workspace_font_cache_acquire :: proc(cache: ^Workspace_Font_Cache, settings: ^config.Settings, pixel_size: int) -> ^Workspace_Font_Cache_Entry {
+	if cache == nil || settings == nil do return nil
+	for entry in cache.entries {
+		if entry.pixel_size == pixel_size {
+			entry.references += 1
+			return entry
+		}
+	}
+	entry := new(Workspace_Font_Cache_Entry)
+	if fonts.init(
+		&entry.manager, settings.font, pixel_size, settings.bold_font, settings.italic_font,
+		settings.bold_italic_font, settings.cell_width_percent, settings.cell_height_percent,
+	) != .None {
+		free(entry)
+		return nil
+	}
+	entry.pixel_size = pixel_size
+	entry.references = 1
+	append(&cache.entries, entry)
+	return entry
+}
+
+workspace_font_cache_release :: proc(cache: ^Workspace_Font_Cache, entry: ^Workspace_Font_Cache_Entry) {
+	if cache == nil || entry == nil do return
+	entry.references -= 1
+	if entry.references > 0 do return
+	for candidate, index in cache.entries {
+		if candidate != entry do continue
+		fonts.destroy(&entry.manager)
+		free(entry)
+		unordered_remove(&cache.entries, index)
+		return
+	}
+}
+
+workspace_font_cache_destroy :: proc(cache: ^Workspace_Font_Cache) {
+	if cache == nil do return
+	for entry in cache.entries {
+		fonts.destroy(&entry.manager)
+		free(entry)
+	}
+	delete(cache.entries)
+	cache^ = {}
 }
 
 Workspace_Poll_Target :: struct {
@@ -138,15 +197,25 @@ workspace_init :: proc(
 	command: []cstring,
 	settings: ^config.Settings,
 	initial_cwd: string = "",
+	font_cache: ^Workspace_Font_Cache = nil,
 ) -> bool {
 	workspace^ = Workspace{
 		root = root, settings = settings, command = command, initial_font_size = settings.font_size, font_size = settings.font_size,
 		renaming_tab = -1, last_click_tab = -2, last_cursor_toggle = time.now(), tab_reveal_active = true,
 	}
+	if font_cache == nil do font_cache = &workspace.local_font_cache
+	workspace.font_cache = font_cache
+	workspace.font_entry = workspace_font_cache_acquire(font_cache, settings, workspace.font_size)
+	if workspace.font_entry == nil do return false
 	x11.set_surface_colors(root, settings.theme.background, settings.ui_colors.active_border)
 	pane := workspace_new_pane_command(workspace, command, initial_cwd, settings.tmux.explicit_launch)
 	created := workspace_append_new_tab(workspace, pane)
-	if !created do return false
+	if !created {
+		workspace_font_cache_release(workspace.font_cache, workspace.font_entry)
+		workspace.font_entry = nil
+		if workspace.font_cache == &workspace.local_font_cache do workspace_font_cache_destroy(&workspace.local_font_cache)
+		return false
+	}
 	search_surface, search_ok := x11.create_child(root, 0, 0, 1, 1)
 	if search_ok {
 		workspace.search_surface = search_surface
@@ -238,6 +307,7 @@ workspace_new_pane_command :: proc(workspace: ^Workspace, command: []cstring, cw
 		workspace.settings.font, workspace.font_size, workspace.settings.font_bold,
 		workspace.settings.bold_font, workspace.settings.italic_font, workspace.settings.bold_italic_font,
 		workspace.settings.cell_width_percent, workspace.settings.cell_height_percent,
+		&workspace.font_entry.manager,
 	) != .None {
 		x11.destroy_child(&pane.surface); free(pane); return nil
 	}
@@ -275,6 +345,7 @@ workspace_new_tmux_view :: proc(workspace: ^Workspace, owner: ^Pane, pane_id: in
 		workspace.settings.font, workspace.font_size, workspace.settings.font_bold,
 		workspace.settings.bold_font, workspace.settings.italic_font, workspace.settings.bold_italic_font,
 		workspace.settings.cell_width_percent, workspace.settings.cell_height_percent,
+		&workspace.font_entry.manager,
 	) != .None {
 		x11.destroy_child(&pane.surface)
 		free(pane)
@@ -356,6 +427,10 @@ workspace_destroy :: proc(workspace: ^Workspace) {
 	delete(workspace.tabs)
 	delete(workspace.tab_bounds)
 	delete(workspace.rename_buffer)
+	workspace_font_cache_release(workspace.font_cache, workspace.font_entry)
+	workspace.font_entry = nil
+	if workspace.font_cache == &workspace.local_font_cache do workspace_font_cache_destroy(&workspace.local_font_cache)
+	workspace.font_cache = nil
 }
 
 workspace_new_tab :: proc(workspace: ^Workspace) -> bool {
@@ -544,7 +619,7 @@ workspace_draw_tabs :: proc(workspace: ^Workspace) {
 	colors := workspace.settings.ui_colors
 	pane := workspace_active_pane(workspace)
 	if pane == nil do return
-	draw_workspace_tab_bar(workspace.root, &pane.renderer.font, labels, &workspace.tab_bounds, y, height, colors.tab_bar_background, colors.active_tab_foreground, colors.active_tab_background, colors.inactive_tab_foreground, colors.inactive_tab_background, colors.root_tab_background, workspace.settings.tmux.active_tab_color, workspace.settings.tabs.active_bold, workspace.active, &workspace.tab_scroll_offset, workspace.tab_reveal_active)
+	draw_workspace_tab_bar(workspace.root, pane.renderer.font, labels, &workspace.tab_bounds, y, height, colors.tab_bar_background, colors.active_tab_foreground, colors.active_tab_background, colors.inactive_tab_foreground, colors.inactive_tab_background, colors.root_tab_background, workspace.settings.tmux.active_tab_color, workspace.settings.tabs.active_bold, workspace.active, &workspace.tab_scroll_offset, workspace.tab_reveal_active)
 	workspace.tab_reveal_active = false
 }
 
@@ -574,7 +649,7 @@ workspace_draw_search_bar :: proc(workspace: ^Workspace) {
 	}
 	draw_workspace_search_bar(
 		window,
-		&pane.renderer.font,
+		pane.renderer.font,
 		label,
 		y,
 		height,
@@ -836,8 +911,8 @@ workspace_tab_page_width :: proc(workspace: ^Workspace) -> int {
 	height := workspace_tab_bar_height(workspace)
 	pane := workspace_active_pane(workspace)
 	if height <= 0 || pane == nil do return max(1, workspace.root.width)
-	arrow_width := tab_arrow_width(&pane.renderer.font, workspace.root.width, height)
-	new_tab_space := tab_new_tab_space_width(&pane.renderer.font, workspace.root.width)
+	arrow_width := tab_arrow_width(pane.renderer.font, workspace.root.width, height)
+	new_tab_space := tab_new_tab_space_width(pane.renderer.font, workspace.root.width)
 	return max(1, workspace.root.width-arrow_width*2-new_tab_space)
 }
 
@@ -1108,6 +1183,10 @@ event_matches :: proc(event: x11.Event, chord: string) -> bool {
 workspace_font_size :: proc(workspace: ^Workspace, size: int) {
 	new_size := clamp(size, config.MIN_FONT_SIZE, config.MAX_FONT_SIZE)
 	if new_size == workspace.font_size do return
+	new_entry := workspace_font_cache_acquire(workspace.font_cache, workspace.settings, new_size)
+	if new_entry == nil do return
+	old_entry := workspace.font_entry
+	workspace.font_entry = new_entry
 	workspace.font_size = new_size
 	for tab in workspace.tabs do for pane in tab.panes {
 		drawing.destroy(&pane.renderer, &pane.surface)
@@ -1116,9 +1195,11 @@ workspace_font_size :: proc(workspace: ^Workspace, size: int) {
 			workspace.settings.font, new_size, workspace.settings.font_bold,
 			workspace.settings.bold_font, workspace.settings.italic_font, workspace.settings.bold_italic_font,
 			workspace.settings.cell_width_percent, workspace.settings.cell_height_percent,
+			&new_entry.manager,
 		)
 		if font_error != .None do continue
 	}
+	workspace_font_cache_release(workspace.font_cache, old_entry)
 	workspace_layout(workspace)
 }
 

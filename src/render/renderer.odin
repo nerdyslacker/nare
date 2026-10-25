@@ -41,7 +41,9 @@ set_theme :: proc(theme: Theme) {
 }
 
 Renderer :: struct {
-	font: fonts.Manager,
+	font: ^fonts.Manager,
+	owned_font: fonts.Manager,
+	owns_font: bool,
 	cpu: CPU,
 	gpu: GPU,
 	active: Kind,
@@ -62,9 +64,16 @@ init :: proc(
 	bold_italic_family: string = "auto",
 	cell_width_percent: int = 100,
 	cell_height_percent: int = 100,
+	shared_font: ^fonts.Manager = nil,
 ) -> Error {
-	font_error := fonts.init(&renderer.font, family, pixel_size, bold_family, italic_family, bold_italic_family, cell_width_percent, cell_height_percent)
-	if font_error != .None do return .Font
+	if shared_font != nil {
+		renderer.font = shared_font
+	} else {
+		font_error := fonts.init(&renderer.owned_font, family, pixel_size, bold_family, italic_family, bold_italic_family, cell_width_percent, cell_height_percent)
+		if font_error != .None do return .Font
+		renderer.font = &renderer.owned_font
+		renderer.owns_font = true
+	}
 	x11.set_cell_size(window, renderer.font.cell_width, renderer.font.cell_height)
 	if !cpu_resize(&renderer.cpu, window) {
 		destroy(renderer)
@@ -103,7 +112,7 @@ select_kind :: proc(requested: Kind, gpu_ready: bool) -> (selected: Kind, availa
 destroy :: proc(renderer: ^Renderer, window: ^x11.Window = nil) {
 	if window != nil do gpu_destroy(&renderer.gpu, window)
 	cpu_destroy(&renderer.cpu)
-	fonts.destroy(&renderer.font)
+	if renderer.owns_font do fonts.destroy(&renderer.owned_font)
 	renderer^ = {}
 }
 
@@ -127,13 +136,13 @@ draw :: proc(
 ) {
 	if terminal.modes.synchronized_updates do return
 	if renderer.active == .CPU {
-		cpu_draw(&renderer.cpu, &renderer.font, window, terminal, renderer.ligatures, force, selection_state, screen_override, scrollbar)
+		cpu_draw(&renderer.cpu, renderer.font, window, terminal, renderer.ligatures, force, selection_state, screen_override, scrollbar)
 		return
 	}
-	if !gpu_draw(&renderer.gpu, &renderer.cpu, &renderer.font, window, terminal, renderer.ligatures, force, selection_state, screen_override, scrollbar) {
+	if !gpu_draw(&renderer.gpu, &renderer.cpu, renderer.font, window, terminal, renderer.ligatures, force, selection_state, screen_override, scrollbar) {
 		gpu_destroy(&renderer.gpu, window)
 		renderer.active = .CPU
-		_ = cpu_render(&renderer.cpu, &renderer.font, window, terminal, renderer.ligatures, true, selection_state, screen_override, scrollbar)
+		_ = cpu_render(&renderer.cpu, renderer.font, window, terminal, renderer.ligatures, true, selection_state, screen_override, scrollbar)
 		screen := screen_override
 		if screen == nil do screen = vt.terminal_screen(terminal)
 		cpu_present(&renderer.cpu, window, screen.columns)

@@ -44,6 +44,7 @@ Server :: struct {
 	settings: ^config.Settings,
 	clients: [dynamic]^Server_Client,
 	windows: [dynamic]^Server_Window,
+	font_cache: Workspace_Font_Cache,
 	next_session_id: u64,
 }
 
@@ -100,6 +101,7 @@ server_destroy :: proc(server: ^Server) {
 	for client in server.clients do server_client_destroy(client)
 	delete(server.windows)
 	delete(server.clients)
+	workspace_font_cache_destroy(&server.font_cache)
 	ipc.listener_close(&server.listener)
 	server^ = {}
 }
@@ -127,7 +129,7 @@ server_launch_window :: proc(server: ^Server, client: ^Server_Client, frame: ^ip
 	window.root = root
 	x11.set_opacity(&window.root, server.settings.window.background_opacity)
 	x11.set_decorations(&window.root, server.settings.window.decorations)
-	if !workspace_init(&window.workspace, &window.root, window.command[:], server.settings, request.working_directory) {
+	if !workspace_init(&window.workspace, &window.root, window.command[:], server.settings, request.working_directory, &server.font_cache) {
 		x11.close(&window.root)
 		command_destroy(&window.command)
 		free(window)
