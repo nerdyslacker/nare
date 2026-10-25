@@ -83,6 +83,7 @@ Workspace :: struct {
 	active: int,
 	close_armed: bool,
 	initial_font_size: int,
+	font_size: int,
 	tab_bounds: [dynamic]Tab_Bounds,
 	tab_scroll_offset: int,
 	tab_reveal_active: bool,
@@ -93,6 +94,13 @@ Workspace :: struct {
 	last_cursor_toggle: time.Time,
 	last_privilege_check: time.Time,
 	scroll_redraw_source: xlib.Window,
+	exit_status: int,
+	exit_status_set: bool,
+}
+
+Workspace_Poll_Target :: struct {
+	workspace: ^Workspace,
+	pane: ^Pane,
 }
 
 PRIVILEGE_CHECK_INTERVAL :: 250*time.Millisecond
@@ -100,82 +108,119 @@ TMUX_RECONCILE_INTERVAL :: 2*time.Second
 TMUX_MAX_RECONNECT_ATTEMPTS :: 8
 
 workspace_run :: proc(root: ^x11.Window, command: []cstring, settings: ^config.Settings) -> int {
-	workspace := Workspace{
-		root = root, settings = settings, command = command, initial_font_size = settings.font_size,
-		renaming_tab = -1, last_click_tab = -2, last_cursor_toggle = time.now(), tab_reveal_active = true,
-	}
-	defer workspace_destroy(&workspace)
-	x11.set_surface_colors(root, settings.theme.background, settings.ui_colors.active_border)
-	created := workspace_new_tab_command(&workspace, command, true) if settings.tmux.explicit_launch else workspace_new_tab(&workspace)
-	if !created {
+	workspace: Workspace
+	if !workspace_init(&workspace, root, command, settings) {
 		fmt.eprintln("could not create terminal session")
 		return 1
 	}
+	defer workspace_destroy(&workspace)
+	for workspace_service(&workspace) {
+		fds: [dynamic]posix.pollfd
+		targets: [dynamic]Workspace_Poll_Target
+		workspace_append_poll(&workspace, &fds, &targets)
+		if posix.poll(raw_data(fds), u64(len(fds)), 50) < 0 {
+			delete(fds)
+			delete(targets)
+			if posix.errno() == .EINTR do continue
+			return 1
+		}
+		for index in 0..<len(fds) do workspace_dispatch_poll(targets[index], fds[index].revents)
+		workspace_finish_cycle(&workspace)
+		delete(fds)
+		delete(targets)
+	}
+	return 0
+}
+
+workspace_init :: proc(
+	workspace: ^Workspace,
+	root: ^x11.Window,
+	command: []cstring,
+	settings: ^config.Settings,
+	initial_cwd: string = "",
+) -> bool {
+	workspace^ = Workspace{
+		root = root, settings = settings, command = command, initial_font_size = settings.font_size, font_size = settings.font_size,
+		renaming_tab = -1, last_click_tab = -2, last_cursor_toggle = time.now(), tab_reveal_active = true,
+	}
+	x11.set_surface_colors(root, settings.theme.background, settings.ui_colors.active_border)
+	pane := workspace_new_pane_command(workspace, command, initial_cwd, settings.tmux.explicit_launch)
+	created := workspace_append_new_tab(workspace, pane)
+	if !created do return false
 	search_surface, search_ok := x11.create_child(root, 0, 0, 1, 1)
 	if search_ok {
 		workspace.search_surface = search_surface
 		x11.show_child(&workspace.search_surface, false)
 	}
-	workspace_layout(&workspace)
-	workspace_refresh_privileged_tabs(&workspace, true)
+	workspace_layout(workspace)
+	workspace_refresh_privileged_tabs(workspace, true)
 	x11.set_mouse_tracking(root, 0, settings.scrollbar_enabled)
-	for len(workspace.tabs) > 0 {
-		for tab in workspace.tabs {
-			for pane in tab.panes {
-				if pane.visible do x11.set_mouse_tracking(&pane.surface, pane.terminal.modes.mouse_tracking, settings.scrollbar_enabled)
-			}
+	return true
+}
+
+workspace_service :: proc(workspace: ^Workspace) -> bool {
+	if workspace == nil || len(workspace.tabs) == 0 do return false
+	for tab in workspace.tabs {
+		for pane in tab.panes {
+			if pane.visible do x11.set_mouse_tracking(&pane.surface, pane.terminal.modes.mouse_tracking, workspace.settings.scrollbar_enabled)
 		}
-		for {
-			event, available := x11.next_event(root)
-			if !available do break
-			if !workspace_event(&workspace, event) do return 0
-		}
-		if workspace.scroll_redraw_source != 0 {
-			if pane := workspace_find_pane(&workspace, workspace.scroll_redraw_source); pane != nil && pane.visible {
-				workspace_redraw(&workspace, pane, true)
-			}
-			workspace.scroll_redraw_source = 0
-		}
-		workspace_reap(&workspace)
-		workspace_tmux_reconnect_tick(&workspace)
-		workspace_tmux_reconcile_tick(&workspace)
-		if len(workspace.tabs) == 0 do break
-		fds: [dynamic]posix.pollfd
-		owners: [dynamic]^Pane
-		append(&fds, {fd = posix.FD(x11.connection_fd(root)), events = {.IN}})
-		append(&owners, nil)
-		for tab in workspace.tabs {
-			for pane in tab.panes {
-				if pane.exited || pane.tmux_disconnected || pane.tmux_owner != nil do continue
-				events: posix.Poll_Event = {.IN}
-				if pane.pending_offset < len(pane.pending) do events += {.OUT}
-				append(&fds, {fd = pane.process.master, events = events})
-				append(&owners, pane)
-			}
-		}
-		if posix.poll(raw_data(fds), u64(len(fds)), 50) < 0 {
-			delete(fds)
-			delete(owners)
-			if posix.errno() == .EINTR do continue
-			return 1
-		}
-		for index in 1..<len(fds) {
-			pane := owners[index]
-			if .IN in fds[index].revents || .HUP in fds[index].revents {
-				if !workspace_drain(&workspace, pane) do pane.exited = true
-			}
-			if .OUT in fds[index].revents do workspace_write(pane)
-			if .ERR in fds[index].revents || .NVAL in fds[index].revents {
-				if len(pane.reconnect_command) > 0 && !pane.tmux_reconnect_disabled do workspace_tmux_disconnect(&workspace, pane)
-				else do pane.exited = true
-			}
-		}
-		workspace_cursor_tick(&workspace)
-		workspace_refresh_privileged_tabs(&workspace, false)
-		delete(fds)
-		delete(owners)
 	}
-	return 0
+	for {
+		event, available := x11.next_event(workspace.root)
+		if !available do break
+		if !workspace_event(workspace, event) do return false
+	}
+	if workspace.scroll_redraw_source != 0 {
+		if pane := workspace_find_pane(workspace, workspace.scroll_redraw_source); pane != nil && pane.visible {
+			workspace_redraw(workspace, pane, true)
+		}
+		workspace.scroll_redraw_source = 0
+	}
+	workspace_reap(workspace)
+	workspace_tmux_reconnect_tick(workspace)
+	workspace_tmux_reconcile_tick(workspace)
+	return len(workspace.tabs) > 0
+}
+
+workspace_append_poll :: proc(
+	workspace: ^Workspace,
+	fds: ^[dynamic]posix.pollfd,
+	targets: ^[dynamic]Workspace_Poll_Target,
+) {
+	append(fds, {fd = posix.FD(x11.connection_fd(workspace.root)), events = {.IN}})
+	append(targets, {workspace = workspace})
+	for tab in workspace.tabs {
+		for pane in tab.panes {
+			if pane.exited || pane.tmux_disconnected || pane.tmux_owner != nil do continue
+			events: posix.Poll_Event = {.IN}
+			if pane.pending_offset < len(pane.pending) do events += {.OUT}
+			append(fds, {fd = pane.process.master, events = events})
+			append(targets, {workspace = workspace, pane = pane})
+		}
+	}
+}
+
+workspace_dispatch_poll :: proc(target: Workspace_Poll_Target, events: posix.Poll_Event) {
+	if target.workspace == nil || target.pane == nil do return
+	pane := target.pane
+	if .IN in events || .HUP in events {
+		if !workspace_drain(target.workspace, pane) do pane.exited = true
+	}
+	if .OUT in events do workspace_write(pane)
+	if .ERR in events || .NVAL in events {
+		if len(pane.reconnect_command) > 0 && !pane.tmux_reconnect_disabled do workspace_tmux_disconnect(target.workspace, pane)
+		else do pane.exited = true
+	}
+}
+
+workspace_finish_cycle :: proc(workspace: ^Workspace) {
+	workspace_cursor_tick(workspace)
+	workspace_refresh_privileged_tabs(workspace, false)
+}
+
+workspace_exit_status :: proc(workspace: ^Workspace) -> int {
+	if workspace == nil || !workspace.exit_status_set do return 0
+	return workspace.exit_status
 }
 
 workspace_new_pane :: proc(workspace: ^Workspace, cwd: string = "") -> ^Pane {
@@ -190,7 +235,7 @@ workspace_new_pane_command :: proc(workspace: ^Workspace, command: []cstring, cw
 	pane.surface = surface
 	if drawing.init(
 		&pane.renderer, &pane.surface, workspace.settings.renderer, workspace.settings.ligatures,
-		workspace.settings.font, workspace.settings.font_size, workspace.settings.font_bold,
+		workspace.settings.font, workspace.font_size, workspace.settings.font_bold,
 		workspace.settings.bold_font, workspace.settings.italic_font, workspace.settings.bold_italic_font,
 		workspace.settings.cell_width_percent, workspace.settings.cell_height_percent,
 	) != .None {
@@ -227,7 +272,7 @@ workspace_new_tmux_view :: proc(workspace: ^Workspace, owner: ^Pane, pane_id: in
 	pane.surface = surface
 	if drawing.init(
 		&pane.renderer, &pane.surface, workspace.settings.renderer, workspace.settings.ligatures,
-		workspace.settings.font, workspace.settings.font_size, workspace.settings.font_bold,
+		workspace.settings.font, workspace.font_size, workspace.settings.font_bold,
 		workspace.settings.bold_font, workspace.settings.italic_font, workspace.settings.bold_italic_font,
 		workspace.settings.cell_width_percent, workspace.settings.cell_height_percent,
 	) != .None {
@@ -457,7 +502,7 @@ workspace_tmux_window_size :: proc(tab: ^Tab) -> (columns, rows: int) {
 workspace_tab_bar_height :: proc(workspace: ^Workspace) -> int {
 	if !workspace.settings.tabs.enabled || workspace.settings.tabs.style == .Hidden || len(workspace.tabs) < workspace.settings.tabs.minimum do return 0
 	pane := workspace_active_pane(workspace)
-	if pane == nil do return workspace.settings.font_size+10
+	if pane == nil do return workspace.font_size+10
 	return pane.renderer.font.cell_height+4
 }
 
@@ -993,8 +1038,8 @@ workspace_shortcut :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
 		if event_matches(event, bindings.swap_pane) {tmux.request_swap_pane(&owner.tmux_session, &owner.pending, pane.tmux_pane_id); return true}
 		if event_matches(event, bindings.copy) { copy_selection(workspace.root, &tab.panes[tab.active].terminal, &tab.panes[tab.active].selection_state, .Clipboard); return true }
 		if event_matches(event, bindings.paste) {x11.request_selection(workspace.root, .Clipboard); return true}
-		if event_matches(event, bindings.font_increase) { workspace_font_size(workspace, workspace.settings.font_size+1); return true }
-		if event_matches(event, bindings.font_decrease) { workspace_font_size(workspace, workspace.settings.font_size-1); return true }
+		if event_matches(event, bindings.font_increase) { workspace_font_size(workspace, workspace.font_size+1); return true }
+		if event_matches(event, bindings.font_decrease) { workspace_font_size(workspace, workspace.font_size-1); return true }
 		if event_matches(event, bindings.font_reset) { workspace_font_size(workspace, workspace.initial_font_size); return true }
 		if event_matches(event, bindings.move_tab_left) {workspace_move_tab(workspace, -1); return true}
 		if event_matches(event, bindings.move_tab_right) {workspace_move_tab(workspace, 1); return true}
@@ -1022,8 +1067,8 @@ workspace_shortcut :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
 	}
 	if event_matches(event, bindings.copy) { copy_selection(workspace.root, &tab.panes[tab.active].terminal, &tab.panes[tab.active].selection_state, .Clipboard); return true }
 	if event_matches(event, bindings.paste) { x11.request_selection(workspace.root, .Clipboard); return true }
-	if event_matches(event, bindings.font_increase) { workspace_font_size(workspace, workspace.settings.font_size+1); return true }
-	if event_matches(event, bindings.font_decrease) { workspace_font_size(workspace, workspace.settings.font_size-1); return true }
+	if event_matches(event, bindings.font_increase) { workspace_font_size(workspace, workspace.font_size+1); return true }
+	if event_matches(event, bindings.font_decrease) { workspace_font_size(workspace, workspace.font_size-1); return true }
 	if event_matches(event, bindings.font_reset) { workspace_font_size(workspace, workspace.initial_font_size); return true }
 	if event.key != .Text || event.input_size != 1 || .Alt not_in event.modifiers do return false
 	character := event.input[0]
@@ -1062,8 +1107,8 @@ event_matches :: proc(event: x11.Event, chord: string) -> bool {
 
 workspace_font_size :: proc(workspace: ^Workspace, size: int) {
 	new_size := clamp(size, config.MIN_FONT_SIZE, config.MAX_FONT_SIZE)
-	if new_size == workspace.settings.font_size do return
-	workspace.settings.font_size = new_size
+	if new_size == workspace.font_size do return
+	workspace.font_size = new_size
 	for tab in workspace.tabs do for pane in tab.panes {
 		drawing.destroy(&pane.renderer, &pane.surface)
 		font_error := drawing.init(
@@ -1215,6 +1260,12 @@ workspace_session_count :: proc(workspace: ^Workspace) -> int {
 	return count
 }
 
+workspace_record_exit :: proc(workspace: ^Workspace, pane: ^Pane) {
+	if pane == nil || pane.tmux_owner != nil do return
+	workspace.exit_status = pty.exit_code(&pane.process)
+	workspace.exit_status_set = true
+}
+
 workspace_reap :: proc(workspace: ^Workspace) {
 	changed := false
 	for tab in workspace.tabs do for pane in tab.panes {
@@ -1222,6 +1273,7 @@ workspace_reap :: proc(workspace: ^Workspace) {
 		if pane.tmux_disconnected do continue
 		if !pane.exited {
 			if done, _ := pty.reap(&pane.process); done {
+				workspace_record_exit(workspace, pane)
 				if len(pane.reconnect_command) > 0 && !pane.tmux_reconnect_disabled do workspace_tmux_disconnect(workspace, pane)
 				else {pane.exited = true; pty.shutdown(&pane.process)}
 			}
@@ -1241,6 +1293,8 @@ workspace_reap :: proc(workspace: ^Workspace) {
 		pane_index := len(tab.panes)-1
 		for pane_index >= 0 {
 			if tab.panes[pane_index].exited {
+				pty.shutdown(&tab.panes[pane_index].process)
+				workspace_record_exit(workspace, tab.panes[pane_index])
 				pane_destroy(tab.panes[pane_index])
 				ordered_remove(&tab.panes, pane_index)
 				changed = true

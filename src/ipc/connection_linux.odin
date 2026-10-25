@@ -56,6 +56,13 @@ connection_queue_frame :: proc(
 	return .None
 }
 
+connection_queue_bytes :: proc(connection: ^Connection, data: []byte) -> IO_Error {
+	connection_compact(connection)
+	if len(data) > MAX_PENDING_WRITE_BYTES-len(connection.pending) do return .Limit
+	append(&connection.pending, ..data)
+	return .None
+}
+
 connection_flush :: proc(connection: ^Connection) -> IO_Error {
 	for connection.pending_offset < len(connection.pending) {
 		data := connection.pending[connection.pending_offset:]

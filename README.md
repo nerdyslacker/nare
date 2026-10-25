@@ -26,6 +26,7 @@
 - Kitty Graphics, Sixel, and iTerm2 inline images with scaling, transparency, clipping, scrolling, and CPU/GPU composition.
 - OSC 0/2/7/8/52/133 and XTGETTCAP support, including prompt navigation and command-output copy or piping.
 - Runtime configuration, bounded image and transfer resources, and bundled terminfo.
+- Optional local server/client mode with isolated windows, bounded authenticated IPC, and waiting or detached client launches.
 
 ## Dependencies
 
@@ -51,3 +52,20 @@ make
 Configuration is loaded from `$XDG_CONFIG_HOME/nare/nare.conf`, or `~/.config/nare/nare.conf`. Copy [nare.conf](nare.conf) as a starting point; command-line options override it.
 
 Run `nare /path/to/folder` to open a shell in that folder. `make install` also installs the desktop entry used by file managers for **Open with nare**.
+
+## Server mode
+
+Server mode is optional; ordinary `nare` launches remain standalone and never contact a daemon.
+
+```sh
+nare --server
+nare --client
+nare --client -e htop
+nare --client --no-wait /path/to/project
+```
+
+By default the private socket is `$XDG_RUNTIME_DIR/nare.sock`. Both endpoints verify same-user peer credentials. `--server-socket=PATH` selects an explicit path for supervised or test setups.
+
+The server owns all X11 windows, PTYs, terminal state, and rendering. A waiting client exits with its terminal child's status; disconnecting that client closes its associated window. `--no-wait` transfers the window lifetime to the server after creation. A server crash or shutdown closes every server-owned window and session; this mode does not promise persistence or reconnection.
+
+The server's configuration controls window appearance. Client requests currently transfer the command and working directory; per-client rendering overrides and cross-window glyph-cache sharing are not implemented yet.

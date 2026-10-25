@@ -15,12 +15,28 @@ import x11 "x11"
 
 MAX_PENDING_INPUT :: x11.MAX_SELECTION_BYTES + 64 * 1024
 
+Launch_Mode :: enum { Standalone, Server, Client }
+
+Launch_Options :: struct {
+	mode: Launch_Mode,
+	wait: bool,
+	socket_path: string,
+	arguments: [dynamic]string,
+}
+
 main :: proc() {
 	os.exit(app_main())
 }
 
 app_main :: proc() -> int {
-	options, command, command_err := command_from_args(os.args[1:])
+	launch, launch_err := launch_options(os.args[1:])
+	defer delete(launch.arguments)
+	if launch_err != "" {
+		fmt.eprintln(launch_err)
+		delete(launch_err)
+		return 2
+	}
+	options, command, command_err := command_from_args(launch.arguments[:])
 	defer config.settings_destroy(&options)
 	if command_err != "" {
 		fmt.eprintln(command_err)
@@ -28,6 +44,8 @@ app_main :: proc() -> int {
 		return 2
 	}
 	defer command_destroy(&command)
+	if launch.mode == .Server do return server_run(&options, launch.socket_path)
+	if launch.mode == .Client do return client_run(command[:], options.working_directory, launch.socket_path, launch.wait)
 
 	title := strings.clone_to_cstring(options.title)
 	defer delete(title)
@@ -41,6 +59,41 @@ app_main :: proc() -> int {
 	x11.set_decorations(&window, options.window.decorations)
 	drawing.set_theme(options.theme)
 	return workspace_run(&window, command[:], &options)
+}
+
+launch_options :: proc(args: []string) -> (options: Launch_Options, err: string) {
+	options.wait = true
+	for index := 0; index < len(args); index += 1 {
+		argument := args[index]
+		if argument == "-e" {
+			append(&options.arguments, ..args[index:])
+			break
+		}
+		switch argument {
+		case "--server":
+			if options.mode == .Client do return options, strings.clone(usage())
+			options.mode = .Server
+		case "--client":
+			if options.mode == .Server do return options, strings.clone(usage())
+			options.mode = .Client
+		case "--no-wait":
+			options.wait = false
+		case "--server-socket":
+			if index+1 >= len(args) || args[index+1] == "" do return options, strings.clone(usage())
+			index += 1
+			options.socket_path = args[index]
+		case:
+			if strings.has_prefix(argument, "--server-socket=") {
+				options.socket_path = argument[len("--server-socket="):]
+				if options.socket_path == "" do return options, strings.clone(usage())
+			} else {
+				append(&options.arguments, argument)
+			}
+		}
+	}
+	if options.mode != .Client && !options.wait do return options, strings.clone(usage())
+	if options.mode == .Standalone && options.socket_path != "" do return options, strings.clone(usage())
+	return options, ""
 }
 
 command_from_args :: proc(args: []string) -> (options: config.Settings, command: [dynamic]cstring, err: string) {
@@ -222,7 +275,7 @@ apply_argument :: proc(options: ^config.Settings, argument: string) -> config.Er
 }
 
 usage :: proc() -> string {
-	return "usage: nare [DIRECTORY|--working-directory=PATH] [--config=PATH|--no-config] [--renderer=cpu|gpu|auto] [--font=FAMILY] [--font-size=PIXELS] [--ligatures=true|false] [--title=TITLE] [--scrollback-lines=COUNT] [--url-opener=COMMAND] [--output-pipe=COMMAND] [--term=NAME] [--osc52=disabled|copy-enabled|paste-enabled|enabled] [--tmux [SESSION]|--tmux-profile=NAME] [--ssh=HOST] [--session=NAME] [--new-tab|--new-window] [-e COMMAND [ARG...]]"
+	return "usage: nare [--server|--client [--no-wait]] [--server-socket=PATH] [DIRECTORY|--working-directory=PATH] [--config=PATH|--no-config] [--renderer=cpu|gpu|auto] [--font=FAMILY] [--font-size=PIXELS] [--ligatures=true|false] [--title=TITLE] [--scrollback-lines=COUNT] [--url-opener=COMMAND] [--output-pipe=COMMAND] [--term=NAME] [--osc52=disabled|copy-enabled|paste-enabled|enabled] [--tmux [SESSION]|--tmux-profile=NAME] [--ssh=HOST] [--session=NAME] [--new-tab|--new-window] [-e COMMAND [ARG...]]"
 }
 
 OSC52_Request :: struct {

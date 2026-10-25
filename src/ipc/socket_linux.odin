@@ -197,6 +197,10 @@ connect_socket :: proc(path: string) -> (posix.FD, Socket_Error) {
 		if credential_error != .None do return -1, credential_error
 		return -1, .Unauthorized
 	}
+	if !set_socket_nonblocking(fd) {
+		_ = posix.close(fd)
+		return -1, .Connect
+	}
 	return fd, .None
 }
 
