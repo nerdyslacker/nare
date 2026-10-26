@@ -161,6 +161,50 @@ draw_workspace_search_bar :: proc(
 	_ = xlib.Flush(window.display)
 }
 
+draw_workspace_close_dialog :: proc(
+	window: ^x11.Window,
+	font: ^fonts.Manager,
+	background, foreground, accent, secondary: u32,
+) {
+	if window.width <= 0 || window.height <= 0 do return
+	byte_count := window.width*window.height*size_of(u32)
+	data := libc.malloc(c.size_t(byte_count))
+	if data == nil do return
+	image := xlib.CreateImage(window.display, window.visual, u32(window.depth), .ZPixmap, 0, data, u32(window.width), u32(window.height), 32, i32(window.width*size_of(u32)))
+	if image == nil {
+		libc.free(data)
+		return
+	}
+	defer xlib.DestroyImage(image)
+	pixels := (([^]u32)(data))[:window.width*window.height]
+	background_pixel := drawing.rgb_to_pixel(window, background)
+	for &pixel in pixels do pixel = background_pixel
+	border := 2
+	fill_tab_rect(pixels, window, 0, 0, window.width, border, accent)
+	fill_tab_rect(pixels, window, 0, window.height-border, window.width, border, accent)
+	fill_tab_rect(pixels, window, 0, 0, border, window.height, accent)
+	fill_tab_rect(pixels, window, window.width-border, 0, border, window.height, accent)
+	message := "Close this terminal?"
+	message_width := tab_text_width(font, message, true)
+	draw_tab_text(pixels, window, font, message, max(12, (window.width-message_width)/2), font.ascent+12, foreground, true, 8, window.width-8)
+	button_y := window.height-font.cell_height-12
+	button_height := font.cell_height+4
+	button_gap := 8
+	button_width := max(1, (window.width-24-button_gap)/2)
+	close_x := 12
+	cancel_x := close_x+button_width+button_gap
+	fill_tab_rect(pixels, window, close_x, button_y, button_width, button_height, accent)
+	fill_tab_rect(pixels, window, cancel_x, button_y, button_width, button_height, secondary)
+	close_label := "Close [Enter]"
+	cancel_label := "Cancel [Esc]"
+	close_text_x := close_x+max(4, (button_width-tab_text_width(font, close_label, false))/2)
+	cancel_text_x := cancel_x+max(4, (button_width-tab_text_width(font, cancel_label, false))/2)
+	draw_tab_text(pixels, window, font, close_label, close_text_x, button_y+font.ascent+2, foreground, false, close_x+4, close_x+button_width-4)
+	draw_tab_text(pixels, window, font, cancel_label, cancel_text_x, button_y+font.ascent+2, foreground, false, cancel_x+4, cancel_x+button_width-4)
+	xlib.PutImage(window.display, xlib.Drawable(window.id), window.gc, image, 0, 0, 0, 0, u32(window.width), u32(window.height))
+	_ = xlib.Flush(window.display)
+}
+
 draw_workspace_statusbar :: proc(
 	cache: ^Statusbar_Render_Cache,
 	window: ^x11.Window,
@@ -200,13 +244,14 @@ draw_workspace_statusbar :: proc(
 		if blocks {
 			padding = 0
 			right_width := statusbar_module_group_width(font, right_modules)
-			right_x := max(padding, window.width-padding-right_width)
+			right_x := window.width-padding-right_width
 			statusbar_draw_module_group(cache.pixels, window, font, right_modules, right_x, baseline, height, padding, window.width-padding)
-			left_right := max(padding, right_x-padding)
+			right_boundary := max(padding, right_x)
+			left_right := max(padding, right_boundary-padding)
 			left_width := min(statusbar_module_group_width(font, left_modules), max(0, left_right-padding))
 			left_end := statusbar_draw_module_group(cache.pixels, window, font, left_modules, padding, baseline, height, padding, padding+left_width)
-			center_left := min(right_x, left_end+padding)
-			center_right := max(center_left, right_x-padding)
+			center_left := min(right_boundary, left_end+padding)
+			center_right := max(center_left, right_boundary-padding)
 			center_width := min(statusbar_module_group_width(font, center_modules), center_right-center_left)
 			center_x := clamp((window.width-center_width)/2, center_left, max(center_left, center_right-center_width))
 			statusbar_draw_module_group(cache.pixels, window, font, center_modules, center_x, baseline, height, center_left, center_right)

@@ -23,8 +23,8 @@ Tmux_Target :: enum { New_Tab, New_Window }
 Quake_Horizontal_Align :: enum { Left, Center, Right }
 Quake_Animation :: enum { None, Slide, Fade }
 Status_Position :: enum { Top, Bottom }
-Status_Module :: enum { Mode, Session, Host, Cwd, Git, Command, Size, Tabs, Clock, Battery, Resource }
-STATUS_MODULE_COUNT :: int(Status_Module.Resource)+1
+Status_Module :: enum { Mode, Session, Host, Cwd, Git, Command, Size, Tabs, Clock, Battery, Resource, Zoom }
+STATUS_MODULE_COUNT :: int(Status_Module.Zoom)+1
 
 Status_Module_Style :: struct {
 	foreground, background: u32,
@@ -80,10 +80,11 @@ Statusbar_Settings :: struct {
 	height: int,
 	left, center, right: [dynamic]Status_Module,
 	separator: string,
-	show_in_quake, border, module_blocks: bool,
+	show_in_quake, border, module_blocks, auto_hide: bool,
 	background, foreground, accent: u32,
 	module_styles: [STATUS_MODULE_COUNT]Status_Module_Style,
 	clock_format: string,
+	auto_hide_delay_ms: int,
 	clock_update_ms, cwd_update_ms, git_update_ms, command_update_ms, battery_update_ms, resource_update_ms: int,
 }
 
@@ -258,7 +259,7 @@ settings_init :: proc(settings: ^Settings) {
 	settings.statusbar = {
 		position = .Bottom, height = 24, separator = strings.clone(" | "), show_in_quake = true, border = true,
 		background = 0x071c33, foreground = 0xb9c7da, accent = 0x13ba19,
-		clock_format = strings.clone("%H:%M"), clock_update_ms = 1000, cwd_update_ms = 2000,
+		clock_format = strings.clone("%H:%M"), auto_hide_delay_ms = 600, clock_update_ms = 1000, cwd_update_ms = 2000,
 		git_update_ms = 2000, command_update_ms = 1000,
 		battery_update_ms = 5000, resource_update_ms = 2000,
 	}
@@ -608,9 +609,9 @@ apply :: proc(settings: ^Settings, section, key, value: string) -> Error {
 		case "move-tab-right": replace_string(&settings.bindings.move_tab_right, value)
 		case "copy": replace_string(&settings.bindings.copy, value)
 		case "paste": replace_string(&settings.bindings.paste, value)
-		case "font-increase": replace_string(&settings.bindings.font_increase, value)
-		case "font-decrease": replace_string(&settings.bindings.font_decrease, value)
-		case "font-reset": replace_string(&settings.bindings.font_reset, value)
+		case "font-increase", "zoom-in": replace_string(&settings.bindings.font_increase, value)
+		case "font-decrease", "zoom-out": replace_string(&settings.bindings.font_decrease, value)
+		case "font-reset", "zoom-reset": replace_string(&settings.bindings.font_reset, value)
 		case "tmux-new-tab": replace_string(&settings.bindings.tmux_new_tab, value)
 		case "tmux-new-window": replace_string(&settings.bindings.tmux_new_window, value)
 		case "tmux-attach-last": replace_string(&settings.bindings.tmux_attach_last, value)
@@ -651,6 +652,12 @@ apply :: proc(settings: ^Settings, section, key, value: string) -> Error {
 			case "blocks": settings.statusbar.module_blocks = true
 			case: return .Invalid_Value
 			}
+		case "auto-hide":
+			parsed, ok := parse_bool(value); if !ok do return .Invalid_Value
+			settings.statusbar.auto_hide = parsed
+		case "auto-hide-delay-ms":
+			parsed, ok := strconv.parse_int(value); if !ok || parsed < 0 || parsed > 10000 do return .Invalid_Value
+			settings.statusbar.auto_hide_delay_ms = parsed
 		case "show-in-quake":
 			parsed, ok := parse_bool(value); if !ok do return .Invalid_Value
 			settings.statusbar.show_in_quake = parsed
@@ -883,6 +890,7 @@ status_module_from_name :: proc(name: string) -> (Status_Module, bool) {
 	case "clock": return .Clock, true
 	case "battery": return .Battery, true
 	case "resource", "resources": return .Resource, true
+	case "zoom": return .Zoom, true
 	}
 	return {}, false
 }

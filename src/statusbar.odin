@@ -51,6 +51,8 @@ Statusbar_Sample_Job :: struct {
 
 Statusbar_State :: struct {
 	visible: bool,
+	auto_hide_revealed, auto_hide_pending: bool,
+	auto_hide_left_at: time.Time,
 	render_cache: Statusbar_Render_Cache,
 	clock, battery, resource, local_host, cwd, cwd_source, git, command: string,
 	last_clock, last_cwd, last_git, last_command, last_battery, last_resource: time.Time,
@@ -79,11 +81,61 @@ statusbar_destroy :: proc(state: ^Statusbar_State) {
 
 statusbar_visible :: proc(workspace: ^Workspace) -> bool {
 	if workspace == nil || !workspace.statusbar.visible do return false
+	if workspace.settings.statusbar.auto_hide && !workspace.statusbar.auto_hide_revealed do return false
 	return workspace.quake == nil || workspace.settings.statusbar.show_in_quake
 }
 
 statusbar_height :: proc(workspace: ^Workspace) -> int {
-	return workspace.settings.statusbar.height if statusbar_visible(workspace) else 0
+	return statusbar_render_height(workspace) if statusbar_visible(workspace) else 0
+}
+
+statusbar_render_height :: proc(workspace: ^Workspace) -> int {
+	height := workspace.settings.statusbar.height
+	if pane := workspace_active_pane(workspace); pane != nil do height = max(height, pane.renderer.font.cell_height+6)
+	return height
+}
+
+statusbar_auto_hide_pointer :: proc(workspace: ^Workspace, pointer_y: int) -> bool {
+	settings := &workspace.settings.statusbar
+	state := &workspace.statusbar
+	if !settings.auto_hide || !state.visible do return false
+	if workspace.quake != nil && !settings.show_in_quake do return false
+	tab_height := workspace_tab_bar_height(workspace)
+	top_offset := tab_height if settings.position == .Top && workspace.settings.tabs.edge == .Top else 0
+	bottom_offset := tab_height if settings.position == .Bottom && workspace.settings.tabs.edge == .Bottom else 0
+	bar_height := statusbar_render_height(workspace)
+	bar_y := top_offset if settings.position == .Top else workspace.root.height-bottom_offset-bar_height
+	if state.auto_hide_revealed {
+		if pointer_y >= bar_y && pointer_y < bar_y+bar_height {
+			state.auto_hide_pending = false
+		} else if !state.auto_hide_pending {
+			state.auto_hide_pending = true
+			state.auto_hide_left_at = time.now()
+		}
+		return false
+	}
+	hotspot := 3
+	reveal := pointer_y >= top_offset && pointer_y < top_offset+hotspot
+	if settings.position == .Bottom {
+		boundary := workspace.root.height-bottom_offset
+		reveal = pointer_y >= boundary-hotspot && pointer_y < boundary
+	}
+	if !reveal do return false
+	state.auto_hide_revealed = true
+	state.auto_hide_pending = false
+	statusbar_tick(workspace, true)
+	workspace_layout(workspace)
+	return true
+}
+
+statusbar_auto_hide_tick :: proc(workspace: ^Workspace) {
+	settings := &workspace.settings.statusbar
+	state := &workspace.statusbar
+	if !settings.auto_hide || !state.visible || !state.auto_hide_revealed || !state.auto_hide_pending do return
+	if time.since(state.auto_hide_left_at) < time.Duration(settings.auto_hide_delay_ms)*time.Millisecond do return
+	state.auto_hide_revealed = false
+	state.auto_hide_pending = false
+	workspace_layout(workspace)
 }
 
 statusbar_has_module :: proc(settings: ^config.Statusbar_Settings, wanted: config.Status_Module) -> bool {
@@ -697,6 +749,9 @@ statusbar_module_text :: proc(workspace: ^Workspace, module: config.Status_Modul
 	case .Clock: return workspace.statusbar.clock
 	case .Battery: return workspace.statusbar.battery
 	case .Resource: return workspace.statusbar.resource
+	case .Zoom:
+		if workspace.initial_font_size <= 0 do return "100%"
+		return fmt.tprintf("%d%%", (workspace.font_size*100+workspace.initial_font_size/2)/workspace.initial_font_size)
 	}
 	return ""
 }
@@ -732,10 +787,12 @@ workspace_draw_statusbar :: proc(workspace: ^Workspace) {
 	pane := workspace_active_pane(workspace)
 	if pane == nil do return
 	settings := &workspace.settings.statusbar
+	font := pane.renderer.font
+	height := statusbar_render_height(workspace)
 	tab_height := workspace_tab_bar_height(workspace)
 	y := tab_height if settings.position == .Top && workspace.settings.tabs.edge == .Top else 0
 	if settings.position == .Bottom {
-		y = workspace.root.height-settings.height
+		y = workspace.root.height-height
 		if workspace.settings.tabs.edge == .Bottom do y -= tab_height
 	}
 	left, center, right: string
@@ -753,9 +810,9 @@ workspace_draw_statusbar :: proc(workspace: ^Workspace) {
 		right = statusbar_group_text(workspace, settings.right[:])
 	}
 	draw_workspace_statusbar(
-		&workspace.statusbar.render_cache, workspace.root, pane.renderer.font,
+		&workspace.statusbar.render_cache, workspace.root, font,
 		left, center, right, left_modules, center_modules, right_modules,
-		settings.module_blocks, settings.border, y, settings.height,
+		settings.module_blocks, settings.border, y, height,
 		settings.background, settings.foreground, statusbar_active_accent(workspace),
 	)
 }

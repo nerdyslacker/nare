@@ -79,12 +79,13 @@ Tab_Bounds :: struct {
 Workspace :: struct {
 	root: ^x11.Window,
 	search_surface: x11.Window,
+	close_surface: x11.Window,
 	search_visible: bool,
 	settings: ^config.Settings,
 	command: []cstring,
 	tabs: [dynamic]^Tab,
 	active: int,
-	close_armed: bool,
+	close_confirmation: bool,
 	initial_font_size: int,
 	font_size: int,
 	tab_bounds: [dynamic]Tab_Bounds,
@@ -232,6 +233,7 @@ workspace_init :: proc(
 		renderer = renderer, ligatures = ligatures, title = strings.clone(title), quake = quake_controller,
 	}
 	workspace.statusbar.visible = settings.statusbar.enabled
+	workspace.statusbar.auto_hide_revealed = !settings.statusbar.auto_hide
 	selected_font_cache := font_cache
 	if selected_font_cache == nil do selected_font_cache = &workspace.local_font_cache
 	workspace.font_cache = selected_font_cache
@@ -257,19 +259,26 @@ workspace_init :: proc(
 		workspace.search_surface = search_surface
 		x11.show_child(&workspace.search_surface, false)
 	}
+	close_surface, close_ok := x11.create_child(root, 0, 0, 1, 1)
+	if close_ok {
+		workspace.close_surface = close_surface
+		x11.show_child(&workspace.close_surface, false)
+	}
 	statusbar_tick(workspace, true)
 	workspace_layout(workspace)
 	workspace_refresh_privileged_tabs(workspace, true)
-	x11.set_mouse_tracking(root, 0, settings.scrollbar_enabled)
+	x11.set_mouse_tracking(root, 0, settings.scrollbar_enabled || (settings.statusbar.auto_hide && workspace.statusbar.visible))
 	return true
 }
 
 workspace_service :: proc(workspace: ^Workspace) -> bool {
 	if workspace == nil || len(workspace.tabs) == 0 do return false
 	if workspace.quake != nil && !quake.service(workspace.quake) do return false
+	pointer_tracking := workspace.settings.scrollbar_enabled || (workspace.settings.statusbar.auto_hide && workspace.statusbar.visible)
+	x11.set_mouse_tracking(workspace.root, 0, pointer_tracking)
 	for tab in workspace.tabs {
 		for pane in tab.panes {
-			if pane.visible do x11.set_mouse_tracking(&pane.surface, pane.terminal.modes.mouse_tracking, workspace.settings.scrollbar_enabled)
+			if pane.visible do x11.set_mouse_tracking(&pane.surface, pane.terminal.modes.mouse_tracking, pointer_tracking)
 		}
 	}
 	for {
@@ -327,6 +336,7 @@ workspace_dispatch_poll :: proc(target: Workspace_Poll_Target, events: posix.Pol
 workspace_finish_cycle :: proc(workspace: ^Workspace) {
 	workspace_cursor_tick(workspace)
 	workspace_refresh_privileged_tabs(workspace, false)
+	statusbar_auto_hide_tick(workspace)
 	statusbar_tick(workspace)
 }
 
@@ -461,6 +471,7 @@ pane_destroy :: proc(pane: ^Pane) {
 
 workspace_destroy :: proc(workspace: ^Workspace) {
 	if workspace.search_surface.id != 0 do x11.destroy_child(&workspace.search_surface)
+	if workspace.close_surface.id != 0 do x11.destroy_child(&workspace.close_surface)
 	for tab in workspace.tabs {
 		for pane in tab.panes do pane_destroy(pane)
 		delete(tab.panes)
@@ -635,6 +646,7 @@ workspace_search_bar_height :: proc(workspace: ^Workspace) -> int {
 }
 
 workspace_draw_tabs :: proc(workspace: ^Workspace) {
+	defer workspace_draw_close_confirmation(workspace)
 	defer workspace_draw_search_bar(workspace)
 	defer workspace_draw_statusbar(workspace)
 	height := workspace_tab_bar_height(workspace)
@@ -706,6 +718,37 @@ workspace_draw_search_bar :: proc(workspace: ^Workspace) {
 	)
 }
 
+workspace_show_close_confirmation :: proc(workspace: ^Workspace) {
+	workspace.close_confirmation = true
+	workspace_draw_close_confirmation(workspace)
+}
+
+workspace_hide_close_confirmation :: proc(workspace: ^Workspace) {
+	workspace.close_confirmation = false
+	if workspace.close_surface.id != 0 do x11.show_child(&workspace.close_surface, false)
+}
+
+workspace_draw_close_confirmation :: proc(workspace: ^Workspace) {
+	if !workspace.close_confirmation || workspace.close_surface.id == 0 do return
+	pane := workspace_active_pane(workspace)
+	if pane == nil do return
+	font := pane.renderer.font
+	width := clamp(font.cell_width*42, 280, max(280, workspace.root.width-16))
+	width = min(width, max(1, workspace.root.width-16))
+	height := min(max(84, font.cell_height*3+28), max(1, workspace.root.height-16))
+	x := max(0, (workspace.root.width-width)/2)
+	y := max(0, (workspace.root.height-height)/2)
+	x11.place_child(&workspace.close_surface, x, y, width, height)
+	x11.raise_child(&workspace.close_surface)
+	draw_workspace_close_dialog(
+		&workspace.close_surface, font,
+		workspace.settings.ui_colors.tab_bar_background,
+		workspace.settings.ui_colors.active_tab_foreground,
+		statusbar_active_accent(workspace),
+		workspace.settings.ui_colors.inactive_tab_background,
+	)
+}
+
 root_tab_title :: proc(title: string) -> string {
 	at := strings.index_byte(title, '@')
 	if at <= 0 || at+1 >= len(title) || !tab_title_host_character(title[at+1]) do return title
@@ -744,12 +787,9 @@ workspace_refresh_privileged_tabs :: proc(workspace: ^Workspace, force: bool) {
 workspace_event :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
 	#partial switch event.kind {
 	case .Close:
-		if workspace.settings.window.confirm_close && workspace_session_count(workspace) > 1 && !workspace.close_armed {
-			workspace.close_armed = true
-			x11.set_title(workspace.root, "nare - close again to confirm")
-			return true
-		}
-		return false
+		if !workspace.settings.window.confirm_close do return false
+		if !workspace.close_confirmation do workspace_show_close_confirmation(workspace)
+		return true
 	case .Resize:
 		workspace.tab_reveal_active = true
 		workspace_layout(workspace)
@@ -758,10 +798,17 @@ workspace_event :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
 			workspace_draw_tabs(workspace)
 		} else if event.source == workspace.search_surface.id {
 			workspace_draw_search_bar(workspace)
+		} else if event.source == workspace.close_surface.id {
+			workspace_draw_close_confirmation(workspace)
 		} else if pane := workspace_find_pane(workspace, event.source); pane != nil && pane.visible {
 			workspace_redraw(workspace, pane, true)
 		}
 	case .Input:
+		if workspace.close_confirmation {
+			if event.key == .Enter || (event.key == .Text && event.input_size == 1 && (event.input[0] == 'y' || event.input[0] == 'Y')) do return false
+			if event.key == .Escape || (event.key == .Text && event.input_size == 1 && (event.input[0] == 'n' || event.input[0] == 'N')) do workspace_hide_close_confirmation(workspace)
+			return true
+		}
 		if workspace.renaming_tab >= 0 {
 			workspace_rename_input(workspace, event)
 			return true
@@ -809,6 +856,19 @@ workspace_event :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
 		queue_input(&pane.pending, pane.pending_offset, data)
 	case .Mouse:
 		workspace_clear_scrollbar_hover(workspace, event.source)
+		if workspace.close_confirmation {
+			if event.source == workspace.close_surface.id && event.mouse.action == .Press && event.mouse.button == 1 {
+				button_y := workspace.close_surface.height-workspace_active_pane(workspace).renderer.font.cell_height-12
+				if event.mouse.y >= button_y {
+					if event.mouse.x < workspace.close_surface.width/2 do return false
+					workspace_hide_close_confirmation(workspace)
+				}
+			}
+			return true
+		}
+		pointer_y := event.mouse.y
+		if pointer_pane := workspace_find_pane(workspace, event.source); pointer_pane != nil do pointer_y += pointer_pane.surface.y
+		if statusbar_auto_hide_pointer(workspace, pointer_y) do return true
 		if event.source == workspace.root.id && workspace_tab_bar_mouse(workspace, event.mouse, event.timestamp) do return true
 		pane := workspace_find_pane(workspace, event.source)
 		if pane == nil do return true
@@ -1108,7 +1168,16 @@ workspace_shortcut :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
 	bindings := &workspace.settings.bindings
 	if event_matches(event, bindings.toggle_statusbar) {
 		workspace.statusbar.visible = !workspace.statusbar.visible
-		if workspace.statusbar.visible do statusbar_tick(workspace, true)
+		workspace.statusbar.auto_hide_revealed = !workspace.settings.statusbar.auto_hide
+		workspace.statusbar.auto_hide_pending = false
+		if workspace.statusbar.visible {
+			if workspace.settings.statusbar.auto_hide {
+				workspace.statusbar.auto_hide_revealed = true
+				workspace.statusbar.auto_hide_pending = true
+				workspace.statusbar.auto_hide_left_at = time.now()
+			}
+			statusbar_tick(workspace, true)
+		}
 		workspace_layout(workspace)
 		return true
 	}
