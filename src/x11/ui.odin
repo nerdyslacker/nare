@@ -111,9 +111,9 @@ window_is_viewable :: proc(window: ^Window) -> bool {
 	return xlib.GetWindowAttributes(window.display, window.id, &attributes) != 0 && attributes.map_state == .IsViewable
 }
 
-set_surface_colors :: proc(window: ^Window, background, border: u32, border_width: int = 0) {
+set_surface_colors :: proc(window: ^Window, background, border: u32, border_width: int = 0, clear: bool = true) {
 	xlib.SetWindowBackground(window.display, window.id, uint(background))
 	xlib.SetWindowBorder(window.display, window.id, uint(border))
 	xlib.SetWindowBorderWidth(window.display, window.id, u32(max(0, border_width)))
-	xlib.ClearWindow(window.display, window.id)
+	if clear do xlib.ClearWindow(window.display, window.id)
 }

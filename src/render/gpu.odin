@@ -309,6 +309,35 @@ gpu_draw :: proc(
 	}
 }
 
+gpu_present_cached :: proc(gpu: ^GPU, window: ^x11.Window) -> bool {
+	when !GPU_ENABLED {
+		return false
+	} else {
+		if gpu.ctx == nil || gpu.surface_texture == 0 || gpu.width <= 0 || gpu.height <= 0 do return false
+		if MakeCurrent(window.display, xlib.XID(window.id), gpu.ctx) == false do return false
+		BindFramebuffer(GL_FRAMEBUFFER, 0)
+		Disable(GL_SCISSOR_TEST)
+		Viewport(0, i32(window.height-gpu.height), i32(gpu.width), i32(gpu.height))
+		red, green, blue := theme_background_components()
+		ClearColor(red, green, blue, 1)
+		Clear(GL_COLOR_BUFFER_BIT)
+		BindTexture(GL_TEXTURE_2D, gpu.surface_texture)
+		Enable(GL_TEXTURE_2D)
+		Color4f(1, 1, 1, 1)
+		Begin(GL_QUADS)
+		TexCoord2f(0, 1); Vertex2f(-1, 1)
+		TexCoord2f(1, 1); Vertex2f(1, 1)
+		TexCoord2f(1, 0); Vertex2f(1, -1)
+		TexCoord2f(0, 0); Vertex2f(-1, -1)
+		End()
+		Disable(GL_TEXTURE_2D)
+		if GetError() != GL_NO_ERROR do return false
+		if gpu.double_buffered do SwapBuffers(window.display, xlib.XID(window.id))
+		else do Flush()
+		return true
+	}
+}
+
 theme_background_components :: proc() -> (red, green, blue: f32) {
 	red = f32((active_theme.background>>16)&0xff)/255
 	green = f32((active_theme.background>>8)&0xff)/255

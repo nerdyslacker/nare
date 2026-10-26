@@ -125,6 +125,14 @@ resize :: proc(renderer: ^Renderer, window: ^x11.Window) -> bool {
 	return true
 }
 
+present_cached :: proc(renderer: ^Renderer, window: ^x11.Window) {
+	if renderer.active == .GPU {
+		_ = gpu_present_cached(&renderer.gpu, window)
+		return
+	}
+	cpu_present_cached(&renderer.cpu, window)
+}
+
 draw :: proc(
 	renderer: ^Renderer,
 	window: ^x11.Window,

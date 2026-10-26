@@ -208,6 +208,26 @@ cpu_present :: proc(cpu: ^CPU, window: ^x11.Window, columns: int) {
 	_ = xlib.Flush(window.display)
 }
 
+cpu_present_cached :: proc(cpu: ^CPU, window: ^x11.Window) {
+	if cpu.image == nil do return
+	width := min(cpu.width, window.width)
+	height := min(cpu.height, window.height)
+	if width <= 0 || height <= 0 do return
+	xlib.PutImage(
+		window.display,
+		xlib.Drawable(window.id),
+		window.gc,
+		cpu.image,
+		0,
+		0,
+		0,
+		0,
+		u32(width),
+		u32(height),
+	)
+	_ = xlib.Flush(window.display)
+}
+
 cpu_draw :: proc(
 	cpu: ^CPU,
 	font: ^fonts.Manager,

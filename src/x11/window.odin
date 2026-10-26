@@ -71,6 +71,8 @@ create_child :: proc(parent: ^Window, x, y, width, height: int) -> (child: Windo
 		xlib.DestroyWindow(parent.display, child.id)
 		return {}, false
 	}
+	attributes := xlib.XSetWindowAttributes{bit_gravity = .NorthWestGravity}
+	xlib.ChangeWindowAttributes(parent.display, child.id, {.CWBitGravity}, &attributes)
 	xlib.SelectInput(parent.display, child.id, base_event_mask())
 	return child, true
 }
@@ -267,7 +269,6 @@ next_event :: proc(window: ^Window) -> (result: Event, available: bool) {
 		if event.xexpose.count == 0 do result.kind = .Redraw
 	case .ConfigureNotify:
 		if event.xconfigure.window != window.id {
-			result.kind = .Redraw
 			return result, true
 		}
 		latest: xlib.XEvent

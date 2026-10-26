@@ -108,6 +108,9 @@ Workspace :: struct {
 	title: string,
 	quake: ^quake.Controller,
 	statusbar: Statusbar_State,
+	layout_pending: bool,
+	grid_resize_pending: bool,
+	last_resize: time.Tick,
 }
 
 Workspace_Overrides :: struct {
@@ -185,6 +188,7 @@ Workspace_Poll_Target :: struct {
 PRIVILEGE_CHECK_INTERVAL :: 250*time.Millisecond
 TMUX_RECONCILE_INTERVAL :: 2*time.Second
 TMUX_MAX_RECONNECT_ATTEMPTS :: 8
+RESIZE_SETTLE_INTERVAL :: 100*time.Millisecond
 
 workspace_run :: proc(root: ^x11.Window, command: []cstring, settings: ^config.Settings, quake_controller: ^quake.Controller = nil) -> int {
 	workspace: Workspace
@@ -285,6 +289,14 @@ workspace_service :: proc(workspace: ^Workspace) -> bool {
 		event, available := x11.next_event(workspace.root)
 		if !available do break
 		if !workspace_event(workspace, event) do return false
+	}
+	if workspace.layout_pending {
+		workspace.layout_pending = false
+		workspace_layout(workspace, !workspace.grid_resize_pending)
+	}
+	if workspace_resize_settled(workspace) {
+		workspace.grid_resize_pending = false
+		workspace_layout(workspace)
 	}
 	if workspace.scroll_redraw_source != 0 {
 		if pane := workspace_find_pane(workspace, workspace.scroll_redraw_source); pane != nil && pane.visible {
@@ -542,9 +554,21 @@ workspace_find_pane :: proc(workspace: ^Workspace, id: xlib.Window) -> ^Pane {
 	return nil
 }
 
-workspace_layout :: proc(workspace: ^Workspace) {
+workspace_resize_settled :: proc(workspace: ^Workspace) -> bool {
+	return workspace.grid_resize_pending &&
+	       time.tick_since(workspace.last_resize) >= RESIZE_SETTLE_INTERVAL &&
+	       !x11.pointer_button_down(workspace.root)
+}
+
+workspace_layout :: proc(workspace: ^Workspace, resize_grid: bool = true) {
+	workspace.layout_pending = false
+	commit_grid := resize_grid
+	if commit_grid && workspace.grid_resize_pending && !workspace_resize_settled(workspace) {
+		commit_grid = false
+	}
+	if commit_grid do workspace.grid_resize_pending = false
 	root := workspace.root
-	x11.set_surface_colors(root, workspace.settings.theme.background, workspace.settings.ui_colors.active_border)
+	x11.set_surface_colors(root, workspace.settings.theme.background, workspace.settings.ui_colors.active_border, clear = false)
 	tab_bar := workspace_tab_bar_height(workspace)
 	status_bar := statusbar_height(workspace)
 	padding := workspace.settings.window.padding
@@ -591,14 +615,20 @@ workspace_layout :: proc(workspace: ^Workspace) {
 					if pane_index == count-1 do width = padding+content_width-x
 				}
 			}
-			changed := pane.surface.width != width || pane.surface.height != height
+			old_columns := vt.terminal_screen(&pane.terminal).columns
+			old_rows := vt.terminal_screen(&pane.terminal).rows
 			border := workspace.settings.ui_colors.active_border if pane_index == tab.active else workspace.settings.ui_colors.inactive_border
-			x11.set_surface_colors(&pane.surface, workspace.settings.theme.background, border, 1 if count > 1 && (tab_is_tmux(tab) || !tab.stacked) else 0)
+			x11.set_surface_colors(&pane.surface, workspace.settings.theme.background, border, 1 if count > 1 && (tab_is_tmux(tab) || !tab.stacked) else 0, clear = false)
 			x11.place_child(&pane.surface, x, y, width, height)
 			pane.visible = true
-			if changed {
-				columns, rows := x11.grid_size(&pane.surface)
+			renderer_changed := pane.renderer.cpu.width != width || pane.renderer.cpu.height != height
+			if commit_grid && renderer_changed {
 				_ = drawing.resize(&pane.renderer, &pane.surface)
+			} else if !commit_grid && renderer_changed {
+				drawing.present_cached(&pane.renderer, &pane.surface)
+			}
+			columns, rows := x11.grid_size(&pane.surface)
+			if commit_grid && (columns != old_columns || rows != old_rows) {
 				_ = vt.terminal_resize(&pane.terminal, columns, rows)
 				if pane.search_state.active do features.refresh(&pane.search_state, vt.terminal_screen(&pane.terminal))
 				if !tab_is_tmux(tab) do _ = pty.resize(&pane.process, pty_size(columns, rows, width, height))
@@ -606,16 +636,18 @@ workspace_layout :: proc(workspace: ^Workspace) {
 			workspace_redraw(workspace, pane, true)
 		}
 	}
-	if tab := workspace_active_tab(workspace); tab_is_tmux(tab) {
-		owner := tab.tmux_owner
-		pane := workspace_active_pane(workspace)
-		if owner != nil && pane != nil {
-			columns := max(1, content_width/max(1, pane.surface.cell_w))
-			rows := max(1, content_height/max(1, pane.surface.cell_h))
-			if columns != owner.tmux_client_columns || rows != owner.tmux_client_rows {
-				owner.tmux_client_columns, owner.tmux_client_rows = columns, rows
-				_ = pty.resize(&owner.process, pty_size(columns, rows, content_width, content_height))
-				if tmux.session_ready(&owner.tmux_session) do tmux.append_resize_command(&owner.tmux_session, &owner.pending, columns, rows)
+	if commit_grid {
+		if tab := workspace_active_tab(workspace); tab_is_tmux(tab) {
+			owner := tab.tmux_owner
+			pane := workspace_active_pane(workspace)
+			if owner != nil && pane != nil {
+				columns := max(1, content_width/max(1, pane.surface.cell_w))
+				rows := max(1, content_height/max(1, pane.surface.cell_h))
+				if columns != owner.tmux_client_columns || rows != owner.tmux_client_rows {
+					owner.tmux_client_columns, owner.tmux_client_rows = columns, rows
+					_ = pty.resize(&owner.process, pty_size(columns, rows, content_width, content_height))
+					if tmux.session_ready(&owner.tmux_session) do tmux.append_resize_command(&owner.tmux_session, &owner.pending, columns, rows)
+				}
 			}
 		}
 	}
@@ -798,7 +830,9 @@ workspace_event :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
 		return true
 	case .Resize:
 		workspace.tab_reveal_active = true
-		workspace_layout(workspace)
+		workspace.layout_pending = true
+		workspace.grid_resize_pending = true
+		workspace.last_resize = time.tick_now()
 	case .Redraw:
 		if event.source == workspace.root.id {
 			workspace_draw_tabs(workspace)
@@ -806,7 +840,7 @@ workspace_event :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
 			workspace_draw_search_bar(workspace)
 		} else if event.source == workspace.close_surface.id {
 			workspace_draw_close_confirmation(workspace)
-		} else if pane := workspace_find_pane(workspace, event.source); pane != nil && pane.visible {
+		} else if pane := workspace_find_pane(workspace, event.source); pane != nil && pane.visible && !workspace.grid_resize_pending {
 			workspace_redraw(workspace, pane, true)
 		}
 	case .Input:
@@ -1136,6 +1170,7 @@ workspace_scrollbar :: proc(workspace: ^Workspace, pane: ^Pane) -> drawing.Scrol
 }
 
 workspace_redraw :: proc(workspace: ^Workspace, pane: ^Pane, force: bool) {
+	if workspace.grid_resize_pending do return
 	scrollbar := workspace_scrollbar(workspace, pane)
 	cursor_visible := pane.terminal.modes.cursor_visible
 	if pane != workspace_active_pane(workspace) do pane.terminal.modes.cursor_visible = false
