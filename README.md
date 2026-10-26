@@ -28,6 +28,7 @@
 - Runtime configuration, bounded image and transfer resources, and bundled terminfo.
 - Optional local server/client mode with isolated windows, bounded authenticated IPC, and waiting or detached client launches.
 - Optional X11 drop-down mode with monitor-relative geometry and same-user command forwarding.
+- Optional native status bar with local/tmux metadata, system resources, foreground command, and Git state.
 
 ## Dependencies
 
@@ -39,7 +40,7 @@ sudo xbps-install -S base-devel libX11-devel libXrandr-devel fontconfig-devel fr
 
 Install Odin `dev-2026-10` separately and make sure `odin` is in `PATH`.
 
-The binary requires `libX11 libXrandr fontconfig freetype libharfbuzz libglvnd`. A usable font is required (`dejavu-fonts-ttf` is a small default), and `xdg-utils` enables the default URL opener.
+The binary requires `libX11 libXrandr fontconfig freetype libharfbuzz libglvnd`. A usable font is required (`dejavu-fonts-ttf` is a small default), `xdg-utils` enables the default URL opener, and `git` optionally enables complete status-bar repository state detection.
 
 Build and run:
 

@@ -1,6 +1,8 @@
 package tmux
 
-LIST_PANES_COMMAND :: "list-panes -s -F '#{session_id}\t#{session_name}\t#{window_active}\t#{window_id}\t#{window_index}\t#{window_name}\t#{window_layout}\t#{pane_active}\t#{pane_id}\t#{pane_left}\t#{pane_top}\t#{pane_width}\t#{pane_height}\t#{cursor_x}\t#{cursor_y}\t.'\n"
+LIST_PANES_COMMAND :: "list-panes -s -F '#{session_id}\t#{session_name}\t#{window_active}\t#{window_id}\t#{window_index}\t#{window_name}\t#{window_layout}\t#{pane_active}\t#{pane_id}\t#{pane_left}\t#{pane_top}\t#{pane_width}\t#{pane_height}\t#{cursor_x}\t#{cursor_y}\t#{pane_current_path}\t#{pane_current_command}\t.'\n"
+MAX_PANE_PATH_BYTES :: 4096
+MAX_PANE_COMMAND_BYTES :: 256
 
 Session_State :: enum { Inactive, Initial_Reply, Capabilities, Pane_List, Capture, Ready, Disconnected, Failed }
 Session_Action :: enum { None, Activated, Capabilities_Changed, Model_Changed, Pane_Selected, Capture_Complete, Command_Error, Title_Changed, Output, Deactivated, Failed }
@@ -13,6 +15,8 @@ Pane_Info :: struct {
 	columns, rows: int,
 	cursor_column, cursor_row: int,
 	active: bool,
+	current_path: [dynamic]byte,
+	current_command: [dynamic]byte,
 }
 
 Window_Info :: struct {
@@ -407,13 +411,14 @@ session_apply_capabilities :: proc(session: ^Session) {
 }
 
 session_consider_pane :: proc(session: ^Session, line: []byte) {
-	fields: [15][]byte
+	fields: [17][]byte
 	cursor := 0
 	for index in 0..<len(fields) {
 		field, ok := next_tab_field(line, &cursor)
 		if !ok do return
 		fields[index] = field
 	}
+	if string(line[cursor:]) != "." || (len(fields[15]) > 0 && (len(fields[15]) > MAX_PANE_PATH_BYTES || fields[15][0] != '/')) || len(fields[16]) > MAX_PANE_COMMAND_BYTES do return
 	session_id, session_ok := parse_id(fields[0], '$')
 	window_active, window_active_ok := parse_u64(fields[2])
 	window_id, window_ok := parse_id(fields[3], '@')
@@ -445,10 +450,13 @@ session_consider_pane :: proc(session: ^Session, line: []byte) {
 		append(&window.name, ..fields[5])
 		append(&window.layout, ..fields[6])
 	}
-	append(&session.panes, Pane_Info{
+	info := Pane_Info{
 		id = pane_id, window_id = window_id, x = int(x), y = int(y), columns = int(columns), rows = int(rows), active = pane_active != 0,
 		cursor_column = int(cursor_column), cursor_row = int(cursor_row),
-	})
+	}
+	append(&info.current_path, ..fields[15])
+	append(&info.current_command, ..fields[16])
+	append(&session.panes, info)
 	if session.fallback_pane_id < 0 {
 		session.fallback_pane_id = pane_id
 		session.fallback_window_id = window_id
@@ -469,6 +477,10 @@ session_clear_model :: proc(session: ^Session) {
 	for &window in session.windows {
 		delete(window.name)
 		delete(window.layout)
+	}
+	for &pane in session.panes {
+		delete(pane.current_path)
+		delete(pane.current_command)
 	}
 	clear(&session.windows)
 	clear(&session.panes)

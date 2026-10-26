@@ -194,9 +194,8 @@ resize :: proc(process: ^Process, size: Size) -> Error {
 }
 
 foreground_is_root :: proc(process: ^Process) -> bool {
-	if process == nil || process.master < 0 || process.closed do return false
-	group := tcgetpgrp(c.int(process.master))
-	if group <= 0 do return false
+	group, group_ok := foreground_pid(process)
+	if !group_ok do return false
 	path_buffer: [64]byte
 	path := fmt.bprintf(path_buffer[:], "/proc/%d/status", group)
 	data, err := os.read_entire_file(path, context.allocator)
@@ -204,6 +203,25 @@ foreground_is_root :: proc(process: ^Process) -> bool {
 	defer delete(data)
 	uid, ok := status_effective_uid(string(data))
 	return ok && uid == 0
+}
+
+foreground_cwd :: proc(process: ^Process) -> (string, bool) {
+	group, group_ok := foreground_pid(process)
+	if !group_ok do return "", false
+	path_buffer: [64]byte
+	path := fmt.bprintf(path_buffer[:], "/proc/%d/cwd", group)
+	cwd, err := os.read_link(path, context.allocator)
+	if err != nil || len(cwd) == 0 || cwd[0] != '/' {
+		delete(cwd)
+		return "", false
+	}
+	return cwd, true
+}
+
+foreground_pid :: proc(process: ^Process) -> (int, bool) {
+	if process == nil || process.master < 0 || process.closed do return 0, false
+	group := tcgetpgrp(c.int(process.master))
+	return int(group), group > 0
 }
 
 status_effective_uid :: proc(status: string) -> (uid: int, ok: bool) {

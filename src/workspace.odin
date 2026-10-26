@@ -1240,6 +1240,7 @@ workspace_font_size :: proc(workspace: ^Workspace, size: int) {
 	if new_size == workspace.font_size do return
 	new_entry := workspace_font_cache_acquire(workspace.font_cache, workspace.settings, new_size)
 	if new_entry == nil do return
+	statusbar_render_cache_destroy(&workspace.statusbar.render_cache)
 	old_entry := workspace.font_entry
 	workspace.font_entry = new_entry
 	workspace.font_size = new_size

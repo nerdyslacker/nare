@@ -23,7 +23,7 @@ Tmux_Target :: enum { New_Tab, New_Window }
 Quake_Horizontal_Align :: enum { Left, Center, Right }
 Quake_Animation :: enum { None, Slide, Fade }
 Status_Position :: enum { Top, Bottom }
-Status_Module :: enum { Mode, Session, Host, Size, Tabs, Clock, Battery, Resource }
+Status_Module :: enum { Mode, Session, Host, Cwd, Git, Command, Size, Tabs, Clock, Battery, Resource }
 
 Window_Settings :: struct {
 	background_opacity: f32,
@@ -77,7 +77,7 @@ Statusbar_Settings :: struct {
 	show_in_quake: bool,
 	background, foreground, accent: u32,
 	clock_format: string,
-	clock_update_ms, battery_update_ms, resource_update_ms: int,
+	clock_update_ms, cwd_update_ms, git_update_ms, command_update_ms, battery_update_ms, resource_update_ms: int,
 }
 
 Quake_Settings :: struct {
@@ -251,7 +251,8 @@ settings_init :: proc(settings: ^Settings) {
 	settings.statusbar = {
 		position = .Bottom, height = 24, separator = strings.clone(" | "), show_in_quake = true,
 		background = 0x071c33, foreground = 0xb9c7da, accent = 0x13ba19,
-		clock_format = strings.clone("%H:%M"), clock_update_ms = 1000,
+		clock_format = strings.clone("%H:%M"), clock_update_ms = 1000, cwd_update_ms = 2000,
+		git_update_ms = 2000, command_update_ms = 1000,
 		battery_update_ms = 5000, resource_update_ms = 2000,
 	}
 	append(&settings.statusbar.left, .Mode, .Session)
@@ -329,7 +330,7 @@ parse :: proc(settings: ^Settings, contents: string) -> Result {
 		if line[0] == '[' {
 			if len(line) < 3 || line[len(line)-1] != ']' do return {error = .Syntax, line = line_number}
 			section = strings.trim_space(line[1:len(line)-1])
-			if section != "main" && section != "scrollback" && section != "url" && section != "shell" && section != "security" && section != "graphics" && section != "window" && section != "tabs" && section != "colors" && section != "bindings" && section != "cursor" && section != "tmux" && section != "quake" && section != "statusbar" && section != "statusbar.clock" && section != "statusbar.battery" && section != "statusbar.resource" && !tmux_profile_section(section) {
+			if section != "main" && section != "scrollback" && section != "url" && section != "shell" && section != "security" && section != "graphics" && section != "window" && section != "tabs" && section != "colors" && section != "bindings" && section != "cursor" && section != "tmux" && section != "quake" && section != "statusbar" && section != "statusbar.clock" && section != "statusbar.cwd" && section != "statusbar.git" && section != "statusbar.command" && section != "statusbar.battery" && section != "statusbar.resource" && !tmux_profile_section(section) {
 				return {error = .Unknown_Section, line = line_number}
 			}
 			if tmux_profile_section(section) {
@@ -654,10 +655,13 @@ apply :: proc(settings: ^Settings, section, key, value: string) -> Error {
 			settings.statusbar.clock_update_ms = parsed
 		case: return .Unknown_Key
 		}
-	} else if section == "statusbar.battery" || section == "statusbar.resource" {
+	} else if section == "statusbar.cwd" || section == "statusbar.git" || section == "statusbar.command" || section == "statusbar.battery" || section == "statusbar.resource" {
 		if key != "update-ms" do return .Unknown_Key
 		parsed, ok := strconv.parse_int(value); if !ok || parsed < 500 || parsed > 60000 do return .Invalid_Value
-		if section == "statusbar.battery" do settings.statusbar.battery_update_ms = parsed
+		if section == "statusbar.cwd" do settings.statusbar.cwd_update_ms = parsed
+		else if section == "statusbar.git" do settings.statusbar.git_update_ms = parsed
+		else if section == "statusbar.command" do settings.statusbar.command_update_ms = parsed
+		else if section == "statusbar.battery" do settings.statusbar.battery_update_ms = parsed
 		else do settings.statusbar.resource_update_ms = parsed
 	} else if section == "cursor" {
 		switch key {
@@ -832,6 +836,9 @@ parse_status_modules :: proc(target: ^[dynamic]Status_Module, value: string) -> 
 		case "mode": module = .Mode
 		case "session": module = .Session
 		case "host": module = .Host
+		case "cwd": module = .Cwd
+		case "git": module = .Git
+		case "command": module = .Command
 		case "size": module = .Size
 		case "tabs": module = .Tabs
 		case "clock": module = .Clock
