@@ -368,9 +368,20 @@ blend_premultiplied :: proc(window: ^x11.Window, background: u32, red, green, bl
 }
 
 cell_colors :: proc(cell: ^vt.Cell) -> (foreground, background: u32) {
+	return cell_colors_with_bold_policy(cell, active_bold_is_bright)
+}
+
+cell_colors_with_bold_policy :: proc(cell: ^vt.Cell, bold_is_bright: bool) -> (foreground, background: u32) {
 	foreground = terminal_color(cell.attributes.foreground, true)
 	background = terminal_color(cell.attributes.background, false)
-	if cell.attributes.bold && cell.attributes.foreground.kind == .Indexed && cell.attributes.foreground.value < 8 {
+	// ncurses/dialog themes use identical indexed foreground and background
+	// colors to hide selected pieces of their ACS borders. Keep those cells
+	// hidden even when bold-to-bright color mapping is enabled.
+	hidden_by_matching_index := cell.attributes.foreground.kind == .Indexed &&
+	                            cell.attributes.background.kind == .Indexed &&
+	                            cell.attributes.foreground.value == cell.attributes.background.value
+	if bold_is_bright && !hidden_by_matching_index && cell.attributes.bold &&
+	   cell.attributes.foreground.kind == .Indexed && cell.attributes.foreground.value < 8 {
 		foreground = ansi_color(int(cell.attributes.foreground.value)+8)
 	}
 	if cell.attributes.inverse do foreground, background = background, foreground

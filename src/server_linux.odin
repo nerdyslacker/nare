@@ -295,6 +295,7 @@ server_run :: proc(settings: ^config.Settings, socket_path: string = "") -> int 
 	defer posix.signal(.SIGINT, previous_interrupt)
 	defer posix.signal(.SIGTERM, previous_terminate)
 	drawing.set_theme(settings.theme)
+	drawing.set_bold_is_bright(settings.bold_is_bright)
 	for intrinsics.volatile_load(&server_stop_requested) == 0 {
 		server_close_finished_windows(&server)
 		server_cleanup_disconnected(&server)

@@ -93,6 +93,12 @@ Cursor_Style :: enum {
 	Steady_Bar,
 }
 
+Character_Set :: enum {
+	ASCII,
+	DEC_Special_Graphics,
+	UK,
+}
+
 Modes :: struct {
 	autowrap: bool,
 	origin: bool,
@@ -117,11 +123,17 @@ Terminal :: struct {
 	using_alternate: bool,
 	attributes: Attributes,
 	saved_attributes: Attributes,
+	character_sets: [2]Character_Set,
+	active_character_set: u8,
+	saved_character_sets: [2]Character_Set,
+	saved_active_character_set: u8,
 	modes: Modes,
 	replies: [dynamic]byte,
 	reply_overflow: bool,
 	hyperlinks: [dynamic]string,
 	active_hyperlink: u32,
+	last_graphic: rune,
+	last_graphic_valid: bool,
 	title: string,
 	cursor_phase_visible: bool,
 	cursor_beam_width: int,
@@ -230,11 +242,10 @@ terminal_consume_replies :: proc(terminal: ^Terminal, count: int) {
 
 terminal_event :: proc(event: Event, user_data: rawptr) {
 	terminal := (^Terminal)(user_data)
-	screen := terminal_screen(terminal)
 	switch event.kind {
 	case .Print:
-		if terminal.modes.insert do insert_cells(screen, max(1, unicode.normalized_east_asian_width(event.codepoint)), terminal.attributes)
-		screen_put(screen, event.codepoint, terminal.attributes, terminal.modes.autowrap, terminal.active_hyperlink)
+		codepoint := translate_character(terminal, event.codepoint)
+		terminal_print_graphic(terminal, codepoint, true)
 	case .Execute:
 		handle_execute(terminal, event.control)
 	case .Escape:
@@ -247,6 +258,16 @@ terminal_event :: proc(event: Event, user_data: rawptr) {
 		handle_dcs(terminal, event.data)
 	case .APC:
 		handle_apc(terminal, event.data, event.discarded)
+	}
+}
+
+terminal_print_graphic :: proc(terminal: ^Terminal, codepoint: rune, remember: bool) {
+	screen := terminal_screen(terminal)
+	if terminal.modes.insert do insert_cells(screen, max(1, unicode.normalized_east_asian_width(codepoint)), terminal.attributes)
+	screen_put(screen, codepoint, terminal.attributes, terminal.modes.autowrap, terminal.active_hyperlink)
+	if remember {
+		terminal.last_graphic = codepoint
+		terminal.last_graphic_valid = true
 	}
 }
 
@@ -882,12 +903,28 @@ handle_execute :: proc(terminal: ^Terminal, control: byte) {
 	case 0x0d:
 		screen.cursor.column = 0
 		screen.wrap_pending = false
+	case 0x0e:
+		terminal.active_character_set = 1
+	case 0x0f:
+		terminal.active_character_set = 0
 	case:
 	}
 }
 
 handle_escape :: proc(terminal: ^Terminal, event: Event) {
 	screen := terminal_screen(terminal)
+	if event.intermediate_count == 1 {
+		set_index := -1
+		switch event.intermediates[0] {
+		case '(': set_index = 0
+		case ')': set_index = 1
+		case:
+		}
+		if set_index >= 0 {
+			designate_character_set(terminal, set_index, event.final)
+			return
+		}
+	}
 	if event.intermediate_count > 0 && event.intermediates[0] == '#' && event.final == '8' {
 		for &cell in screen.cells do cell = Cell{codepoint = 'E', width = 1, attributes = terminal.attributes}
 		return
@@ -896,9 +933,13 @@ handle_escape :: proc(terminal: ^Terminal, event: Event) {
 	case '7':
 		screen.saved_cursor = screen.cursor
 		terminal.saved_attributes = terminal.attributes
+		terminal.saved_character_sets = terminal.character_sets
+		terminal.saved_active_character_set = terminal.active_character_set
 	case '8':
 		screen.cursor = screen.saved_cursor
 		terminal.attributes = terminal.saved_attributes
+		terminal.character_sets = terminal.saved_character_sets
+		terminal.active_character_set = terminal.saved_active_character_set
 		screen.wrap_pending = false
 	case 'D':
 		line_feed(screen, terminal.attributes)
@@ -917,6 +958,68 @@ handle_escape :: proc(terminal: ^Terminal, event: Event) {
 		terminal.modes.application_keypad = false
 	case:
 	}
+}
+
+designate_character_set :: proc(terminal: ^Terminal, index: int, final: byte) {
+	if index < 0 || index >= len(terminal.character_sets) do return
+	switch final {
+	case '0': terminal.character_sets[index] = .DEC_Special_Graphics
+	case 'A': terminal.character_sets[index] = .UK
+	case 'B': terminal.character_sets[index] = .ASCII
+	case:
+	}
+}
+
+translate_character :: proc(terminal: ^Terminal, codepoint: rune) -> rune {
+	index := clamp(int(terminal.active_character_set), 0, len(terminal.character_sets)-1)
+	switch terminal.character_sets[index] {
+	case .ASCII:
+		return codepoint
+	case .UK:
+		return 0x00a3 if codepoint == '#' else codepoint
+	case .DEC_Special_Graphics:
+		switch codepoint {
+		case '+': return 0x2192
+		case ',': return 0x2190
+		case '-': return 0x2191
+		case '.': return 0x2193
+		case '0': return 0x2588
+		case '_': return 0x00a0
+		case '`': return 0x25c6
+		case 'a': return 0x2592
+		case 'b': return 0x2409
+		case 'c': return 0x240c
+		case 'd': return 0x240d
+		case 'e': return 0x240a
+		case 'f': return 0x00b0
+		case 'g': return 0x00b1
+		case 'h': return 0x2424
+		case 'i': return 0x240b
+		case 'j': return 0x2518
+		case 'k': return 0x2510
+		case 'l': return 0x250c
+		case 'm': return 0x2514
+		case 'n': return 0x253c
+		case 'o': return 0x23ba
+		case 'p': return 0x23bb
+		case 'q': return 0x2500
+		case 'r': return 0x23bc
+		case 's': return 0x23bd
+		case 't': return 0x251c
+		case 'u': return 0x2524
+		case 'v': return 0x2534
+		case 'w': return 0x252c
+		case 'x': return 0x2502
+		case 'y': return 0x2264
+		case 'z': return 0x2265
+		case '{': return 0x03c0
+		case '|': return 0x2260
+		case '}': return 0x00a3
+		case '~': return 0x00b7
+		case: return codepoint
+		}
+	}
+	return codepoint
 }
 
 handle_csi :: proc(terminal: ^Terminal, event: Event) {
@@ -949,6 +1052,10 @@ handle_csi :: proc(terminal: ^Terminal, event: Event) {
 	case 'M': delete_lines(screen, parameter(event, 0, 1), terminal.attributes)
 	case 'S': scroll_up(screen, parameter(event, 0, 1), terminal.attributes)
 	case 'T': scroll_down(screen, parameter(event, 0, 1), terminal.attributes)
+	case 'b':
+		if terminal.last_graphic_valid {
+			for _ in 0..<parameter(event, 0, 1) do terminal_print_graphic(terminal, terminal.last_graphic, false)
+		}
 	case 'm': apply_sgr(terminal, event)
 	case 'r': set_scroll_region(terminal, event)
 	case 's': screen.saved_cursor = screen.cursor
@@ -1217,6 +1324,8 @@ extended_color :: proc(event: Event, start: int) -> (color: Color, consumed: int
 
 soft_reset :: proc(terminal: ^Terminal) {
 	terminal.attributes = {}
+	terminal.character_sets = {}
+	terminal.active_character_set = 0
 	terminal.modes = Modes{autowrap = true, cursor_visible = true, sixel_private_colors = true}
 	screen := terminal_screen(terminal)
 	screen.scroll_top = 0
@@ -1227,6 +1336,13 @@ soft_reset :: proc(terminal: ^Terminal) {
 
 terminal_reset :: proc(terminal: ^Terminal) {
 	terminal.attributes = {}
+	terminal.saved_attributes = {}
+	terminal.character_sets = {}
+	terminal.active_character_set = 0
+	terminal.saved_character_sets = {}
+	terminal.saved_active_character_set = 0
+	terminal.last_graphic = 0
+	terminal.last_graphic_valid = false
 	terminal.modes = Modes{autowrap = true, cursor_visible = true, sixel_private_colors = true}
 	terminal.using_alternate = false
 	screen_clear(&terminal.main_screen, {})

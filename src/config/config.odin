@@ -188,6 +188,7 @@ Settings :: struct {
 	bold_italic_font: string,
 	font_size: int,
 	font_bold: bool,
+	bold_is_bright: bool,
 	cell_width_percent: int,
 	cell_height_percent: int,
 	title: string,
@@ -226,6 +227,7 @@ settings_init :: proc(settings: ^Settings) {
 	settings.bold_italic_font = strings.clone("auto")
 	settings.font_size = 16
 	settings.font_bold = false
+	settings.bold_is_bright = false
 	settings.cell_width_percent = 100
 	settings.cell_height_percent = 100
 	settings.title = strings.clone("nare")
@@ -468,6 +470,10 @@ apply :: proc(settings: ^Settings, section, key, value: string) -> Error {
 			parsed, ok := parse_bool(value)
 			if !ok do return .Invalid_Value
 			settings.font_bold = parsed
+		case "bold-is-bright":
+			parsed, ok := parse_bool(value)
+			if !ok do return .Invalid_Value
+			settings.bold_is_bright = parsed
 		case "cell-width-percent":
 			parsed, ok := strconv.parse_int(value)
 			if !ok || parsed < 50 || parsed > 300 do return .Invalid_Value

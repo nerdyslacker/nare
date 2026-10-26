@@ -1737,6 +1737,7 @@ workspace_reload_config :: proc(workspace: ^Workspace) -> bool {
 	workspace.font_size = workspace.settings.font_size
 	config.replace_string(&workspace.title, workspace.settings.title)
 	drawing.set_theme(workspace.settings.theme)
+	drawing.set_bold_is_bright(workspace.settings.bold_is_bright)
 	x11.set_opacity(workspace.root, workspace.settings.window.background_opacity)
 	x11.set_decorations(workspace.root, workspace.settings.window.decorations)
 	x11.set_surface_colors(workspace.root, workspace.settings.theme.background, workspace.settings.ui_colors.active_border, clear = false)

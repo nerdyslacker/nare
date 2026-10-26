@@ -35,9 +35,14 @@ DEFAULT_THEME :: Theme{
 
 active_theme := DEFAULT_THEME
 active_force_bold := false
+active_bold_is_bright := false
 
 set_theme :: proc(theme: Theme) {
 	active_theme = theme
+}
+
+set_bold_is_bright :: proc(enabled: bool) {
+	active_bold_is_bright = enabled
 }
 
 Renderer :: struct {

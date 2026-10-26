@@ -56,11 +56,12 @@ build_row_commands :: proc(
 	append_image_commands(output, window, screen, row, .Below_Text)
 	for column in 0..<screen.columns {
 		cell := vt.cell_at(screen, row, column)
-		foreground, _ := display_colors(
+		foreground, background := display_colors(
 			cell,
 			selection.contains(selection_state, screen, row, column),
 			block_cursor(terminal, screen, row, column),
 		)
+		if foreground == background do continue
 		if cell.attributes.underline {
 			append_rectangle(output, column*window.cell_w, y+window.cell_h-1, window.cell_w, 1, foreground)
 			if cell.attributes.double_underline {
@@ -79,6 +80,21 @@ build_row_commands :: proc(
 			column += 1
 			continue
 		}
+		if cell.combining_count == 0 {
+			foreground, background := display_colors(
+				cell,
+				selection.contains(selection_state, screen, row, column),
+				block_cursor(terminal, screen, row, column),
+			)
+			if foreground == background {
+				column += max(1, int(cell.width))
+				continue
+			}
+			if append_cell_graphic(output, column*window.cell_w, y, window.cell_w, window.cell_h, cell.codepoint, foreground) {
+				column += max(1, int(cell.width))
+				continue
+			}
+		}
 		run_start := column
 		attributes := cell.attributes
 		text: [dynamic]rune
@@ -89,6 +105,7 @@ build_row_commands :: proc(
 				column += 1
 				continue
 			}
+			if current.combining_count == 0 && is_cell_graphic(current.codepoint) && len(text) > 0 do break
 			if current.attributes != attributes && len(text) > 0 do break
 			append(&text, current.codepoint)
 			append(&clusters, column)

@@ -67,6 +67,7 @@ app_main :: proc() -> int {
 	x11.set_opacity(&window, options.window.background_opacity)
 	x11.set_decorations(&window, options.window.decorations)
 	drawing.set_theme(options.theme)
+	drawing.set_bold_is_bright(options.bold_is_bright)
 	if !quake_mode do return workspace_run(&window, command[:], &options)
 	x11.set_quake_hints(&window, options.quake.keep_above, options.quake.skip_taskbar)
 	align: quake.Horizontal_Align
