@@ -559,6 +559,9 @@ erase_cells :: proc(screen: ^Screen, row, first, last: int, attributes: Attribut
 	last_column := clamp(last, first_column, screen.columns-1)
 	if cell_at(screen, row, first_column).continuation && first_column > 0 do first_column -= 1
 	if cell_at(screen, row, last_column).width == 2 && last_column+1 < screen.columns do last_column += 1
+	if screen.image_registry != nil {
+		graphics.erase_cell_area(screen.image_registry, screen.image_screen, row, first_column, last_column)
+	}
 	blank := blank_cell(attributes)
 	for column in first_column..=last_column do cell_at(screen, row, column)^ = blank
 }

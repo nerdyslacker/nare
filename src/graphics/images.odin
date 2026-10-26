@@ -525,6 +525,29 @@ clear_visible :: proc(registry: ^Registry, screen: Screen, top, bottom: int) {
 	}
 }
 
+erase_cell_area :: proc(registry: ^Registry, screen: Screen, row, first, last: int) {
+	for resource_index := len(registry.resources)-1; resource_index >= 0; resource_index -= 1 {
+		resource := registry.resources[resource_index]
+		// Sixel and iTerm2 inline images are terminal canvas contents. Painting
+		// cells over them is destructive, unlike independent Kitty placements.
+		if resource.protocol != .Sixel && resource.protocol != .ITerm2 do continue
+		affected := false
+		for placement_index := len(registry.placements)-1; placement_index >= 0; placement_index -= 1 {
+			placement := registry.placements[placement_index]
+			if placement.image_id != resource.id || placement.screen != screen do continue
+			if row < placement.row || row >= placement.row+placement.rows ||
+			   last < placement.column || first >= placement.column+placement.columns {
+				continue
+			}
+			remove_placement_at(registry, placement_index)
+			affected = true
+		}
+		if affected && registry.resources[resource_index].placement_count == 0 {
+			delete_resource_at(registry, resource_index)
+		}
+	}
+}
+
 validate_image :: proc(image: ^Decoded_Image) -> (int, Error) {
 	return validate_image_with_limits(image, nil)
 }

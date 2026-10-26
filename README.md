@@ -14,6 +14,10 @@
 
 `nare` pronounced nah-reh (/nɑːrɛ/) is an experimental X11-only terminal emulator written in Odin.
 
+<div align="center">
+    <img src="assets/screenshot.png"/>
+</div>
+
 ## Features
 
 - Native VT parser with Unicode, true color, alternate screens, synchronized updates, mouse, focus, and bracketed paste.
