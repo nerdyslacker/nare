@@ -19,6 +19,7 @@ Tab_Draw_Label :: struct {
 Statusbar_Draw_Module :: struct {
 	text: string,
 	foreground, background: u32,
+	jobs: bool,
 }
 
 Statusbar_Render_Cache :: struct {
@@ -30,6 +31,8 @@ Statusbar_Render_Cache :: struct {
 	background, foreground, accent: u32,
 	blocks, border: bool,
 	left, center, right: string,
+	jobs_hit_left, jobs_hit_right: int,
+	jobs_hit_valid: bool,
 	image_allocations, rasterizations, presentations: u64,
 }
 
@@ -206,14 +209,43 @@ draw_workspace_close_dialog :: proc(
 	_ = xlib.Flush(window.display)
 }
 
+draw_workspace_statusbar_jobs :: proc(
+	window: ^x11.Window,
+	font: ^fonts.Manager,
+	rows: []Statusbar_Draw_Module,
+	selected: int,
+	x, y, width, row_height: int,
+	accent: u32,
+) {
+	height := row_height*len(rows)
+	if window == nil || width <= 0 || height <= 0 do return
+	byte_count := width*height*size_of(u32)
+	data := libc.malloc(c.size_t(byte_count))
+	if data == nil do return
+	image := xlib.CreateImage(window.display, window.visual, u32(window.depth), .ZPixmap, 0, data, u32(width), u32(height), 32, i32(width*size_of(u32)))
+	if image == nil {libc.free(data); return}
+	defer xlib.DestroyImage(image)
+	pixels := (([^]u32)(data))[:width*height]
+	for row, index in rows {
+		row_y := row_height*index
+		fill_tab_rect(pixels, window, 0, row_y, width, row_height, row.background)
+		if index == selected do fill_tab_rect(pixels, window, 0, row_y, min(3, width), row_height, accent)
+		text := ui_fit_text(font, row.text, max(0, width-16))
+		draw_tab_text(pixels, window, font, text, 8, row_y+font.ascent+3, row.foreground, false, 8, width-8)
+	}
+	xlib.PutImage(window.display, xlib.Drawable(window.id), window.gc, image, 0, 0, i32(x), i32(y), u32(width), u32(height))
+	_ = xlib.Flush(window.display)
+}
+
 draw_workspace_statusbar :: proc(
 	cache: ^Statusbar_Render_Cache,
 	window: ^x11.Window,
 	font: ^fonts.Manager,
 	left, center, right: string,
 	left_modules, center_modules, right_modules: []Statusbar_Draw_Module,
+	separator: string,
 	blocks, border: bool,
-	y, height: int,
+	y, height, row_y, row_height: int,
 	background, foreground, accent: u32,
 ) {
 	if cache == nil || height <= 0 || window.width <= 0 do return
@@ -239,35 +271,43 @@ draw_workspace_statusbar :: proc(
 	                   cache.left != left || cache.center != center || cache.right != right
 	if content_changed {
 		cache.rasterizations += 1
+		cache.jobs_hit_valid = false
+		cache.jobs_hit_left, cache.jobs_hit_right = 0, 0
 		background_pixel := drawing.rgb_to_pixel(window, background)
 		for &pixel in cache.pixels do pixel = background_pixel
 		if border do fill_tab_rect(cache.pixels, window, 0, 0, window.width, min(2, height), accent)
 		padding := 8
-		baseline := max(font.ascent+2, (height-font.cell_height)/2+font.ascent)
+		baseline := row_y+max(font.ascent+2, (row_height-font.cell_height)/2+font.ascent)
 		if blocks {
 			padding = 0
 			right_width := statusbar_module_group_width(font, right_modules)
 			right_x := window.width-padding-right_width
-			statusbar_draw_module_group(cache.pixels, window, font, right_modules, right_x, baseline, height, padding, window.width-padding)
+			statusbar_draw_module_group(cache, window, font, right_modules, right_x, baseline, row_y, row_height, padding, window.width-padding)
 			right_boundary := max(padding, right_x)
 			left_right := max(padding, right_boundary-padding)
 			left_width := min(statusbar_module_group_width(font, left_modules), max(0, left_right-padding))
-			left_end := statusbar_draw_module_group(cache.pixels, window, font, left_modules, padding, baseline, height, padding, padding+left_width)
+			left_end := statusbar_draw_module_group(cache, window, font, left_modules, padding, baseline, row_y, row_height, padding, padding+left_width)
 			center_left := min(right_boundary, left_end+padding)
 			center_right := max(center_left, right_boundary-padding)
 			center_width := min(statusbar_module_group_width(font, center_modules), center_right-center_left)
 			center_x := clamp((window.width-center_width)/2, center_left, max(center_left, center_right-center_width))
-			statusbar_draw_module_group(cache.pixels, window, font, center_modules, center_x, baseline, height, center_left, center_right)
+			statusbar_draw_module_group(cache, window, font, center_modules, center_x, baseline, row_y, row_height, center_left, center_right)
 		} else {
 			right_text := ui_fit_text(font, right, max(0, window.width-padding*2))
 			right_width := tab_text_width(font, right_text, false)
 			right_x := max(padding, window.width-padding-right_width)
-			if right_text != "" do draw_tab_text(cache.pixels, window, font, right_text, right_x, baseline, foreground, false, right_x, window.width-padding)
+			if right_text != "" {
+				draw_tab_text(cache.pixels, window, font, right_text, right_x, baseline, foreground, false, right_x, window.width-padding)
+				statusbar_record_plain_job_hits(cache, font, right_modules, separator, right_x, right_x+right_width)
+			}
 			left_available := max(0, right_x-padding*2)
 			left_text := ui_fit_text(font, left, left_available)
 			left_width := tab_text_width(font, left_text, false)
 			left_end := padding+left_width
-			if left_text != "" do draw_tab_text(cache.pixels, window, font, left_text, padding, baseline, foreground, false, padding, left_end)
+			if left_text != "" {
+				draw_tab_text(cache.pixels, window, font, left_text, padding, baseline, foreground, false, padding, left_end)
+				statusbar_record_plain_job_hits(cache, font, left_modules, separator, padding, left_end)
+			}
 			if center != "" {
 				center_left := min(right_x, left_end+padding)
 				center_right := max(center_left, right_x-padding)
@@ -275,6 +315,7 @@ draw_workspace_statusbar :: proc(
 				center_width := tab_text_width(font, center_text, false)
 				center_x := clamp((window.width-center_width)/2, center_left, max(center_left, center_right-center_width))
 				draw_tab_text(cache.pixels, window, font, center_text, center_x, baseline, foreground, false, center_left, center_right)
+				statusbar_record_plain_job_hits(cache, font, center_modules, separator, center_x, center_x+center_width)
 			}
 		}
 		cache.font = font
@@ -291,6 +332,37 @@ draw_workspace_statusbar :: proc(
 	_ = xlib.Flush(window.display)
 }
 
+statusbar_record_job_hit :: proc(cache: ^Statusbar_Render_Cache, left, right: int) {
+	if cache == nil || right <= left do return
+	if !cache.jobs_hit_valid {
+		cache.jobs_hit_left = left
+		cache.jobs_hit_right = right
+		cache.jobs_hit_valid = true
+	} else {
+		cache.jobs_hit_left = min(cache.jobs_hit_left, left)
+		cache.jobs_hit_right = max(cache.jobs_hit_right, right)
+	}
+}
+
+statusbar_record_plain_job_hits :: proc(
+	cache: ^Statusbar_Render_Cache,
+	font: ^fonts.Manager,
+	modules: []Statusbar_Draw_Module,
+	separator: string,
+	left, right: int,
+) {
+	if right <= left do return
+	cursor := left
+	separator_width := tab_text_width(font, separator, false)
+	for module, index in modules {
+		if index > 0 do cursor += separator_width
+		module_right := cursor+tab_text_width(font, module.text, false)
+		if module.jobs do statusbar_record_job_hit(cache, max(left, cursor), min(right, module_right))
+		cursor = module_right
+		if cursor >= right do break
+	}
+}
+
 statusbar_module_group_width :: proc(font: ^fonts.Manager, modules: []Statusbar_Draw_Module) -> int {
 	width := 0
 	for module in modules do width += tab_text_width(font, module.text, false)+12
@@ -298,11 +370,11 @@ statusbar_module_group_width :: proc(font: ^fonts.Manager, modules: []Statusbar_
 }
 
 statusbar_draw_module_group :: proc(
-	pixels: []u32,
+	cache: ^Statusbar_Render_Cache,
 	window: ^x11.Window,
 	font: ^fonts.Manager,
 	modules: []Statusbar_Draw_Module,
-	x, baseline, height, clip_left, clip_right: int,
+	x, baseline, row_y, row_height, clip_left, clip_right: int,
 ) -> int {
 	cursor := x
 	for module in modules {
@@ -310,12 +382,13 @@ statusbar_draw_module_group :: proc(
 		visible_left := max(cursor, clip_left)
 		visible_right := min(cursor+module_width, clip_right)
 		if visible_right > visible_left {
-			fill_tab_rect(pixels, window, visible_left, 0, visible_right-visible_left, height, module.background)
+			fill_tab_rect(cache.pixels, window, visible_left, row_y, visible_right-visible_left, row_height, module.background)
+			if module.jobs do statusbar_record_job_hit(cache, visible_left, visible_right)
 			text_left := max(cursor+6, visible_left)
 			text_right := min(cursor+module_width-6, visible_right)
 			if text_right > text_left {
 				text := ui_fit_text(font, module.text, text_right-text_left)
-				draw_tab_text(pixels, window, font, text, text_left, baseline, module.foreground, false, text_left, text_right)
+				draw_tab_text(cache.pixels, window, font, text, text_left, baseline, module.foreground, false, text_left, text_right)
 			}
 		}
 		cursor += module_width

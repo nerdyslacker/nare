@@ -46,6 +46,7 @@ runtime_socket_path :: proc(runtime_directory: string) -> (string, Socket_Error)
 	if len(runtime_directory) == 0 || runtime_directory[0] != '/' || contains_nul(runtime_directory) {
 		return "", .Runtime_Directory
 	}
+	for octet in transmute([]byte)runtime_directory do if octet < 0x20 || octet == 0x7f do return "", .Runtime_Directory
 	path := strings.clone_to_cstring(runtime_directory)
 	status: posix.stat_t
 	result := posix.lstat(path, &status)
@@ -64,6 +65,31 @@ runtime_socket_path :: proc(runtime_directory: string) -> (string, Socket_Error)
 		return "", .Invalid_Path
 	}
 	return socket_path, .None
+}
+
+private_runtime_subdirectory :: proc(runtime_directory, name: string) -> (string, Socket_Error) {
+	if name == "" || contains_nul(name) {
+		return "", .Runtime_Directory
+	}
+	probe, probe_error := runtime_socket_path(runtime_directory)
+	if probe_error != .None do return "", probe_error
+	delete(probe)
+	for octet in transmute([]byte)name do if octet == '/' || octet == '.' do return "", .Runtime_Directory
+	separator := "" if runtime_directory[len(runtime_directory)-1] == '/' else "/"
+	path := fmt.aprintf("%s%s%s", runtime_directory, separator, name)
+	path_c := strings.clone_to_cstring(path)
+	defer delete(path_c)
+	if posix.mkdir(path_c, {.IRUSR, .IWUSR, .IXUSR}) != .OK && posix.errno() != .EEXIST {
+		delete(path)
+		return "", .Runtime_Directory
+	}
+	status: posix.stat_t
+	if posix.lstat(path_c, &status) != .OK || !posix.S_ISDIR(status.st_mode) ||
+	   status.st_uid != posix.geteuid() || !private_mode(status.st_mode) {
+		delete(path)
+		return "", .Runtime_Directory
+	}
+	return path, .None
 }
 
 socket_address :: proc(path: string) -> (posix.sockaddr_un, bool) {

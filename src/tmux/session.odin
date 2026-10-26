@@ -263,6 +263,24 @@ append_detach_command :: proc(session: ^Session, commands: ^[dynamic]byte) {
 	session_queue_reply(session, .Ignored, -1)
 }
 
+append_environment_command :: proc(session: ^Session, commands: ^[dynamic]byte, name, value: string) -> bool {
+	if !session_ready(session) || session.session_id < 0 || name == "" || value == "" do return false
+	for octet in transmute([]byte)name do if !((octet >= 'A' && octet <= 'Z') || octet == '_') do return false
+	for octet in transmute([]byte)value do if octet < 0x20 || octet == 0x7f do return false
+	append(commands, "set-environment -t $")
+	append_decimal(commands, session.session_id)
+	append(commands, ' ')
+	append(commands, ..transmute([]byte)name)
+	append(commands, ' ', '"')
+	for octet in transmute([]byte)value {
+		if octet == '\\' || octet == '"' do append(commands, '\\')
+		append(commands, octet)
+	}
+	append(commands, '"', '\n')
+	session_queue_reply(session, .Ignored, -1)
+	return true
+}
+
 request_new_window :: proc(session: ^Session, commands: ^[dynamic]byte) {
 	if !session_ready(session) do return
 	append(commands, "new-window\n")

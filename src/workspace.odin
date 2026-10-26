@@ -19,6 +19,10 @@ import vt "vt"
 import x11 "x11"
 import xlib "vendor:x11/xlib"
 
+Job_Registry :: jobs.Registry
+Job_Reporter_Server :: jobs.Reporter_Server
+Job_Reporter_Client :: jobs.Reporter_Client
+
 Pane :: struct {
 	workspace: ^Workspace,
 	surface: x11.Window,
@@ -57,6 +61,7 @@ Pane :: struct {
 	tmux_detach_requested: bool,
 	tmux_reconnect_disabled: bool,
 	tmux_reconnecting: bool,
+	tmux_job_environment_published: bool,
 	tmux_reconnect_attempts: int,
 	tmux_disconnected_since: time.Time,
 	last_tmux_reconcile: time.Time,
@@ -71,6 +76,7 @@ Split_Node :: struct {
 }
 
 Tab :: struct {
+	id: u64,
 	panes: [dynamic]^Pane,
 	active: int,
 	axis: Split_Axis,
@@ -151,9 +157,12 @@ Workspace :: struct {
 	search_surface: x11.Window,
 	close_surface: x11.Window,
 	search_visible: bool,
+	jobs_visible: bool,
+	jobs_selected: int,
 	settings: ^config.Settings,
 	command: []cstring,
 	tabs: [dynamic]^Tab,
+	next_tab_id: u64,
 	pending_rule_windows: [dynamic]Pending_Rule_Window,
 	active: int,
 	close_confirmation: bool,
@@ -179,7 +188,8 @@ Workspace :: struct {
 	title: string,
 	quake: ^quake.Controller,
 	statusbar: Statusbar_State,
-	jobs: jobs.Registry,
+	jobs: Job_Registry,
+	job_reporter: Job_Reporter_Server,
 	layout_pending: bool,
 	grid_resize_pending: bool,
 	last_resize: time.Tick,
@@ -252,9 +262,13 @@ workspace_font_cache_destroy :: proc(cache: ^Workspace_Font_Cache) {
 	cache^ = {}
 }
 
+Workspace_Poll_Kind :: enum { Window, Quake, Pane, Job_Listener, Job_Client }
+
 Workspace_Poll_Target :: struct {
+	kind: Workspace_Poll_Kind,
 	workspace: ^Workspace,
 	pane: ^Pane,
+	job_client: ^Job_Reporter_Client,
 }
 
 PRIVILEGE_CHECK_INTERVAL :: 250*time.Millisecond
@@ -310,11 +324,14 @@ workspace_init :: proc(
 	}
 	workspace.statusbar.visible = settings.statusbar.enabled
 	workspace.statusbar.auto_hide_revealed = !settings.statusbar.auto_hide
+	workspace.job_reporter.listener.fd = -1
+	_ = jobs.reporter_open(&workspace.job_reporter, &workspace.jobs, u64(root.id))
 	selected_font_cache := font_cache
 	if selected_font_cache == nil do selected_font_cache = &workspace.local_font_cache
 	workspace.font_cache = selected_font_cache
 	workspace.font_entry = workspace_font_cache_acquire(selected_font_cache, settings, workspace.font_size)
 	if workspace.font_entry == nil {
+		jobs.reporter_close(&workspace.job_reporter)
 		delete(workspace.title)
 		return false
 	}
@@ -325,6 +342,7 @@ workspace_init :: proc(
 	if pane != nil && remote_host != "" do config.replace_string(&pane.remote_host, remote_host)
 	created := workspace_append_new_tab(workspace, pane)
 	if !created {
+		jobs.reporter_close(&workspace.job_reporter)
 		workspace_font_cache_release(workspace.font_cache, workspace.font_entry)
 		workspace.font_entry = nil
 		if workspace.font_cache == &workspace.local_font_cache do workspace_font_cache_destroy(&workspace.local_font_cache)
@@ -384,6 +402,7 @@ workspace_service :: proc(workspace: ^Workspace) -> bool {
 	workspace_reap(workspace)
 	workspace_tmux_reconnect_tick(workspace)
 	workspace_tmux_reconcile_tick(workspace)
+	jobs.reporter_cleanup(&workspace.job_reporter)
 	return len(workspace.tabs) > 0
 }
 
@@ -393,10 +412,18 @@ workspace_append_poll :: proc(
 	targets: ^[dynamic]Workspace_Poll_Target,
 ) {
 	append(fds, {fd = posix.FD(x11.connection_fd(workspace.root)), events = {.IN}})
-	append(targets, {workspace = workspace})
+	append(targets, {kind = .Window, workspace = workspace})
 	if workspace.quake != nil && quake.poll_fd(workspace.quake) >= 0 {
 		append(fds, {fd = quake.poll_fd(workspace.quake), events = {.IN}})
-		append(targets, {workspace = workspace})
+		append(targets, {kind = .Quake, workspace = workspace})
+	}
+	if workspace.job_reporter.enabled {
+		append(fds, {fd = workspace.job_reporter.listener.fd, events = {.IN}})
+		append(targets, {kind = .Job_Listener, workspace = workspace})
+		for client in workspace.job_reporter.clients {
+			append(fds, {fd = client.connection.fd, events = jobs.reporter_client_events(client)})
+			append(targets, {kind = .Job_Client, workspace = workspace, job_client = client})
+		}
 	}
 	for tab in workspace.tabs {
 		for pane in tab.panes {
@@ -404,13 +431,25 @@ workspace_append_poll :: proc(
 			events: posix.Poll_Event = {.IN}
 			if pane.pending_offset < len(pane.pending) do events += {.OUT}
 			append(fds, {fd = pane.process.master, events = events})
-			append(targets, {workspace = workspace, pane = pane})
+			append(targets, {kind = .Pane, workspace = workspace, pane = pane})
 		}
 	}
 }
 
 workspace_dispatch_poll :: proc(target: Workspace_Poll_Target, events: posix.Poll_Event) {
-	if target.workspace == nil || target.pane == nil do return
+	if target.workspace == nil do return
+	switch target.kind {
+	case .Job_Listener:
+		if .IN in events do jobs.reporter_accept(&target.workspace.job_reporter)
+		return
+	case .Job_Client:
+		jobs.reporter_client_poll(&target.workspace.job_reporter, target.job_client, events)
+		return
+	case .Window, .Quake:
+		return
+	case .Pane:
+	}
+	if target.pane == nil do return
 	pane := target.pane
 	if .IN in events || .HUP in events {
 		if !workspace_drain(target.workspace, pane) do pane.exited = true
@@ -423,10 +462,31 @@ workspace_dispatch_poll :: proc(target: Workspace_Poll_Target, events: posix.Pol
 }
 
 workspace_finish_cycle :: proc(workspace: ^Workspace) {
+	workspace_reconcile_job_owners(workspace)
 	workspace_cursor_tick(workspace)
 	workspace_refresh_privileged_tabs(workspace, false)
 	statusbar_auto_hide_tick(workspace)
 	statusbar_tick(workspace)
+}
+
+workspace_reconcile_job_owners :: proc(workspace: ^Workspace) {
+	if workspace == nil do return
+	for &job in workspace.jobs.jobs {
+		if job.owner.tab != 0 do continue
+		pane: ^Pane
+		if tmux_owner_id, tmux_pane_id, is_tmux := jobs.tmux_reporter_identity(job.reporter); is_tmux {
+			for tab in workspace.tabs do for candidate in tab.panes do if candidate.tmux_pane_id == tmux_pane_id &&
+			   pane_tmux_owner(candidate).surface.id == xlib.Window(tmux_owner_id) {
+				pane = candidate
+				break
+			}
+		} else {
+			pane = workspace_find_pane(workspace, xlib.Window(job.owner.pane))
+		}
+		if pane == nil do continue
+		job.owner.pane = u64(pane.surface.id)
+		if tab := workspace_tab_for_pane(workspace, pane); tab != nil do job.owner.tab = tab.id
+	}
 }
 
 workspace_exit_status :: proc(workspace: ^Workspace) -> int {
@@ -457,7 +517,11 @@ workspace_new_pane_command :: proc(workspace: ^Workspace, command: []cstring, cw
 	columns, rows := x11.grid_size(&pane.surface)
 	directory := cwd
 	if directory == "" do directory = workspace.settings.working_directory
-	process, process_error := pty.spawn(command, pty_size(columns, rows, pane.surface.width, pane.surface.height), workspace.settings.term, directory)
+	environment: [4]pty.Environment_Variable
+	process, process_error := pty.spawn(
+		command, pty_size(columns, rows, pane.surface.width, pane.surface.height), workspace.settings.term, directory,
+		workspace_job_environment(workspace, pane, &environment),
+	)
 	if process_error != .None {
 		drawing.destroy(&pane.renderer, &pane.surface); x11.destroy_child(&pane.surface); free(pane); return nil
 	}
@@ -474,6 +538,15 @@ workspace_new_pane_command :: proc(workspace: ^Workspace, command: []cstring, cw
 	workspace_apply_cursor(workspace, pane)
 	pane.visible = true
 	return pane
+}
+
+workspace_job_environment :: proc(workspace: ^Workspace, pane: ^Pane, environment: ^[4]pty.Environment_Variable) -> []pty.Environment_Variable {
+	if workspace == nil || pane == nil || environment == nil || !workspace.job_reporter.enabled do return nil
+	environment[0] = {name = "NARE_JOB_SOCKET", value = workspace.job_reporter.path}
+	environment[1] = {name = "NARE_JOB_TOKEN", value = workspace.job_reporter.token}
+	environment[2] = {name = "NARE_JOB_REPORTER", value = fmt.tprintf("%d", pane.surface.id)}
+	environment[3] = {name = "NARE_JOB_WINDOW", value = fmt.tprintf("%d", workspace.root.id)}
+	return environment[:]
 }
 
 workspace_new_tmux_view :: proc(workspace: ^Workspace, owner: ^Pane, pane_id: int) -> ^Pane {
@@ -538,6 +611,7 @@ workspace_tmux_view :: proc(workspace: ^Workspace, owner: ^Pane, pane_id: int) -
 pane_destroy :: proc(pane: ^Pane) {
 	if pane == nil do return
 	if pane.workspace != nil && pane.tracked_job_id != 0 do jobs.cancel(&pane.workspace.jobs, pane.tracked_job_id)
+	if pane.workspace != nil do jobs.owner_lost(&pane.workspace.jobs, u64(pane.surface.id))
 	if pane.tmux_owner == nil do pty.shutdown(&pane.process)
 	vt.terminal_destroy(&pane.terminal)
 	if pane.tmux_owner == nil {
@@ -576,6 +650,7 @@ workspace_destroy :: proc(workspace: ^Workspace) {
 	delete(workspace.tabs)
 	for pending in workspace.pending_rule_windows do delete(pending.name)
 	delete(workspace.pending_rule_windows)
+	jobs.reporter_close(&workspace.job_reporter)
 	jobs.destroy(&workspace.jobs)
 	delete(workspace.tab_bounds)
 	delete(workspace.rename_buffer)
@@ -600,6 +675,7 @@ workspace_new_tab_command :: proc(workspace: ^Workspace, command: []cstring, tmu
 workspace_append_new_tab :: proc(workspace: ^Workspace, pane: ^Pane) -> bool {
 	if pane == nil do return false
 	tab := new(Tab)
+	tab.id = workspace_next_tab_id(workspace)
 	tab.tmux_window_id = -1
 	append(&tab.panes, pane)
 	tab.layout = split_leaf(pane)
@@ -608,6 +684,12 @@ workspace_append_new_tab :: proc(workspace: ^Workspace, pane: ^Pane) -> bool {
 	workspace.tab_reveal_active = true
 	workspace_layout(workspace)
 	return true
+}
+
+workspace_next_tab_id :: proc(workspace: ^Workspace) -> u64 {
+	workspace.next_tab_id += 1
+	if workspace.next_tab_id == 0 do workspace.next_tab_id = 1
+	return workspace.next_tab_id
 }
 
 workspace_insert_split_pane :: proc(workspace: ^Workspace, pane: ^Pane, axis: Split_Axis) -> bool {
@@ -786,6 +868,7 @@ workspace_search_bar_height :: proc(workspace: ^Workspace) -> int {
 
 workspace_draw_tabs :: proc(workspace: ^Workspace) {
 	defer workspace_draw_close_confirmation(workspace)
+	defer workspace_draw_jobs_list(workspace)
 	defer workspace_draw_search_bar(workspace)
 	defer workspace_draw_statusbar(workspace)
 	height := workspace_tab_bar_height(workspace)
@@ -950,6 +1033,10 @@ workspace_event :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
 			if event.key == .Escape || (event.key == .Text && event.input_size == 1 && (event.input[0] == 'n' || event.input[0] == 'N')) do workspace_hide_close_confirmation(workspace)
 			return true
 		}
+		if workspace.jobs_visible {
+			workspace_jobs_list_input(workspace, event)
+			return true
+		}
 		if workspace.renaming_tab >= 0 {
 			workspace_rename_input(workspace, event)
 			return true
@@ -1010,6 +1097,7 @@ workspace_event :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
 		pointer_y := event.mouse.y
 		if pointer_pane := workspace_find_pane(workspace, event.source); pointer_pane != nil do pointer_y += pointer_pane.surface.y
 		if statusbar_auto_hide_pointer(workspace, pointer_y) do return true
+		if event.source == workspace.root.id && statusbar_mouse(workspace, event.mouse) do return true
 		if event.source == workspace.root.id && workspace_tab_bar_mouse(workspace, event.mouse, event.timestamp) do return true
 		pane := workspace_find_pane(workspace, event.source)
 		if pane == nil do return true
@@ -1425,6 +1513,10 @@ workspace_shortcut :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
 		workspace_layout(workspace)
 		return true
 	}
+	if event_matches(event, bindings.show_jobs) {
+		workspace_toggle_jobs_list(workspace)
+		return true
+	}
 	for &binding in workspace.settings.tab_rule_bindings {
 		if !event_matches(event, binding.chord) do continue
 		rule := config.tab_rule(workspace.settings, binding.rule)
@@ -1733,7 +1825,10 @@ workspace_record_exit :: proc(workspace: ^Workspace, pane: ^Pane) {
 workspace_register_rule_job :: proc(workspace: ^Workspace, pane: ^Pane, rule: ^config.Tab_Rule) -> u64 {
 	if workspace == nil || pane == nil || rule == nil do return 0
 	label := rule.job_name if rule.job_name != "" else rule.name
-	return jobs.register(&workspace.jobs, u64(pane.surface.id), label, rule.name)
+	tab := workspace_tab_for_pane(workspace, pane)
+	owner := jobs.Owner{window = u64(workspace.root.id), pane = u64(pane.surface.id)}
+	if tab != nil do owner.tab = tab.id
+	return jobs.register(&workspace.jobs, .Nare_Launch, owner, label, rule.name, int(pane.process.child))
 }
 
 workspace_reap :: proc(workspace: ^Workspace) {
@@ -1859,6 +1954,7 @@ workspace_tmux_disconnect :: proc(workspace: ^Workspace, owner: ^Pane) {
 	owner.exited = false
 	owner.tmux_disconnected = true
 	owner.tmux_reconnecting = false
+	owner.tmux_job_environment_published = false
 	owner.tmux_disconnect_pending = false
 	owner.tmux_disconnected_since = time.now()
 	workspace_draw_tabs(workspace)
@@ -1874,11 +1970,13 @@ workspace_tmux_reconnect :: proc(workspace: ^Workspace, owner: ^Pane) -> bool {
 	columns := max(1, owner.tmux_client_columns)
 	rows := max(1, owner.tmux_client_rows)
 	if columns == 1 || rows == 1 do columns, rows = x11.grid_size(&owner.surface)
+	environment: [4]pty.Environment_Variable
 	process, err := pty.spawn(
 		owner.reconnect_command[:],
 		pty_size(columns, rows, owner.surface.width, owner.surface.height),
 		workspace.settings.term,
 		workspace.settings.working_directory,
+		workspace_job_environment(workspace, owner, &environment),
 	)
 	owner.tmux_reconnect_attempts += 1
 	owner.tmux_disconnected_since = time.now()
@@ -1890,6 +1988,7 @@ workspace_tmux_reconnect :: proc(workspace: ^Workspace, owner: ^Pane) -> bool {
 	owner.exited = false
 	owner.tmux_disconnected = false
 	owner.tmux_reconnecting = true
+	owner.tmux_job_environment_published = false
 	owner.tmux_disconnect_pending = false
 	owner.tmux_reconnect_disabled = false
 	tmux.session_reset_transport(&owner.tmux_session)
@@ -2011,6 +2110,7 @@ workspace_tmux_reconcile :: proc(workspace: ^Workspace, owner: ^Pane) -> bool {
 		window := tmux.session_find_window(&owner.tmux_session, window_id)
 		if window == nil do continue
 		tab := new(Tab)
+		tab.id = workspace_next_tab_id(workspace)
 		tab.tmux_owner = owner
 		tab.tmux_window_id = window.id
 		tab.axis = .Columns
@@ -2101,6 +2201,7 @@ workspace_tmux_restore_tab :: proc(workspace: ^Workspace, owner: ^Pane) {
 		ordered_remove(&workspace.tabs, index)
 	}
 	tab := new(Tab)
+	tab.id = workspace_next_tab_id(workspace)
 	tab.tmux_window_id = -1
 	tab.custom_title = owner.local_tab_title
 	owner.local_tab_title = ""
@@ -2146,6 +2247,7 @@ workspace_feed_pty :: proc(workspace: ^Workspace, pane: ^Pane, data: []byte) -> 
 		case .Capabilities_Changed:
 			workspace_draw_tabs(workspace)
 		case .Pane_Selected:
+			workspace_tmux_publish_job_environment(workspace, pane)
 			config.replace_string(&pane.display_title, string(pane.tmux_session.title[:]))
 			if pane.tmux_reconnecting || !workspace_tmux_apply_selection(workspace, pane) do _ = workspace_tmux_reconcile(workspace, pane)
 			pane.tmux_reconnecting = false
@@ -2157,6 +2259,7 @@ workspace_feed_pty :: proc(workspace: ^Workspace, pane: ^Pane, data: []byte) -> 
 			x11.set_title(workspace.root, title)
 			workspace_draw_tabs(workspace)
 		case .Model_Changed:
+			workspace_tmux_publish_job_environment(workspace, pane)
 			config.replace_string(&pane.display_title, string(pane.tmux_session.title[:]))
 			_ = workspace_tmux_reconcile(workspace, pane)
 			pane.tmux_reconnecting = false
@@ -2225,6 +2328,20 @@ workspace_feed_pty :: proc(workspace: ^Workspace, pane: ^Pane, data: []byte) -> 
 		}
 	}
 	return dirty
+}
+
+workspace_tmux_publish_job_environment :: proc(workspace: ^Workspace, owner: ^Pane) {
+	if workspace == nil || owner == nil || owner.tmux_job_environment_published || owner.remote_host != "" ||
+	   !workspace.job_reporter.enabled || !tmux.session_ready(&owner.tmux_session) {
+		return
+	}
+	owner_id := fmt.tprintf("%d", owner.surface.id)
+	window_id := fmt.tprintf("%d", workspace.root.id)
+	ok := tmux.append_environment_command(&owner.tmux_session, &owner.pending, "NARE_JOB_SOCKET", workspace.job_reporter.path)
+	ok = tmux.append_environment_command(&owner.tmux_session, &owner.pending, "NARE_JOB_TOKEN", workspace.job_reporter.token) && ok
+	ok = tmux.append_environment_command(&owner.tmux_session, &owner.pending, "NARE_JOB_TMUX_OWNER", owner_id) && ok
+	ok = tmux.append_environment_command(&owner.tmux_session, &owner.pending, "NARE_JOB_WINDOW", window_id) && ok
+	owner.tmux_job_environment_published = ok
 }
 
 workspace_new_tmux_tab :: proc(workspace: ^Workspace, profile: ^config.Tmux_Profile, attach_last: bool) -> bool {

@@ -26,6 +26,11 @@ Kind :: enum u16 {
 	Error,
 	Ping,
 	Pong,
+	Job_Start = 100,
+	Job_Progress,
+	Job_Finish,
+	Job_Fail,
+	Job_Ack,
 }
 
 Error :: enum {
@@ -149,6 +154,11 @@ valid_kind :: proc(value: u16) -> (Kind, bool) {
 	case u16(Kind.Error): return .Error, true
 	case u16(Kind.Ping): return .Ping, true
 	case u16(Kind.Pong): return .Pong, true
+	case u16(Kind.Job_Start): return .Job_Start, true
+	case u16(Kind.Job_Progress): return .Job_Progress, true
+	case u16(Kind.Job_Finish): return .Job_Finish, true
+	case u16(Kind.Job_Fail): return .Job_Fail, true
+	case u16(Kind.Job_Ack): return .Job_Ack, true
 	}
 	return {}, false
 }

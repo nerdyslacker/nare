@@ -28,8 +28,10 @@ Tab_Rule_Reuse :: enum { Always_New, Focus }
 Quake_Horizontal_Align :: enum { Left, Center, Right }
 Quake_Animation :: enum { None, Slide, Fade }
 Status_Position :: enum { Top, Bottom }
-Status_Module :: enum { Mode, Session, Host, Cwd, Git, Command, Size, Tabs, Clock, Battery, Resource, Zoom }
-STATUS_MODULE_COUNT :: int(Status_Module.Zoom)+1
+Status_Module :: enum { Mode, Session, Host, Cwd, Git, Command, Size, Tabs, Clock, Battery, Resource, Zoom, Jobs }
+STATUS_MODULE_COUNT :: int(Status_Module.Jobs)+1
+Jobs_Sort :: enum { Running_First, Newest }
+Jobs_Scope :: enum { Window }
 
 Status_Module_Style :: struct {
 	foreground, background: u32,
@@ -76,7 +78,17 @@ Bindings :: struct {
 	copy, paste, font_increase, font_decrease, font_reset: string,
 	tmux_new_tab, tmux_new_window, tmux_attach_last: string,
 	tmux_detach, tmux_reconnect: string,
-	toggle_statusbar: string,
+	toggle_statusbar, show_jobs: string,
+}
+
+Statusbar_Jobs_Settings :: struct {
+	enabled: bool,
+	max_visible: int,
+	show_elapsed, show_completed, show_failed, show_progress: bool,
+	completed_timeout_seconds, failed_timeout_seconds: int,
+	success_background, failure_background: u32,
+	sort: Jobs_Sort,
+	scope: Jobs_Scope,
 }
 
 Statusbar_Settings :: struct {
@@ -89,6 +101,7 @@ Statusbar_Settings :: struct {
 	background, foreground, accent: u32,
 	module_styles: [STATUS_MODULE_COUNT]Status_Module_Style,
 	clock_format: string,
+	jobs: Statusbar_Jobs_Settings,
 	auto_hide_delay_ms: int,
 	clock_update_ms, cwd_update_ms, git_update_ms, command_update_ms, battery_update_ms, resource_update_ms: int,
 }
@@ -278,6 +291,7 @@ settings_init :: proc(settings: ^Settings) {
 		tmux_detach = strings.clone("alt+control+d"),
 		tmux_reconnect = strings.clone("alt+control+r"),
 		toggle_statusbar = strings.clone("alt+shift+b"),
+		show_jobs = strings.clone("alt+shift+j"),
 	}
 	settings.statusbar = {
 		position = .Bottom, height = 24, separator = strings.clone(" | "), show_in_quake = true, border = true,
@@ -285,6 +299,12 @@ settings_init :: proc(settings: ^Settings) {
 		clock_format = strings.clone("%H:%M"), auto_hide_delay_ms = 600, clock_update_ms = 1000, cwd_update_ms = 2000,
 		git_update_ms = 2000, command_update_ms = 1000,
 		battery_update_ms = 5000, resource_update_ms = 2000,
+	}
+	settings.statusbar.jobs = {
+		enabled = true, max_visible = 3, show_elapsed = true, show_completed = true,
+		show_failed = true, show_progress = true, completed_timeout_seconds = 10,
+		failed_timeout_seconds = 30, success_background = 0x237a4b, failure_background = 0xa83246,
+		sort = .Running_First, scope = .Window,
 	}
 	append(&settings.statusbar.left, .Mode, .Session)
 	append(&settings.statusbar.right, .Resource, .Battery, .Size, .Clock)
@@ -370,7 +390,7 @@ parse :: proc(settings: ^Settings, contents: string) -> Result {
 		if line[0] == '[' {
 			if len(line) < 3 || line[len(line)-1] != ']' do return {error = .Syntax, line = line_number}
 			section = strings.trim_space(line[1:len(line)-1])
-			if section != "main" && section != "scrollback" && section != "url" && section != "shell" && section != "security" && section != "graphics" && section != "window" && section != "tabs" && section != "colors" && section != "bindings" && section != "cursor" && section != "tmux" && section != "quake" && section != "statusbar" && !status_module_section(section) && !tmux_profile_section(section) && !tab_rule_section(section) {
+			if section != "main" && section != "scrollback" && section != "url" && section != "shell" && section != "security" && section != "graphics" && section != "window" && section != "tabs" && section != "colors" && section != "bindings" && section != "cursor" && section != "tmux" && section != "quake" && section != "statusbar" && section != "statusbar.jobs" && !status_module_section(section) && !tmux_profile_section(section) && !tab_rule_section(section) {
 				return {error = .Unknown_Section, line = line_number}
 			}
 			if tmux_profile_section(section) {
@@ -673,6 +693,7 @@ apply :: proc(settings: ^Settings, section, key, value: string) -> Error {
 		case "tmux-detach": replace_string(&settings.bindings.tmux_detach, value)
 		case "tmux-reconnect": replace_string(&settings.bindings.tmux_reconnect, value)
 		case "toggle-statusbar": replace_string(&settings.bindings.toggle_statusbar, value)
+		case "show-jobs": replace_string(&settings.bindings.show_jobs, value)
 		case:
 			if strings.has_prefix(key, "tmux-profile.") {
 				name := key[len("tmux-profile."):]
@@ -727,6 +748,42 @@ apply :: proc(settings: ^Settings, section, key, value: string) -> Error {
 			if key == "background" do settings.statusbar.background = parsed
 			else if key == "foreground" do settings.statusbar.foreground = parsed
 			else do settings.statusbar.accent = parsed
+		case: return .Unknown_Key
+		}
+	} else if section == "statusbar.jobs" {
+		style := &settings.statusbar.module_styles[int(Status_Module.Jobs)]
+		switch key {
+		case "enabled":
+			parsed, ok := parse_bool(value); if !ok do return .Invalid_Value
+			settings.statusbar.jobs.enabled = parsed
+		case "max-visible":
+			parsed, ok := strconv.parse_int(value); if !ok || parsed < 1 || parsed > 16 do return .Invalid_Value
+			settings.statusbar.jobs.max_visible = parsed
+		case "show-elapsed", "show-completed", "show-failed", "show-progress":
+			parsed, ok := parse_bool(value); if !ok do return .Invalid_Value
+			if key == "show-elapsed" do settings.statusbar.jobs.show_elapsed = parsed
+			else if key == "show-completed" do settings.statusbar.jobs.show_completed = parsed
+			else if key == "show-failed" do settings.statusbar.jobs.show_failed = parsed
+			else do settings.statusbar.jobs.show_progress = parsed
+		case "completed-timeout", "failed-timeout":
+			parsed, ok := strconv.parse_int(value); if !ok || parsed < 0 || parsed > 86400 do return .Invalid_Value
+			if key == "completed-timeout" do settings.statusbar.jobs.completed_timeout_seconds = parsed
+			else do settings.statusbar.jobs.failed_timeout_seconds = parsed
+		case "sort":
+			switch value {
+			case "running-first": settings.statusbar.jobs.sort = .Running_First
+			case "newest": settings.statusbar.jobs.sort = .Newest
+			case: return .Invalid_Value
+			}
+		case "scope":
+			if value != "window" do return .Invalid_Value
+			settings.statusbar.jobs.scope = .Window
+		case "foreground", "background", "success-background", "failure-background":
+			parsed, ok := parse_color(value); if !ok do return .Invalid_Value
+			if key == "foreground" {style.foreground = parsed; style.foreground_set = true}
+			else if key == "background" {style.background = parsed; style.background_set = true}
+			else if key == "success-background" do settings.statusbar.jobs.success_background = parsed
+			else do settings.statusbar.jobs.failure_background = parsed
 		case: return .Unknown_Key
 		}
 	} else if status_module_section(section) {
@@ -950,7 +1007,7 @@ destroy_bindings :: proc(bindings: ^Bindings) {
 	delete(bindings.copy); delete(bindings.paste); delete(bindings.font_increase); delete(bindings.font_decrease); delete(bindings.font_reset)
 	delete(bindings.tmux_new_tab); delete(bindings.tmux_new_window); delete(bindings.tmux_attach_last)
 	delete(bindings.tmux_detach); delete(bindings.tmux_reconnect)
-	delete(bindings.toggle_statusbar)
+	delete(bindings.toggle_statusbar); delete(bindings.show_jobs)
 	bindings^ = {}
 }
 
@@ -991,12 +1048,13 @@ status_module_from_name :: proc(name: string) -> (Status_Module, bool) {
 	case "battery": return .Battery, true
 	case "resource", "resources": return .Resource, true
 	case "zoom": return .Zoom, true
+	case "jobs": return .Jobs, true
 	}
 	return {}, false
 }
 
 status_module_section :: proc(section: string) -> bool {
-	if !strings.has_prefix(section, "statusbar.") do return false
+	if section == "statusbar.jobs" || !strings.has_prefix(section, "statusbar.") do return false
 	_, found := status_module_from_name(section[len("statusbar."):])
 	return found
 }
@@ -1093,7 +1151,7 @@ shortcut_conflicts :: proc(settings: ^Settings, chord, rule_name: string) -> boo
 	   chord == b.toggle_stack || chord == b.swap_pane || chord == b.move_tab_left || chord == b.move_tab_right ||
 	   chord == b.copy || chord == b.paste || chord == b.font_increase || chord == b.font_decrease || chord == b.font_reset ||
 	   chord == b.tmux_new_tab || chord == b.tmux_new_window || chord == b.tmux_attach_last ||
-	   chord == b.tmux_detach || chord == b.tmux_reconnect || chord == b.toggle_statusbar {
+	   chord == b.tmux_detach || chord == b.tmux_reconnect || chord == b.toggle_statusbar || chord == b.show_jobs {
 		return true
 	}
 	for binding in settings.tmux_profile_bindings do if binding.chord == chord do return true

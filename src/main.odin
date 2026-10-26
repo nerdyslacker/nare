@@ -32,6 +32,7 @@ main :: proc() {
 }
 
 app_main :: proc() -> int {
+	if job_cli_requested(os.args[1:]) do return job_cli_main(os.args[1:])
 	launch, launch_err := launch_options(os.args[1:])
 	defer delete(launch.arguments)
 	if launch_err != "" {
@@ -382,7 +383,7 @@ apply_argument :: proc(options: ^config.Settings, argument: string) -> config.Er
 }
 
 usage :: proc() -> string {
-	return "usage: nare [--quake] [--server|--client [--no-wait]] [--server-socket=PATH] [DIRECTORY|--working-directory=PATH] [--config=PATH|--no-config] [--renderer=cpu|gpu|auto] [--font=FAMILY] [--font-size=PIXELS] [--ligatures=true|false] [--title=TITLE] [--scrollback-lines=COUNT] [--url-opener=COMMAND] [--output-pipe=COMMAND] [--term=NAME] [--osc52=disabled|copy-enabled|paste-enabled|enabled] [--tmux [SESSION]|--tmux-profile=NAME] [--ssh=HOST] [--session=NAME] [--new-tab|--new-window] [-e COMMAND [ARG...]]"
+	return "usage: nare [--quake] [--server|--client [--no-wait]] [--server-socket=PATH] [DIRECTORY|--working-directory=PATH] [--config=PATH|--no-config] [--renderer=cpu|gpu|auto] [--font=FAMILY] [--font-size=PIXELS] [--ligatures=true|false] [--title=TITLE] [--scrollback-lines=COUNT] [--url-opener=COMMAND] [--output-pipe=COMMAND] [--term=NAME] [--osc52=disabled|copy-enabled|paste-enabled|enabled] [--tmux [SESSION]|--tmux-profile=NAME] [--ssh=HOST] [--session=NAME] [--new-tab|--new-window] [-e COMMAND [ARG...]]\n       nare status job ...\n       nare job run LABEL -- COMMAND [ARG...]"
 }
 
 OSC52_Request :: struct {

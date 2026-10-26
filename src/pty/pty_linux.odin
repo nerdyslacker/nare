@@ -45,7 +45,11 @@ Process :: struct {
 	closed:      bool,
 }
 
-spawn :: proc(argv: []cstring, size: Size, term: string = "xterm-256color", working_directory: string = "") -> (process: Process, err: Error) {
+Environment_Variable :: struct {
+	name, value: string,
+}
+
+spawn :: proc(argv: []cstring, size: Size, term: string = "xterm-256color", working_directory: string = "", environment: []Environment_Variable = nil) -> (process: Process, err: Error) {
 	process.master = -1
 	if len(argv) < 2 || argv[0] == nil || argv[len(argv)-1] != nil {
 		return process, .Invalid_Command
@@ -54,6 +58,18 @@ spawn :: proc(argv: []cstring, size: Size, term: string = "xterm-256color", work
 	defer delete(term_cstring)
 	working_directory_cstring := strings.clone_to_cstring(working_directory)
 	defer delete(working_directory_cstring)
+	environment_names := make([]cstring, len(environment))
+	environment_values := make([]cstring, len(environment))
+	defer {
+		for value in environment_names do delete(value)
+		for value in environment_values do delete(value)
+		delete(environment_names)
+		delete(environment_values)
+	}
+	for variable, index in environment {
+		environment_names[index] = strings.clone_to_cstring(variable.name)
+		environment_values[index] = strings.clone_to_cstring(variable.value)
+	}
 	master := posix.posix_openpt({.RDWR, .NOCTTY, .CLOEXEC})
 	if master < 0 {
 		return process, .Open_Master
@@ -94,7 +110,7 @@ spawn :: proc(argv: []cstring, size: Size, term: string = "xterm-256color", work
 	}
 	if child == 0 {
 		_ = posix.close(exec_pipe[0])
-		child_exec(master, slave_name, argv, size, exec_pipe[1], term_cstring, working_directory_cstring)
+		child_exec(master, slave_name, argv, size, exec_pipe[1], term_cstring, working_directory_cstring, environment_names, environment_values)
 	}
 	_ = posix.close(exec_pipe[1])
 	process.child = child
@@ -137,7 +153,7 @@ spawn_detached :: proc(argv: []cstring) -> Error {
 	return .None if posix.WIFEXITED(status) && posix.WEXITSTATUS(status) == 0 else .Child_Setup
 }
 
-child_exec :: proc(master: posix.FD, slave_name: cstring, argv: []cstring, size: Size, exec_fd: posix.FD, term, working_directory: cstring) -> ! {
+child_exec :: proc(master: posix.FD, slave_name: cstring, argv: []cstring, size: Size, exec_fd: posix.FD, term, working_directory: cstring, environment_names, environment_values: []cstring) -> ! {
 	if posix.setsid() < 0 {
 		child_exec_failed(exec_fd)
 	}
@@ -154,6 +170,9 @@ child_exec :: proc(master: posix.FD, slave_name: cstring, argv: []cstring, size:
 	}
 	_ = posix.close(master)
 	if posix.setenv("TERM", term, true) != .OK {
+		child_exec_failed(exec_fd)
+	}
+	for name, index in environment_names do if posix.setenv(name, environment_values[index], true) != .OK {
 		child_exec_failed(exec_fd)
 	}
 	if working_directory != nil && (^byte)(working_directory)^ != 0 && posix.chdir(working_directory) != .OK {

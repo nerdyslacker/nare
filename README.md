@@ -28,7 +28,7 @@
 - Runtime configuration, bounded image and transfer resources, and bundled terminfo.
 - Optional local server/client mode with isolated windows, bounded authenticated IPC, and waiting or detached client launches.
 - Optional X11 drop-down mode with monitor-relative geometry and same-user command forwarding.
-- Optional native status bar with local/tmux metadata, system resources, foreground command, Git state, and current zoom percentage.
+- Optional native status bar with local/tmux metadata, tracked command jobs, system resources, foreground command, Git state, and current zoom percentage.
 
 ## Dependencies
 
@@ -56,6 +56,16 @@ Configuration is loaded from `$XDG_CONFIG_HOME/nare/nare.conf`, or `~/.config/na
 Set `[shell] startup-command=/usr/bin/fish --login` to replace the default `$SHELL` command for local tabs and panes. Explicit `-e COMMAND [ARG...]` launches still override it.
 
 Run `nare /path/to/folder` to open a shell in that folder. `make install` also installs the desktop entry used by file managers for **Open with nare**.
+
+Start a tracked background command from any local nare tab; the prompt returns immediately and tracking continues even when the bar is hidden:
+
+```sh
+nare job run build -- make
+```
+
+For the statusbar-style shell shortcut, add `eval "$(nare job init zsh)"` to `.zshrc`, or `nare job init fish | source` to `config.fish`. Then `+ make` starts and tracks `make` in the background; `+ +build make` supplies an explicit label.
+
+Scripts may report progress with `nare status job start|progress|finish|fail`. Run `nare status job` for the compact command summary. Job reporting is scoped to the originating nare window and does not inspect unrelated shell processes.
 
 ## Server mode
 
