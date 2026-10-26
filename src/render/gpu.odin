@@ -544,29 +544,36 @@ when GPU_ENABLED {
 	}
 
 	gpu_draw_ordered_commands :: proc(gpu: ^GPU, registry: ^graphics.Registry) {
-		for command in gpu.commands {
+		index := 0
+		for index < len(gpu.commands) {
+			command := gpu.commands[index]
 			switch command.kind {
 			case .Rectangle:
 				Disable(GL_TEXTURE_2D)
-				if command.opacity == 0 {
-					Disable(GL_BLEND)
-					gpu_color(command.color)
-				} else {
-					Enable(GL_BLEND)
-					BlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-					gpu_color_alpha(command.color, command.opacity)
-				}
+				Enable(GL_BLEND)
+				BlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
 				Begin(GL_QUADS)
-				gpu_quad(gpu, command.x, command.y, command.x+command.width, command.y+command.height)
+				for index < len(gpu.commands) && gpu.commands[index].kind == .Rectangle {
+					current := gpu.commands[index]
+					if current.opacity == 0 do gpu_color(current.color)
+					else do gpu_color_alpha(current.color, current.opacity)
+					gpu_quad(gpu, current.x, current.y, current.x+current.width, current.y+current.height)
+					index += 1
+				}
 				End()
+				continue
 			case .Glyph:
 				BindTexture(GL_TEXTURE_2D, gpu.atlas_texture)
 				Enable(GL_TEXTURE_2D)
 				Enable(GL_BLEND)
 				BlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA)
 				Begin(GL_QUADS)
-				gpu_glyph_quad(gpu, command)
+				for index < len(gpu.commands) && gpu.commands[index].kind == .Glyph {
+					gpu_glyph_quad(gpu, gpu.commands[index])
+					index += 1
+				}
 				End()
+				continue
 			case .Image:
 				resource := graphics.find_image(registry, command.image_id)
 				entry := gpu_find_image_texture(gpu, command.image_id)
@@ -587,6 +594,7 @@ when GPU_ENABLED {
 				gpu_textured_quad(gpu, left, top, right, bottom, u0, v0, u1, v1)
 				End()
 			}
+			index += 1
 		}
 		Disable(GL_BLEND)
 		Disable(GL_TEXTURE_2D)

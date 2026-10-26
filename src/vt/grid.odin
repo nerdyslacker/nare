@@ -409,7 +409,8 @@ append_rune :: proc(output: ^[dynamic]byte, value: rune) {
 }
 
 blank_cell :: proc(attributes: Attributes) -> Cell {
-	return Cell{codepoint = ' ', width = 1, attributes = attributes}
+	background := attributes.foreground if attributes.inverse else attributes.background
+	return Cell{codepoint = ' ', width = 1, attributes = {background = background}}
 }
 
 screen_put :: proc(screen: ^Screen, codepoint: rune, attributes: Attributes, autowrap: bool, hyperlink_id: u32 = 0) {

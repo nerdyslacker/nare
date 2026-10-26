@@ -56,20 +56,22 @@ build_row_commands :: proc(
 	append_image_commands(output, window, screen, row, .Below_Text)
 	for column in 0..<screen.columns {
 		cell := vt.cell_at(screen, row, column)
+		if cell.continuation do continue
 		foreground, background := display_colors(
 			cell,
 			selection.contains(selection_state, screen, row, column),
 			block_cursor(terminal, screen, row, column),
 		)
 		if foreground == background do continue
+		decoration_width := min(window.width-column*window.cell_w, max(1, int(cell.width))*window.cell_w)
 		if cell.attributes.underline {
-			append_rectangle(output, column*window.cell_w, y+window.cell_h-1, window.cell_w, 1, foreground)
+			append_rectangle(output, column*window.cell_w, y+window.cell_h-1, decoration_width, 1, foreground)
 			if cell.attributes.double_underline {
-				append_rectangle(output, column*window.cell_w, y+window.cell_h-3, window.cell_w, 1, foreground)
+				append_rectangle(output, column*window.cell_w, y+window.cell_h-3, decoration_width, 1, foreground)
 			}
 		}
 		if cell.attributes.strikethrough {
-			append_rectangle(output, column*window.cell_w, y+window.cell_h/2, window.cell_w, 1, foreground)
+			append_rectangle(output, column*window.cell_w, y+window.cell_h/2, decoration_width, 1, foreground)
 		}
 	}
 

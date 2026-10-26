@@ -1,5 +1,7 @@
 package render
 
+import "core:math"
+
 Line_Weight :: enum u8 {
 	None,
 	Light,
@@ -273,17 +275,51 @@ append_rounded_corner :: proc(
 	codepoint: rune,
 	color: u32,
 ) {
-	steps := max(width, height)
-	denominator := max(1, (steps-1)*(steps-1))
-	last_x, last_y := -1, -1
-	for step in 0..<steps {
-		curve_x := width-1-step*step*(width-1-width/2)/denominator
-		curve_y := height/2+(2*step*(steps-1)-step*step)*(height-1-height/2)/denominator
-		if codepoint == 0x256e || codepoint == 0x256f do curve_x = width-1-curve_x
-		if codepoint == 0x256f || codepoint == 0x2570 do curve_y = height-1-curve_y
-		if curve_x == last_x && curve_y == last_y do continue
-		append_rectangle(output, x+curve_x, y+curve_y, 1, 1, color)
-		last_x, last_y = curve_x, curve_y
+	SAMPLE_GRID :: 8
+	sample_total :: SAMPLE_GRID*SAMPLE_GRID
+	stroke_pixels := line_thickness(min(width, height), .Light)
+	flip_x := codepoint == 0x256e || codepoint == 0x256f
+	flip_y := codepoint == 0x256f || codepoint == 0x2570
+	target_middle_x := f64(width/2-stroke_pixels/2)+f64(stroke_pixels)/2
+	target_middle_y := f64(height/2-stroke_pixels/2)+f64(stroke_pixels)/2
+	middle_x := f64(width)-target_middle_x if flip_x else target_middle_x
+	middle_y := f64(height)-target_middle_y if flip_y else target_middle_y
+	radius := max(1.0, min(f64(width)-middle_x, f64(height)-middle_y))
+	center_x := middle_x+radius
+	center_y := middle_y+radius
+	half_stroke := f64(stroke_pixels)/2
+
+	for pixel_y in 0..<height {
+		for pixel_x in 0..<width {
+			covered := 0
+			for sample_y in 0..<SAMPLE_GRID {
+				for sample_x in 0..<SAMPLE_GRID {
+					px := f64(pixel_x)+(f64(sample_x)+0.5)/SAMPLE_GRID
+					py := f64(pixel_y)+(f64(sample_y)+0.5)/SAMPLE_GRID
+					if flip_x do px = f64(width)-px
+					if flip_y do py = f64(height)-py
+					distance := f64(width+height)
+					if px >= middle_x && px <= center_x && py >= middle_y && py <= center_y {
+						dx, dy := px-center_x, py-center_y
+						distance = abs(math.sqrt(dx*dx+dy*dy)-radius)
+					}
+					if px >= center_x && px <= f64(width) {
+						distance = min(distance, abs(py-middle_y))
+					}
+					if py >= center_y && py <= f64(height) {
+						distance = min(distance, abs(px-middle_x))
+					}
+					if distance <= half_stroke do covered += 1
+				}
+			}
+			if covered == 0 do continue
+			opacity := u8(covered*255/sample_total)
+			if opacity == 255 {
+				append_rectangle(output, x+pixel_x, y+pixel_y, 1, 1, color)
+			} else {
+				append_translucent_rectangle(output, x+pixel_x, y+pixel_y, 1, 1, color, opacity)
+			}
+		}
 	}
 }
 
