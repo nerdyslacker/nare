@@ -31,6 +31,8 @@ MAX_GIT_INDEX_BYTES :: 16 * 1024 * 1024
 MAX_GIT_INDEX_ENTRIES :: 4096
 MAX_GIT_HASH_BYTES :: 32 * 1024 * 1024
 GIT_STATUS_TIMEOUT_MS :: 1500
+MAX_STATUSBAR_CWD_BYTES :: 4096
+STATUSBAR_SERVICE_INTERVAL :: 100*time.Millisecond
 
 Statusbar_Sample_Job :: struct {
 	battery_requested, resource_requested, git_requested, command_requested: bool,
@@ -42,7 +44,7 @@ Statusbar_Sample_Job :: struct {
 	git_length: int,
 	command: [128]byte,
 	command_length: int,
-	cwd: [4096]byte,
+	cwd: [MAX_STATUSBAR_CWD_BYTES]byte,
 	cwd_length: int,
 	command_pid: int,
 	cpu_total, cpu_idle: u64,
@@ -53,6 +55,10 @@ Statusbar_State :: struct {
 	visible: bool,
 	auto_hide_revealed, auto_hide_pending: bool,
 	auto_hide_left_at: time.Time,
+	module_mask: u32,
+	module_mask_ready: bool,
+	last_service: time.Tick,
+	service_calls, updates, worker_jobs, draw_requests: u64,
 	render_cache: Statusbar_Render_Cache,
 	clock, battery, resource, local_host, cwd, cwd_source, git, command: string,
 	last_clock, last_cwd, last_git, last_command, last_battery, last_resource: time.Time,
@@ -65,6 +71,13 @@ Statusbar_State :: struct {
 }
 
 statusbar_destroy :: proc(state: ^Statusbar_State) {
+	if os.get_env("NARE_STATUSBAR_PROFILE", context.temp_allocator) == "1" {
+		fmt.eprintf(
+			"nare statusbar: service=%d updates=%d workers=%d draws=%d raster=%d present=%d images=%d\n",
+			state.service_calls, state.updates, state.worker_jobs, state.draw_requests,
+			state.render_cache.rasterizations, state.render_cache.presentations, state.render_cache.image_allocations,
+		)
+	}
 	if state.sample_thread != nil do thread.destroy(state.sample_thread)
 	if state.sample_job != nil do free(state.sample_job)
 	statusbar_render_cache_destroy(&state.render_cache)
@@ -138,30 +151,47 @@ statusbar_auto_hide_tick :: proc(workspace: ^Workspace) {
 	workspace_layout(workspace)
 }
 
-statusbar_has_module :: proc(settings: ^config.Statusbar_Settings, wanted: config.Status_Module) -> bool {
-	for module in settings.left do if module == wanted do return true
-	for module in settings.center do if module == wanted do return true
-	for module in settings.right do if module == wanted do return true
-	return false
+statusbar_module_bit :: proc(module: config.Status_Module) -> u32 {
+	return u32(1)<<u32(module)
+}
+
+statusbar_module_mask :: proc(settings: ^config.Statusbar_Settings) -> u32 {
+	mask: u32
+	for module in settings.left do mask |= statusbar_module_bit(module)
+	for module in settings.center do mask |= statusbar_module_bit(module)
+	for module in settings.right do mask |= statusbar_module_bit(module)
+	return mask
 }
 
 statusbar_tick :: proc(workspace: ^Workspace, force: bool = false) {
 	if !statusbar_visible(workspace) do return
 	settings := &workspace.settings.statusbar
+	state := &workspace.statusbar
+	if !state.module_mask_ready {
+		state.module_mask = statusbar_module_mask(settings)
+		state.module_mask_ready = true
+	}
+	poll_mask := statusbar_module_bit(.Clock) | statusbar_module_bit(.Cwd) | statusbar_module_bit(.Git) |
+	             statusbar_module_bit(.Command) | statusbar_module_bit(.Battery) | statusbar_module_bit(.Resource)
+	if !force && state.sample_thread == nil && state.module_mask&poll_mask == 0 do return
+	if !force && state.sample_thread == nil && state.last_service != {} && time.tick_since(state.last_service) < STATUSBAR_SERVICE_INTERVAL do return
+	state.last_service = time.tick_now()
+	state.service_calls += 1
+	mask := state.module_mask
 	now := time.now()
-	changed := statusbar_harvest_sample(&workspace.statusbar)
-	if statusbar_has_module(settings, .Clock) && (force || time.since(workspace.statusbar.last_clock) >= time.Duration(settings.clock_update_ms)*time.Millisecond) {
+	changed := statusbar_harvest_sample(state)
+	if statusbar_module_bit(.Clock)&mask != 0 && (force || time.since(state.last_clock) >= time.Duration(settings.clock_update_ms)*time.Millisecond) {
 		workspace.statusbar.last_clock = now
 		changed = statusbar_update_clock(&workspace.statusbar, settings.clock_format) || changed
 	}
-	if statusbar_has_module(settings, .Cwd) && (force || time.since(workspace.statusbar.last_cwd) >= time.Duration(settings.cwd_update_ms)*time.Millisecond) {
+	if statusbar_module_bit(.Cwd)&mask != 0 && (force || time.since(state.last_cwd) >= time.Duration(settings.cwd_update_ms)*time.Millisecond) {
 		workspace.statusbar.last_cwd = now
 		changed = statusbar_update_cwd(workspace) || changed
 	}
-	battery_due := statusbar_has_module(settings, .Battery) && (force || time.since(workspace.statusbar.last_battery) >= time.Duration(settings.battery_update_ms)*time.Millisecond)
-	resource_due := statusbar_has_module(settings, .Resource) && (force || time.since(workspace.statusbar.last_resource) >= time.Duration(settings.resource_update_ms)*time.Millisecond)
-	git_due := statusbar_has_module(settings, .Git) && (force || workspace.statusbar.git_pane != workspace_active_pane(workspace) || time.since(workspace.statusbar.last_git) >= time.Duration(settings.git_update_ms)*time.Millisecond)
-	command_due := statusbar_has_module(settings, .Command) && (force || workspace.statusbar.command_pane != workspace_active_pane(workspace) || time.since(workspace.statusbar.last_command) >= time.Duration(settings.command_update_ms)*time.Millisecond)
+	battery_due := statusbar_module_bit(.Battery)&mask != 0 && (force || time.since(state.last_battery) >= time.Duration(settings.battery_update_ms)*time.Millisecond)
+	resource_due := statusbar_module_bit(.Resource)&mask != 0 && (force || time.since(state.last_resource) >= time.Duration(settings.resource_update_ms)*time.Millisecond)
+	git_due := statusbar_module_bit(.Git)&mask != 0 && (force || state.git_pane != workspace_active_pane(workspace) || time.since(state.last_git) >= time.Duration(settings.git_update_ms)*time.Millisecond)
+	command_due := statusbar_module_bit(.Command)&mask != 0 && (force || state.command_pane != workspace_active_pane(workspace) || time.since(state.last_command) >= time.Duration(settings.command_update_ms)*time.Millisecond)
 	if workspace.statusbar.sample_thread == nil && (battery_due || resource_due || git_due || command_due) {
 		git_request := false
 		command_request := false
@@ -194,6 +224,7 @@ statusbar_tick :: proc(workspace: ^Workspace, force: bool = false) {
 			}
 		}
 		started := statusbar_start_sample(&workspace.statusbar, battery_due, resource_due, git_request, command_request, workspace.statusbar.cwd_source, command_pid)
+		if started do state.worker_jobs += 1
 		if started || (!battery_due && !resource_due && !git_request && !command_request) {
 			if battery_due do workspace.statusbar.last_battery = now
 			if resource_due do workspace.statusbar.last_resource = now
@@ -201,6 +232,7 @@ statusbar_tick :: proc(workspace: ^Workspace, force: bool = false) {
 			if command_due do workspace.statusbar.last_command = now
 		}
 	}
+	if changed do state.updates += 1
 	if changed && !force do workspace_draw_statusbar(workspace)
 }
 
@@ -334,9 +366,21 @@ statusbar_update_cwd :: proc(workspace: ^Workspace) -> bool {
 }
 
 statusbar_set_cwd :: proc(state: ^Statusbar_State, value: string, local: bool) -> bool {
-	changed := statusbar_replace(&state.cwd, statusbar_sanitize(value))
-	if state.cwd_source != value do config.replace_string(&state.cwd_source, value)
-	state.cwd_local = local && value != ""
+	display_value := value
+	if local && value != "" {
+		home := os.get_env("HOME", context.temp_allocator)
+		for len(home) > 1 && home[len(home)-1] == '/' do home = home[:len(home)-1]
+		if home != "" && value == home {
+			display_value = "~"
+		} else if home != "" && len(value) > len(home) && strings.has_prefix(value, home) && value[len(home)] == '/' {
+			display_value = fmt.tprintf("~%s", value[len(home):])
+		}
+	}
+	changed := statusbar_replace(&state.cwd, statusbar_sanitize(display_value))
+	source := value
+	if len(source) > MAX_STATUSBAR_CWD_BYTES do source = ""
+	if state.cwd_source != source do config.replace_string(&state.cwd_source, source)
+	state.cwd_local = local && source != ""
 	return changed
 }
 
@@ -787,6 +831,7 @@ workspace_draw_statusbar :: proc(workspace: ^Workspace) {
 	pane := workspace_active_pane(workspace)
 	if pane == nil do return
 	settings := &workspace.settings.statusbar
+	workspace.statusbar.draw_requests += 1
 	font := pane.renderer.font
 	height := statusbar_render_height(workspace)
 	tab_height := workspace_tab_bar_height(workspace)

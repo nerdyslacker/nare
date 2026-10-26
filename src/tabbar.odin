@@ -30,6 +30,7 @@ Statusbar_Render_Cache :: struct {
 	background, foreground, accent: u32,
 	blocks, border: bool,
 	left, center, right: string,
+	image_allocations, rasterizations, presentations: u64,
 }
 
 TAB_HIT_EMPTY :: -1
@@ -230,12 +231,14 @@ draw_workspace_statusbar :: proc(
 		cache.pixels = (([^]u32)(data))[:window.width*height]
 		cache.width = window.width
 		cache.height = height
+		cache.image_allocations += 1
 	}
 	content_changed := geometry_changed || cache.font != font || cache.font_ascent != font.ascent || cache.font_cell_height != font.cell_height ||
 	                   cache.background != background || cache.foreground != foreground || cache.accent != accent ||
 	                   cache.blocks != blocks || cache.border != border ||
 	                   cache.left != left || cache.center != center || cache.right != right
 	if content_changed {
+		cache.rasterizations += 1
 		background_pixel := drawing.rgb_to_pixel(window, background)
 		for &pixel in cache.pixels do pixel = background_pixel
 		if border do fill_tab_rect(cache.pixels, window, 0, 0, window.width, min(2, height), accent)
@@ -283,6 +286,7 @@ draw_workspace_statusbar :: proc(
 		statusbar_cache_string(&cache.center, center)
 		statusbar_cache_string(&cache.right, right)
 	}
+	cache.presentations += 1
 	xlib.PutImage(window.display, xlib.Drawable(window.id), window.gc, cache.image, 0, 0, 0, i32(y), u32(window.width), u32(height))
 	_ = xlib.Flush(window.display)
 }
@@ -322,11 +326,23 @@ statusbar_draw_module_group :: proc(
 
 statusbar_render_cache_destroy :: proc(cache: ^Statusbar_Render_Cache) {
 	if cache == nil do return
+	statusbar_render_cache_invalidate(cache)
+	cache^ = {}
+}
+
+statusbar_render_cache_invalidate :: proc(cache: ^Statusbar_Render_Cache) {
+	if cache == nil do return
+	image_allocations := cache.image_allocations
+	rasterizations := cache.rasterizations
+	presentations := cache.presentations
 	statusbar_render_cache_release_image(cache)
 	delete(cache.left)
 	delete(cache.center)
 	delete(cache.right)
 	cache^ = {}
+	cache.image_allocations = image_allocations
+	cache.rasterizations = rasterizations
+	cache.presentations = presentations
 }
 
 statusbar_render_cache_release_image :: proc(cache: ^Statusbar_Render_Cache) {
