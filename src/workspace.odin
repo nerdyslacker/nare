@@ -60,15 +60,76 @@ Pane :: struct {
 
 Split_Axis :: enum { Rows, Columns }
 
+Split_Node :: struct {
+	pane: ^Pane,
+	axis: Split_Axis,
+	first, second: ^Split_Node,
+}
+
 Tab :: struct {
 	panes: [dynamic]^Pane,
 	active: int,
 	axis: Split_Axis,
+	layout: ^Split_Node,
 	stacked: bool,
 	custom_title: string,
 	tmux_owner: ^Pane,
 	tmux_window_id: int,
 	tmux_title: string,
+}
+
+split_leaf :: proc(pane: ^Pane) -> ^Split_Node {
+	node := new(Split_Node)
+	node.pane = pane
+	return node
+}
+
+split_destroy :: proc(node: ^Split_Node) {
+	if node == nil do return
+	split_destroy(node.first)
+	split_destroy(node.second)
+	free(node)
+}
+
+split_find :: proc(node: ^Split_Node, pane: ^Pane) -> ^Split_Node {
+	if node == nil do return nil
+	if node.pane == pane do return node
+	if found := split_find(node.first, pane); found != nil do return found
+	return split_find(node.second, pane)
+}
+
+split_remove :: proc(node: ^Split_Node, pane: ^Pane) -> (root: ^Split_Node, removed: bool) {
+	if node == nil do return nil, false
+	if node.pane == pane {
+		free(node)
+		return nil, true
+	}
+	node.first, removed = split_remove(node.first, pane)
+	if !removed do node.second, removed = split_remove(node.second, pane)
+	if !removed do return node, false
+	if node.first == nil || node.second == nil {
+		replacement := node.second if node.first == nil else node.first
+		free(node)
+		return replacement, true
+	}
+	return node, true
+}
+
+split_bounds :: proc(node: ^Split_Node, pane: ^Pane, x, y, width, height: int) -> (int, int, int, int, bool) {
+	if node == nil do return 0, 0, 0, 0, false
+	if node.pane != nil do return x, y, width, height, node.pane == pane
+	if node.axis == .Rows {
+		first_height := height/2
+		if bx, by, bw, bh, found := split_bounds(node.first, pane, x, y, width, first_height); found {
+			return bx, by, bw, bh, true
+		}
+		return split_bounds(node.second, pane, x, y+first_height, width, height-first_height)
+	}
+	first_width := width/2
+	if bx, by, bw, bh, found := split_bounds(node.first, pane, x, y, first_width, height); found {
+		return bx, by, bw, bh, true
+	}
+	return split_bounds(node.second, pane, x+first_width, y, width-first_width, height)
 }
 
 Tab_Bounds :: struct {
@@ -486,6 +547,7 @@ workspace_destroy :: proc(workspace: ^Workspace) {
 	if workspace.close_surface.id != 0 do x11.destroy_child(&workspace.close_surface)
 	for tab in workspace.tabs {
 		for pane in tab.panes do pane_destroy(pane)
+		split_destroy(tab.layout)
 		delete(tab.panes)
 		delete(tab.custom_title)
 		delete(tab.tmux_title)
@@ -517,6 +579,7 @@ workspace_append_new_tab :: proc(workspace: ^Workspace, pane: ^Pane) -> bool {
 	tab := new(Tab)
 	tab.tmux_window_id = -1
 	append(&tab.panes, pane)
+	tab.layout = split_leaf(pane)
 	append(&workspace.tabs, tab)
 	workspace.active = len(workspace.tabs)-1
 	workspace.tab_reveal_active = true
@@ -531,9 +594,17 @@ workspace_split :: proc(workspace: ^Workspace, axis: Split_Axis) {
 	cwd := current.terminal.cwd_path if current.terminal.cwd_local else ""
 	pane := workspace_new_pane(workspace, cwd)
 	if pane == nil do return
+	leaf := split_find(tab.layout, current)
+	if leaf == nil {
+		pane_destroy(pane)
+		return
+	}
+	leaf.pane = nil
+	leaf.axis = axis
+	leaf.first = split_leaf(current)
+	leaf.second = split_leaf(pane)
 	append(&tab.panes, pane)
 	tab.active = len(tab.panes)-1
-	tab.axis = axis
 	tab.stacked = false
 	workspace_layout(workspace)
 }
@@ -605,14 +676,9 @@ workspace_layout :: proc(workspace: ^Workspace, resize_grid: bool = true) {
 					height = max(1, bottom-y)
 				}
 			} else if !tab.stacked && count > 1 {
-				if tab.axis == .Rows {
-					height = max(1, content_height/count)
-					y += pane_index*height
-					if pane_index == count-1 do height = content_y+content_height-y
-				} else {
-					width = max(1, content_width/count)
-					x += pane_index*width
-					if pane_index == count-1 do width = padding+content_width-x
+				bx, by, bw, bh, found := split_bounds(tab.layout, pane, x, y, width, height)
+				if found {
+					x, y, width, height = bx, by, max(1, bw), max(1, bh)
 				}
 			}
 			old_columns := vt.terminal_screen(&pane.terminal).columns
@@ -1300,7 +1366,9 @@ workspace_shortcut :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
 	if event_matches(event, bindings.swap_pane) {
 		if len(tab.panes) > 1 {
 			next := (tab.active+1)%len(tab.panes)
-			tab.panes[tab.active], tab.panes[next] = tab.panes[next], tab.panes[tab.active]
+			active_leaf := split_find(tab.layout, tab.panes[tab.active])
+			next_leaf := split_find(tab.layout, tab.panes[next])
+			if active_leaf != nil && next_leaf != nil do active_leaf.pane, next_leaf.pane = next_leaf.pane, active_leaf.pane
 			workspace_layout(workspace)
 		}
 		return true
@@ -1447,9 +1515,12 @@ workspace_close_pane :: proc(workspace: ^Workspace) {
 		tmux.request_kill_pane(&tab.tmux_owner.tmux_session, &tab.tmux_owner.pending, tab.panes[tab.active].tmux_pane_id)
 		return
 	}
-	pane_destroy(tab.panes[tab.active])
+	closing := tab.panes[tab.active]
+	tab.layout, _ = split_remove(tab.layout, closing)
+	pane_destroy(closing)
 	ordered_remove(&tab.panes, tab.active)
 	if len(tab.panes) == 0 {
+		split_destroy(tab.layout)
 		delete(tab.panes); delete(tab.custom_title); delete(tab.tmux_title); free(tab)
 		ordered_remove(&workspace.tabs, workspace.active)
 		workspace.active = clamp(workspace.active, 0, max(0, len(workspace.tabs)-1))
@@ -1474,6 +1545,7 @@ workspace_close_tab :: proc(workspace: ^Workspace, index: int) {
 	closed_active := index == workspace.active
 	tab := workspace.tabs[index]
 	for pane in tab.panes do pane_destroy(pane)
+	split_destroy(tab.layout)
 	delete(tab.panes)
 	delete(tab.custom_title)
 	delete(tab.tmux_title)
@@ -1540,15 +1612,18 @@ workspace_reap :: proc(workspace: ^Workspace) {
 		pane_index := len(tab.panes)-1
 		for pane_index >= 0 {
 			if tab.panes[pane_index].exited {
-				pty.shutdown(&tab.panes[pane_index].process)
-				workspace_record_exit(workspace, tab.panes[pane_index])
-				pane_destroy(tab.panes[pane_index])
+				exited := tab.panes[pane_index]
+				tab.layout, _ = split_remove(tab.layout, exited)
+				pty.shutdown(&exited.process)
+				workspace_record_exit(workspace, exited)
+				pane_destroy(exited)
 				ordered_remove(&tab.panes, pane_index)
 				changed = true
 			}
 			pane_index -= 1
 		}
 		if len(tab.panes) == 0 {
+			split_destroy(tab.layout)
 			delete(tab.panes)
 			delete(tab.custom_title)
 			delete(tab.tmux_title)
@@ -1579,6 +1654,7 @@ workspace_remove_tmux_group :: proc(workspace: ^Workspace, owner: ^Pane) {
 				pane_destroy(pane)
 			}
 		}
+		split_destroy(tab.layout)
 		delete(tab.panes)
 		delete(tab.custom_title)
 		delete(tab.tmux_title)
@@ -1770,6 +1846,7 @@ workspace_tmux_reconcile :: proc(workspace: ^Workspace, owner: ^Pane) -> bool {
 	for index := len(workspace.tabs)-1; index >= 0; index -= 1 {
 		tab := workspace.tabs[index]
 		if tab.tmux_owner != owner do continue
+		split_destroy(tab.layout)
 		delete(tab.panes)
 		delete(tab.custom_title)
 		delete(tab.tmux_title)
@@ -1822,6 +1899,7 @@ workspace_tmux_reconcile :: proc(workspace: ^Workspace, owner: ^Pane) -> bool {
 			if info.active do tab.active = len(tab.panes)-1
 		}
 		if len(tab.panes) == 0 {
+			split_destroy(tab.layout)
 			delete(tab.tmux_title)
 			free(tab)
 			continue
@@ -1864,6 +1942,7 @@ workspace_tmux_restore_tab :: proc(workspace: ^Workspace, owner: ^Pane) {
 		tab := workspace.tabs[index]
 		if tab.tmux_owner != owner do continue
 		for pane in tab.panes do if pane != owner do pane_destroy(pane)
+		split_destroy(tab.layout)
 		delete(tab.panes)
 		delete(tab.custom_title)
 		delete(tab.tmux_title)
@@ -1876,6 +1955,7 @@ workspace_tmux_restore_tab :: proc(workspace: ^Workspace, owner: ^Pane) {
 	owner.local_tab_title = ""
 	owner.tmux_pane_id = -1
 	append(&tab.panes, owner)
+	tab.layout = split_leaf(owner)
 	workspace_insert_tab(workspace, insertion, tab)
 	if was_active do workspace.active = insertion
 	workspace.active = clamp(workspace.active, 0, len(workspace.tabs)-1)
