@@ -32,6 +32,24 @@ job_cli_main :: proc(args: []string) -> int {
 job_shell_init :: proc(args: []string) -> int {
 	if len(args) != 1 do return job_cli_usage_error()
 	switch args[0] {
+	case "bash":
+		fmt.println(`if ! declare -F + >/dev/null 2>&1; then
+  function +() {
+    local name
+    if [[ ${1-} == -- ]]; then
+      shift
+    elif [[ ${1-} == +* ]]; then
+      name=${1#+}
+      shift
+      [[ -n $name ]] || { printf '%s\n' 'Usage: + [+NAME] COMMAND [ARG...]' >&2; return 2; }
+      [[ ${1-} == -- ]] && shift
+    fi
+    (( $# > 0 )) || { printf '%s\n' 'Usage: + [+NAME] COMMAND [ARG...]' >&2; return 2; }
+    [[ -n $name ]] || name=${1##*/}
+    command nare job run "$name" -- "$@"
+  }
+fi`)
+		return 0
 	case "zsh":
 		fmt.println(`if ! whence -w + >/dev/null 2>&1; then
   function '+' {
@@ -186,7 +204,15 @@ job_run_command :: proc(args: []string, path, token: string, reporter: u64, repo
 		return 0
 	}
 	_ = posix.close(launch_pipe[0])
+	capture_stdout := reporting_available && posix.isatty(1)
+	capture_stderr := reporting_available && posix.isatty(2)
+	capture_pipe := [2]posix.FD{-1, -1}
+	if (capture_stdout || capture_stderr) && posix.pipe(&capture_pipe) != .OK {
+		capture_stdout, capture_stderr = false, false
+	}
 	if posix.setsid() < 0 || !job_detach_terminal_streams() {
+		if capture_pipe[0] >= 0 do _ = posix.close(capture_pipe[0])
+		if capture_pipe[1] >= 0 do _ = posix.close(capture_pipe[1])
 		failed := byte(0)
 		_ = posix.write(launch_pipe[1], &failed, 1)
 		_ = posix.close(launch_pipe[1])
@@ -194,6 +220,8 @@ job_run_command :: proc(args: []string, path, token: string, reporter: u64, repo
 	}
 	child := posix.fork()
 	if child < 0 {
+		if capture_pipe[0] >= 0 do _ = posix.close(capture_pipe[0])
+		if capture_pipe[1] >= 0 do _ = posix.close(capture_pipe[1])
 		failed := byte(0)
 		_ = posix.write(launch_pipe[1], &failed, 1)
 		_ = posix.close(launch_pipe[1])
@@ -201,9 +229,18 @@ job_run_command :: proc(args: []string, path, token: string, reporter: u64, repo
 	}
 	if child == 0 {
 		_ = posix.close(launch_pipe[1])
+		if capture_pipe[0] >= 0 do _ = posix.close(capture_pipe[0])
+		if posix.setpgid(0, 0) != .OK do posix._exit(126)
+		if capture_pipe[1] >= 0 {
+			if capture_stdout && posix.dup2(capture_pipe[1], 1) < 0 do posix._exit(126)
+			if capture_stderr && posix.dup2(capture_pipe[1], 2) < 0 do posix._exit(126)
+			if capture_pipe[1] > 2 do _ = posix.close(capture_pipe[1])
+		}
 		_ = posix.execvp(command[0], raw_data(command))
 		posix._exit(127)
 	}
+	if capture_pipe[1] >= 0 do _ = posix.close(capture_pipe[1])
+	_ = posix.setpgid(child, child)
 	started := byte(1)
 	_ = posix.write(launch_pipe[1], &started, 1)
 	_ = posix.close(launch_pipe[1])
@@ -212,11 +249,10 @@ job_run_command :: proc(args: []string, path, token: string, reporter: u64, repo
 		_, report_error := jobs.report_start(path, token, reporter, external_id, label, int(child))
 		reported = report_error == .None
 	}
-	status: c.int
-	for {
-		waited := posix.waitpid(child, &status, {})
-		if waited == child do break
-		if waited < 0 && posix.errno() == .EINTR do continue
+	status, waited_ok := job_wait_and_capture(
+		child, capture_pipe[0], path, token, reporter, external_id, reported,
+	)
+	if !waited_ok {
 		if reported do _ = jobs.report_finish(path, token, reporter, external_id, 1, true)
 		posix._exit(1)
 	}
@@ -229,6 +265,138 @@ job_run_command :: proc(args: []string, path, token: string, reporter: u64, repo
 	}
 	if reported do _ = jobs.report_finish(path, token, reporter, external_id, exit_code, exit_code != 0, term_signal)
 	posix._exit(i32(exit_code))
+}
+
+Job_Output_Capture :: struct {
+	line: [dynamic]byte,
+	last, reported: string,
+	escape_mode: int,
+}
+
+job_output_capture_destroy :: proc(capture: ^Job_Output_Capture) {
+	delete(capture.line)
+	delete(capture.last)
+	delete(capture.reported)
+	capture^ = {}
+}
+
+job_output_commit_line :: proc(capture: ^Job_Output_Capture) {
+	value := strings.trim_space(string(capture.line[:]))
+	if value != "" {
+		if len(value) > jobs.MAX_MESSAGE_BYTES do value = value[:jobs.MAX_MESSAGE_BYTES]
+		jobs.replace_string(&capture.last, value)
+	}
+	clear(&capture.line)
+}
+
+job_output_feed :: proc(capture: ^Job_Output_Capture, data: []byte) {
+	for octet in data {
+		if capture.escape_mode == 1 {
+			if octet == '[' do capture.escape_mode = 2
+			else if octet == ']' do capture.escape_mode = 3
+			else do capture.escape_mode = 0
+			continue
+		}
+		if capture.escape_mode == 2 {
+			if octet >= 0x40 && octet <= 0x7e do capture.escape_mode = 0
+			continue
+		}
+		if capture.escape_mode == 3 {
+			if octet == 0x07 do capture.escape_mode = 0
+			else if octet == 0x1b do capture.escape_mode = 4
+			continue
+		}
+		if capture.escape_mode == 4 {
+			capture.escape_mode = 0 if octet == '\\' else 3
+			continue
+		}
+		switch octet {
+		case 0x1b: capture.escape_mode = 1
+		case '\r', '\n': job_output_commit_line(capture)
+		case '\b': if len(capture.line) > 0 do resize(&capture.line, len(capture.line)-1)
+		case '\t': if len(capture.line) < 1024 do append(&capture.line, ' ')
+		case:
+			if octet >= 0x20 && octet != 0x7f && len(capture.line) < 1024 do append(&capture.line, octet)
+		}
+	}
+}
+
+job_output_value :: proc(capture: ^Job_Output_Capture) -> string {
+	value := strings.trim_space(string(capture.line[:]))
+	if value == "" do value = capture.last
+	if len(value) > jobs.MAX_MESSAGE_BYTES do value = value[:jobs.MAX_MESSAGE_BYTES]
+	return value
+}
+
+job_output_report :: proc(
+	capture: ^Job_Output_Capture,
+	path, token: string,
+	reporter: u64,
+	external_id: string,
+) -> bool {
+	value := job_output_value(capture)
+	if value == "" || value == capture.reported do return true
+	if jobs.report_output(path, token, reporter, external_id, value) != .None do return false
+	jobs.replace_string(&capture.reported, value)
+	return true
+}
+
+job_wait_and_capture :: proc(
+	child: posix.pid_t,
+	capture_fd: posix.FD,
+	path, token: string,
+	reporter: u64,
+	external_id: string,
+	reported: bool,
+) -> (status: c.int, ok: bool) {
+	if capture_fd < 0 {
+		for {
+			waited := posix.waitpid(child, &status, {})
+			if waited == child do return status, true
+			if waited < 0 && posix.errno() == .EINTR do continue
+			return status, false
+		}
+	}
+	defer posix.close(capture_fd)
+	capture: Job_Output_Capture
+	defer job_output_capture_destroy(&capture)
+	child_done := false
+	output_open := true
+	output_reporting := reported
+	last_report := time.tick_now()
+	child_finished_at: time.Tick
+	buffer: [4096]byte
+	for !child_done || output_open {
+		if output_open {
+			poll_fd := posix.pollfd{fd = capture_fd, events = {.IN}}
+			_ = posix.poll(&poll_fd, 1, 100)
+			if .IN in poll_fd.revents || .HUP in poll_fd.revents || .ERR in poll_fd.revents {
+				count := posix.read(capture_fd, &buffer[0], len(buffer))
+				if count > 0 do job_output_feed(&capture, buffer[:int(count)])
+				else if count == 0 || (count < 0 && posix.errno() != .EINTR) do output_open = false
+			}
+		} else if !child_done {
+			time.sleep(50*time.Millisecond)
+		}
+		if output_reporting && time.tick_since(last_report) >= 150*time.Millisecond {
+			output_reporting = job_output_report(&capture, path, token, reporter, external_id)
+			last_report = time.tick_now()
+		}
+		if !child_done {
+			options: posix.Wait_Flags = {.NOHANG}
+			waited := posix.waitpid(child, &status, options)
+			if waited == child {
+				child_done = true
+				child_finished_at = time.tick_now()
+			} else if waited < 0 && posix.errno() != .EINTR {
+				return status, false
+			}
+		}
+		if child_done && output_open && time.tick_since(child_finished_at) >= 500*time.Millisecond do output_open = false
+	}
+	job_output_commit_line(&capture)
+	if output_reporting do _ = job_output_report(&capture, path, token, reporter, external_id)
+	return status, true
 }
 
 job_command_destroy :: proc(command: []cstring, count: int) {
@@ -342,5 +510,5 @@ job_cli_usage :: proc() -> string {
 	       "       nare status job finish ID [--exit-code N]\n" +
 	       "       nare status job fail ID [--exit-code N]\n" +
 	       "       nare job run LABEL -- COMMAND [ARG...]\n" +
-	       "       nare job init zsh|fish"
+	       "       nare job init bash|zsh|fish"
 }

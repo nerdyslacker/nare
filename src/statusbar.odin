@@ -110,8 +110,7 @@ statusbar_height :: proc(workspace: ^Workspace) -> int {
 }
 
 statusbar_render_height :: proc(workspace: ^Workspace) -> int {
-	row_height := statusbar_row_height(workspace)
-	return row_height*(1+statusbar_expanded_job_count(workspace))
+	return statusbar_row_height(workspace)
 }
 
 statusbar_row_height :: proc(workspace: ^Workspace) -> int {
@@ -125,22 +124,15 @@ statusbar_expanded_job_count :: proc(workspace: ^Workspace) -> int {
 	visible := statusbar_visible_jobs(workspace)
 	if len(visible) == 0 do return 0
 	row_height := statusbar_row_height(workspace)
-	reserved := workspace_tab_bar_height(workspace)+workspace.settings.window.padding*2+row_height
+	reserved := workspace_tab_bar_height(workspace)+workspace.settings.window.padding*2+row_height+12
 	available_rows := max(0, (workspace.root.height-reserved)/max(1, row_height))
-	return min(len(visible), min(8, available_rows))
+	return min(len(visible), min(workspace.settings.statusbar.jobs.max_visible, available_rows))
 }
 
 statusbar_auto_hide_pointer :: proc(workspace: ^Workspace, pointer_y: int) -> bool {
 	settings := &workspace.settings.statusbar
 	state := &workspace.statusbar
-	expanded_count := statusbar_expanded_job_count(workspace)
-	if workspace.jobs_visible && expanded_count == 0 do workspace.jobs_visible = false
-	if state.expanded_job_count != expanded_count {
-		if expanded_count < state.expanded_job_count do statusbar_clear_expanded_region(workspace, state.expanded_job_count)
-		state.expanded_job_count = expanded_count
-		statusbar_render_cache_invalidate(&state.render_cache)
-		workspace_layout(workspace)
-	}
+	_ = statusbar_sync_expanded_jobs(workspace)
 	if !settings.auto_hide || !state.visible do return false
 	if workspace.quake != nil && !settings.show_in_quake do return false
 	tab_height := workspace_tab_bar_height(workspace)
@@ -195,6 +187,7 @@ statusbar_module_mask :: proc(settings: ^config.Statusbar_Settings) -> u32 {
 
 statusbar_tick :: proc(workspace: ^Workspace, force: bool = false) {
 	statusbar_jobs_maintenance(workspace)
+	_ = statusbar_sync_expanded_jobs(workspace)
 	if !statusbar_visible(workspace) do return
 	settings := &workspace.settings.statusbar
 	state := &workspace.statusbar
@@ -276,6 +269,20 @@ statusbar_tick :: proc(workspace: ^Workspace, force: bool = false) {
 	if changed && workspace.jobs_visible do workspace_draw_jobs_list(workspace)
 }
 
+statusbar_sync_expanded_jobs :: proc(workspace: ^Workspace) -> bool {
+	if workspace == nil do return false
+	expanded_count := statusbar_expanded_job_count(workspace)
+	if workspace.jobs_visible && expanded_count == 0 do workspace.jobs_visible = false
+	if workspace.statusbar.expanded_job_count == expanded_count do return false
+	workspace.statusbar.expanded_job_count = expanded_count
+	if expanded_count == 0 {
+		if workspace.jobs_surface.id != 0 do x11.show_child(&workspace.jobs_surface, false)
+	} else {
+		workspace_draw_jobs_list(workspace)
+	}
+	return true
+}
+
 statusbar_jobs_maintenance :: proc(workspace: ^Workspace) {
 	if workspace == nil || time.since(workspace.statusbar.last_job_prune) < time.Second do return
 	workspace.statusbar.last_job_prune = time.now()
@@ -293,7 +300,7 @@ statusbar_jobs_text :: proc(workspace: ^Workspace) -> string {
 	visible := statusbar_visible_jobs(workspace)
 	if len(visible) == 0 do return ""
 	if len(visible) > 1 do return statusbar_job_counts_text(statusbar_job_counts(visible))
-	return statusbar_job_text(visible[0], settings)
+	return statusbar_job_text(visible[0], settings, false)
 }
 
 Statusbar_Job_Counts :: struct {running, succeeded, failed, cancelled: int}
@@ -357,7 +364,7 @@ statusbar_job_visible :: proc(job: ^jobs.Job, settings: ^config.Statusbar_Jobs_S
 	return false
 }
 
-statusbar_job_text :: proc(job: ^jobs.Job, settings: ^config.Statusbar_Jobs_Settings) -> string {
+statusbar_job_text :: proc(job: ^jobs.Job, settings: ^config.Statusbar_Jobs_Settings, include_message: bool = true) -> string {
 	prefix := "RUN"
 	suffix := ""
 	switch job.state {
@@ -371,6 +378,7 @@ statusbar_job_text :: proc(job: ^jobs.Job, settings: ^config.Statusbar_Jobs_Sett
 	case .Cancelled: prefix = "CANCEL"
 	case .Unknown: prefix = "UNKNOWN"
 	}
+	if job.cancel_requested && (job.state == .Starting || job.state == .Running) do prefix = "STOP"
 	progress := ""
 	if settings.show_progress && job.progress >= 0 do progress = fmt.tprintf(" %d%%", job.progress)
 	elapsed := ""
@@ -379,14 +387,15 @@ statusbar_job_text :: proc(job: ^jobs.Job, settings: ^config.Statusbar_Jobs_Sett
 		if seconds >= 3600 do elapsed = fmt.tprintf(" %d:%02d:%02d", seconds/3600, seconds/60%60, seconds%60)
 		else do elapsed = fmt.tprintf(" %02d:%02d", seconds/60, seconds%60)
 	}
-	return fmt.tprintf("%s %s%s%s%s", prefix, statusbar_sanitize(job.label), progress, suffix, elapsed)
+	label := statusbar_sanitize(job.label)
+	if include_message && job.message != "" do label = fmt.tprintf("%s: %s", label, statusbar_sanitize(job.message))
+	return fmt.tprintf("%s %s%s%s%s", prefix, label, progress, suffix, elapsed)
 }
 
 workspace_toggle_jobs_list :: proc(workspace: ^Workspace) {
 	if workspace == nil || !workspace.settings.statusbar.jobs.enabled || !workspace.statusbar.visible do return
 	if !workspace.jobs_visible && len(statusbar_visible_jobs(workspace)) == 0 do return
 	was_visible := workspace.jobs_visible
-	if was_visible do statusbar_clear_expanded_region(workspace, workspace.statusbar.expanded_job_count)
 	workspace.jobs_visible = !was_visible
 	workspace.jobs_selected = 0
 	if workspace.jobs_visible {
@@ -394,26 +403,13 @@ workspace_toggle_jobs_list :: proc(workspace: ^Workspace) {
 		workspace.statusbar.auto_hide_pending = false
 	}
 	workspace.statusbar.expanded_job_count = statusbar_expanded_job_count(workspace)
-	statusbar_render_cache_invalidate(&workspace.statusbar.render_cache)
-	workspace_layout(workspace)
-	workspace_draw_statusbar(workspace)
-	workspace_draw_jobs_list(workspace)
-}
-
-statusbar_clear_expanded_region :: proc(workspace: ^Workspace, job_rows: int) {
-	if workspace == nil || workspace.root == nil || job_rows <= 0 do return
-	row_height := statusbar_row_height(workspace)
-	height := row_height*(1+job_rows)
-	tab_height := workspace_tab_bar_height(workspace)
-	y := tab_height if workspace.settings.statusbar.position == .Top && workspace.settings.tabs.edge == .Top else 0
-	if workspace.settings.statusbar.position == .Bottom {
-		y = workspace.root.height-height
-		if workspace.settings.tabs.edge == .Bottom do y -= tab_height
+	if workspace.jobs_visible {
+		workspace_draw_jobs_list(workspace)
+		x11.focus_child(&workspace.jobs_surface)
+	} else if workspace.jobs_surface.id != 0 {
+		x11.show_child(&workspace.jobs_surface, false)
+		x11.focus_window(workspace.root)
 	}
-	xlib.ClearArea(
-		workspace.root.display, workspace.root.id, 0, i32(max(0, y)),
-		u32(max(1, workspace.root.width)), u32(max(1, min(height, workspace.root.height))), false,
-	)
 }
 
 workspace_jobs_list_input :: proc(workspace: ^Workspace, event: x11.Event) {
@@ -425,7 +421,22 @@ workspace_jobs_list_input :: proc(workspace: ^Workspace, event: x11.Event) {
 	if len(visible) == 0 do return
 	if event.key == .Up do workspace.jobs_selected = max(0, workspace.jobs_selected-1)
 	else if event.key == .Down do workspace.jobs_selected = min(len(visible)-1, workspace.jobs_selected+1)
-	else if event.key == .Enter {
+	else if event.key == .Delete {
+		job := visible[clamp(workspace.jobs_selected, 0, len(visible)-1)]
+		if (job.state == .Running || job.state == .Starting) && job.pid > 0 {
+			signal := posix.Signal.SIGINT
+			if job.cancel_attempts == 1 do signal = .SIGTERM
+			else if job.cancel_attempts >= 2 do signal = .SIGKILL
+			stopped := posix.killpg(posix.pid_t(job.pid), signal) == .OK
+			if !stopped do stopped = posix.kill(posix.pid_t(job.pid), signal) == .OK
+			if stopped {
+				_ = jobs.request_cancel(&workspace.jobs, job.id)
+				statusbar_tick(workspace, true)
+			}
+		}
+		workspace_draw_jobs_list(workspace)
+		return
+	} else if event.key == .Enter {
 		job := visible[clamp(workspace.jobs_selected, 0, len(visible)-1)]
 		workspace_focus_job_owner(workspace, job)
 		workspace_toggle_jobs_list(workspace)
@@ -449,7 +460,7 @@ workspace_focus_job_owner :: proc(workspace: ^Workspace, job: ^jobs.Job) {
 }
 
 workspace_draw_jobs_list :: proc(workspace: ^Workspace) {
-	if workspace == nil || !workspace.jobs_visible || !statusbar_visible(workspace) do return
+	if workspace == nil || workspace.jobs_surface.id == 0 || !workspace.jobs_visible || !statusbar_visible(workspace) do return
 	visible := statusbar_visible_jobs(workspace)
 	pane := workspace_active_pane(workspace)
 	if pane == nil do return
@@ -472,15 +483,34 @@ workspace_draw_jobs_list :: proc(workspace: ^Workspace) {
 		rows[index] = {text = statusbar_job_text(job, &settings.jobs), foreground = foreground, background = row_background, jobs = true}
 	}
 	row_height := statusbar_row_height(workspace)
-	bar_height := statusbar_render_height(workspace)
-	y := workspace.root.height-bar_height if settings.position == .Bottom else 0
-	if settings.position == .Bottom && workspace.settings.tabs.edge == .Bottom do y -= workspace_tab_bar_height(workspace)
-	if settings.position == .Top && workspace.settings.tabs.edge == .Top do y += workspace_tab_bar_height(workspace)
-	y += row_height
-	draw_workspace_statusbar_jobs(
-		workspace.root, pane.renderer.font, rows, workspace.jobs_selected-start,
-		0, y, workspace.root.width, row_height, statusbar_active_accent(workspace),
+	width := min(max(280, workspace.root.width*3/4), max(1, workspace.root.width-24))
+	height := max(row_height*2, row_height*(shown+1))
+	x := max(0, (workspace.root.width-width)/2)
+	y := workspace.statusbar_surface.y-height-6
+	if settings.position == .Top do y = workspace.statusbar_surface.y+workspace.statusbar_surface.height+6
+	y = clamp(y, 0, max(0, workspace.root.height-height))
+	x11.place_child(&workspace.jobs_surface, x, y, width, height)
+	x11.raise_child(&workspace.jobs_surface)
+	draw_workspace_jobs_popup(
+		&workspace.jobs_surface, pane.renderer.font, rows, workspace.jobs_selected-start,
+		row_height, background, foreground, statusbar_active_accent(workspace),
+		workspace.settings.ui_colors.inactive_tab_background,
 	)
+}
+
+statusbar_jobs_mouse :: proc(workspace: ^Workspace, mouse: keyboard.Mouse_Event) -> bool {
+	if workspace == nil || !workspace.jobs_visible do return false
+	if mouse.action != .Press || mouse.button != 1 do return true
+	shown := statusbar_expanded_job_count(workspace)
+	visible := statusbar_visible_jobs(workspace)
+	if shown <= 0 || len(visible) == 0 do return true
+	index := mouse.y/max(1, statusbar_row_height(workspace))-1
+	if index < 0 || index >= shown do return true
+	start := statusbar_expanded_job_start(workspace, len(visible), shown)
+	workspace.jobs_selected = start+index
+	workspace_focus_job_owner(workspace, visible[workspace.jobs_selected])
+	workspace_toggle_jobs_list(workspace)
+	return true
 }
 
 statusbar_expanded_job_start :: proc(workspace: ^Workspace, total, shown: int) -> int {
@@ -1026,30 +1056,15 @@ statusbar_module_group_key :: proc(modules: []Statusbar_Draw_Module) -> string {
 statusbar_mouse :: proc(workspace: ^Workspace, mouse: keyboard.Mouse_Event) -> bool {
 	if workspace == nil || !statusbar_visible(workspace) do return false
 	height := statusbar_render_height(workspace)
-	tab_height := workspace_tab_bar_height(workspace)
-	y := tab_height if workspace.settings.statusbar.position == .Top && workspace.settings.tabs.edge == .Top else 0
-	if workspace.settings.statusbar.position == .Bottom {
-		y = workspace.root.height-height
-		if workspace.settings.tabs.edge == .Bottom do y -= tab_height
-	}
+	y := 0
 	if mouse.y < y || mouse.y >= y+height do return false
 	row_height := statusbar_row_height(workspace)
 	compact_y := y
-	if workspace.jobs_visible && mouse.action == .Press && mouse.button == 1 &&
-	   (mouse.y < compact_y || mouse.y >= compact_y+row_height) {
-		jobs_y := compact_y+row_height
-		index := (mouse.y-jobs_y)/max(1, row_height)
-		if index >= 0 && index < statusbar_expanded_job_count(workspace) {
-			visible := statusbar_visible_jobs(workspace)
-			shown := statusbar_expanded_job_count(workspace)
-			workspace.jobs_selected = statusbar_expanded_job_start(workspace, len(visible), shown)+index
-			workspace_draw_jobs_list(workspace)
-		}
-		return true
-	}
 	cache := &workspace.statusbar.render_cache
 	if mouse.y >= compact_y && mouse.y < compact_y+row_height && mouse.action == .Press && mouse.button == 1 && cache.jobs_hit_valid &&
 	   mouse.x >= cache.jobs_hit_left && mouse.x < cache.jobs_hit_right {
+		workspace_toggle_jobs_list(workspace)
+	} else if workspace.jobs_visible && mouse.action == .Press && mouse.button == 1 {
 		workspace_toggle_jobs_list(workspace)
 	}
 	return true
@@ -1129,7 +1144,7 @@ statusbar_sanitize :: proc(value: string) -> string {
 }
 
 workspace_draw_statusbar :: proc(workspace: ^Workspace) {
-	if !statusbar_visible(workspace) do return
+	if workspace.statusbar_surface.id == 0 || !statusbar_visible(workspace) do return
 	pane := workspace_active_pane(workspace)
 	if pane == nil do return
 	settings := &workspace.settings.statusbar
@@ -1137,12 +1152,7 @@ workspace_draw_statusbar :: proc(workspace: ^Workspace) {
 	font := pane.renderer.font
 	height := statusbar_render_height(workspace)
 	row_height := statusbar_row_height(workspace)
-	tab_height := workspace_tab_bar_height(workspace)
-	y := tab_height if settings.position == .Top && workspace.settings.tabs.edge == .Top else 0
-	if settings.position == .Bottom {
-		y = workspace.root.height-height
-		if workspace.settings.tabs.edge == .Bottom do y -= tab_height
-	}
+	y := 0
 	row_y := 0
 	left, center, right: string
 	left_modules := statusbar_group_modules(workspace, settings.left[:])
@@ -1158,7 +1168,7 @@ workspace_draw_statusbar :: proc(workspace: ^Workspace) {
 		right = statusbar_group_text(workspace, settings.right[:])
 	}
 	draw_workspace_statusbar(
-		&workspace.statusbar.render_cache, workspace.root, font,
+		&workspace.statusbar.render_cache, &workspace.statusbar_surface, font,
 		left, center, right, left_modules, center_modules, right_modules,
 		settings.separator,
 		settings.module_blocks, settings.border, y, height, row_y, row_height,

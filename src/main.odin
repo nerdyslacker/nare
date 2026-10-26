@@ -155,6 +155,7 @@ command_from_args :: proc(args: []string) -> (options: config.Settings, command:
 		path := strings.clone(config_path) if explicit_config else config.default_path()
 		defer if path != "" do delete(path)
 		if path != "" {
+			config.replace_string(&options.config_path, path)
 			result := config.load(&options, path, !explicit_config)
 			if result.error != .None {
 				if result.line > 0 {

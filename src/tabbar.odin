@@ -237,6 +237,47 @@ draw_workspace_statusbar_jobs :: proc(
 	_ = xlib.Flush(window.display)
 }
 
+draw_workspace_jobs_popup :: proc(
+	window: ^x11.Window,
+	font: ^fonts.Manager,
+	rows: []Statusbar_Draw_Module,
+	selected: int,
+	row_height: int,
+	background, foreground, accent, selection_background: u32,
+) {
+	if window == nil || window.width <= 0 || window.height <= 0 do return
+	byte_count := window.width*window.height*size_of(u32)
+	data := libc.malloc(c.size_t(byte_count))
+	if data == nil do return
+	image := xlib.CreateImage(
+		window.display, window.visual, u32(window.depth), .ZPixmap, 0, data,
+		u32(window.width), u32(window.height), 32, i32(window.width*size_of(u32)),
+	)
+	if image == nil {libc.free(data); return}
+	defer xlib.DestroyImage(image)
+	pixels := (([^]u32)(data))[:window.width*window.height]
+	for &pixel in pixels do pixel = drawing.rgb_to_pixel(window, background)
+	fill_tab_rect(pixels, window, 0, 0, window.width, min(2, window.height), accent)
+	draw_tab_text(
+		pixels, window, font, "Jobs  ↑/↓ select  Enter focus  Delete stop  Esc close",
+		8, font.ascent+4, foreground, true, 4, window.width-8,
+	)
+	for row, index in rows {
+		y := row_height*(index+1)
+		row_background := row.background
+		if index == selected do row_background = selection_background
+		fill_tab_rect(pixels, window, 0, y, window.width, min(row_height, window.height-y), row_background)
+		if index == selected do fill_tab_rect(pixels, window, 0, y, min(3, window.width), min(row_height, window.height-y), accent)
+		text := ui_fit_text(font, row.text, max(0, window.width-16))
+		draw_tab_text(pixels, window, font, text, 8, y+font.ascent+3, row.foreground, false, 8, window.width-8)
+	}
+	xlib.PutImage(
+		window.display, xlib.Drawable(window.id), window.gc, image,
+		0, 0, 0, 0, u32(window.width), u32(window.height),
+	)
+	_ = xlib.Flush(window.display)
+}
+
 draw_workspace_statusbar :: proc(
 	cache: ^Statusbar_Render_Cache,
 	window: ^x11.Window,

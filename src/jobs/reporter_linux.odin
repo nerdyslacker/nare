@@ -182,6 +182,14 @@ reporter_handle_frame :: proc(server: ^Reporter_Server, client: ^Reporter_Client
 			return reporter_error(client, frame.request_id, "unknown or finished job")
 		}
 		job_id = job.id
+	case .Job_Output:
+		message, message_ok := report_read_string(frame.payload[:], &offset, MAX_MESSAGE_BYTES)
+		job := by_reporter_id(server.registry, reporter, external_id)
+		if !message_ok || offset != len(frame.payload) || !valid_display_text(message) ||
+		   job == nil || !set_message(server.registry, job.id, message) {
+			return reporter_error(client, frame.request_id, "unknown or finished job")
+		}
+		job_id = job.id
 	case .Job_Finish, .Job_Fail:
 		exit_value, exit_ok := ipc.read_u32(frame.payload[:], offset)
 		offset += 4
@@ -242,6 +250,19 @@ report_progress :: proc(path, token: string, reporter: u64, external_id: string,
 	ipc.append_u16(&payload, u16(percent))
 	report_append_string(&payload, message)
 	_, err := report_request(path, .Job_Progress, payload[:])
+	return err
+}
+
+report_output :: proc(path, token: string, reporter: u64, external_id, message: string) -> Report_Error {
+	if !valid_environment(path, token, reporter) || !valid_external_id(external_id) ||
+	   len(message) > MAX_MESSAGE_BYTES || !valid_display_text(message) {
+		return .Invalid_Request
+	}
+	payload: [dynamic]byte
+	defer delete(payload)
+	report_append_identity(&payload, token, reporter, external_id)
+	report_append_string(&payload, message)
+	_, err := report_request(path, .Job_Output, payload[:])
 	return err
 }
 

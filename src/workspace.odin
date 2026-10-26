@@ -154,6 +154,8 @@ Pending_Rule_Window :: struct {
 
 Workspace :: struct {
 	root: ^x11.Window,
+	statusbar_surface: x11.Window,
+	jobs_surface: x11.Window,
 	search_surface: x11.Window,
 	close_surface: x11.Window,
 	search_visible: bool,
@@ -210,6 +212,8 @@ Workspace_Overrides :: struct {
 Workspace_Font_Cache_Entry :: struct {
 	manager: fonts.Manager,
 	pixel_size: int,
+	font, bold_font, italic_font, bold_italic_font: string,
+	cell_width_percent, cell_height_percent: int,
 	references: int,
 }
 
@@ -220,7 +224,9 @@ Workspace_Font_Cache :: struct {
 workspace_font_cache_acquire :: proc(cache: ^Workspace_Font_Cache, settings: ^config.Settings, pixel_size: int) -> ^Workspace_Font_Cache_Entry {
 	if cache == nil || settings == nil do return nil
 	for entry in cache.entries {
-		if entry.pixel_size == pixel_size {
+		if entry.pixel_size == pixel_size && entry.font == settings.font && entry.bold_font == settings.bold_font &&
+		   entry.italic_font == settings.italic_font && entry.bold_italic_font == settings.bold_italic_font &&
+		   entry.cell_width_percent == settings.cell_width_percent && entry.cell_height_percent == settings.cell_height_percent {
 			entry.references += 1
 			return entry
 		}
@@ -234,6 +240,12 @@ workspace_font_cache_acquire :: proc(cache: ^Workspace_Font_Cache, settings: ^co
 		return nil
 	}
 	entry.pixel_size = pixel_size
+	entry.font = strings.clone(settings.font)
+	entry.bold_font = strings.clone(settings.bold_font)
+	entry.italic_font = strings.clone(settings.italic_font)
+	entry.bold_italic_font = strings.clone(settings.bold_italic_font)
+	entry.cell_width_percent = settings.cell_width_percent
+	entry.cell_height_percent = settings.cell_height_percent
 	entry.references = 1
 	append(&cache.entries, entry)
 	return entry
@@ -246,6 +258,7 @@ workspace_font_cache_release :: proc(cache: ^Workspace_Font_Cache, entry: ^Works
 	for candidate, index in cache.entries {
 		if candidate != entry do continue
 		fonts.destroy(&entry.manager)
+		delete(entry.font); delete(entry.bold_font); delete(entry.italic_font); delete(entry.bold_italic_font)
 		free(entry)
 		unordered_remove(&cache.entries, index)
 		return
@@ -256,6 +269,7 @@ workspace_font_cache_destroy :: proc(cache: ^Workspace_Font_Cache) {
 	if cache == nil do return
 	for entry in cache.entries {
 		fonts.destroy(&entry.manager)
+		delete(entry.font); delete(entry.bold_font); delete(entry.italic_font); delete(entry.bold_italic_font)
 		free(entry)
 	}
 	delete(cache.entries)
@@ -363,6 +377,20 @@ workspace_init :: proc(
 		workspace.close_surface = close_surface
 		x11.show_child(&workspace.close_surface, false)
 	}
+	statusbar_surface, statusbar_ok := x11.create_child(root, 0, 0, 1, 1)
+	if statusbar_ok {
+		workspace.statusbar_surface = statusbar_surface
+		x11.set_surface_colors(&workspace.statusbar_surface, settings.statusbar.background, settings.statusbar.background)
+		x11.show_child(&workspace.statusbar_surface, false)
+	} else {
+		workspace.statusbar.visible = false
+	}
+	jobs_surface, jobs_ok := x11.create_child(root, 0, 0, 1, 1)
+	if jobs_ok {
+		workspace.jobs_surface = jobs_surface
+		x11.set_surface_colors(&workspace.jobs_surface, settings.statusbar.background, settings.statusbar.accent)
+		x11.show_child(&workspace.jobs_surface, false)
+	}
 	statusbar_tick(workspace, true)
 	workspace_layout(workspace)
 	workspace_refresh_privileged_tabs(workspace, true)
@@ -375,6 +403,7 @@ workspace_service :: proc(workspace: ^Workspace) -> bool {
 	if workspace.quake != nil && !quake.service(workspace.quake) do return false
 	pointer_tracking := workspace.settings.scrollbar_enabled || (workspace.settings.statusbar.auto_hide && workspace.statusbar.visible)
 	x11.set_mouse_tracking(workspace.root, 0, pointer_tracking)
+	if workspace.statusbar_surface.id != 0 do x11.set_mouse_tracking(&workspace.statusbar_surface, 0, pointer_tracking)
 	for tab in workspace.tabs {
 		for pane in tab.panes {
 			if pane.visible do x11.set_mouse_tracking(&pane.surface, pane.terminal.modes.mouse_tracking, pointer_tracking)
@@ -639,6 +668,8 @@ pane_destroy :: proc(pane: ^Pane) {
 workspace_destroy :: proc(workspace: ^Workspace) {
 	if workspace.search_surface.id != 0 do x11.destroy_child(&workspace.search_surface)
 	if workspace.close_surface.id != 0 do x11.destroy_child(&workspace.close_surface)
+	if workspace.statusbar_surface.id != 0 do x11.destroy_child(&workspace.statusbar_surface)
+	if workspace.jobs_surface.id != 0 do x11.destroy_child(&workspace.jobs_surface)
 	for tab in workspace.tabs {
 		for pane in tab.panes do pane_destroy(pane)
 		split_destroy(tab.layout)
@@ -765,6 +796,18 @@ workspace_layout :: proc(workspace: ^Workspace, resize_grid: bool = true) {
 	if workspace.settings.statusbar.position == .Top do content_y += status_bar
 	content_height := max(1, root.height-tab_bar-status_bar-padding*2)
 	content_width := max(1, root.width-padding*2)
+	if workspace.statusbar_surface.id != 0 {
+		if status_bar > 0 {
+			status_y := tab_bar if workspace.settings.statusbar.position == .Top && workspace.settings.tabs.edge == .Top else 0
+			if workspace.settings.statusbar.position == .Bottom {
+				status_y = root.height-status_bar
+				if workspace.settings.tabs.edge == .Bottom do status_y -= tab_bar
+			}
+			x11.place_child(&workspace.statusbar_surface, 0, status_y, root.width, status_bar)
+		} else {
+			x11.show_child(&workspace.statusbar_surface, false)
+		}
+	}
 	for layout_index in 0..<len(workspace.tabs) {
 		tab_index := workspace.active
 		if layout_index > 0 {
@@ -834,6 +877,7 @@ workspace_layout :: proc(workspace: ^Workspace, resize_grid: bool = true) {
 			}
 		}
 	}
+	if status_bar > 0 && workspace.statusbar_surface.id != 0 do x11.raise_child(&workspace.statusbar_surface)
 	workspace_draw_tabs(workspace)
 }
 
@@ -1020,6 +1064,11 @@ workspace_event :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
 	case .Redraw:
 		if event.source == workspace.root.id {
 			workspace_draw_tabs(workspace)
+		} else if event.source == workspace.statusbar_surface.id {
+			workspace_draw_statusbar(workspace)
+			workspace_draw_jobs_list(workspace)
+		} else if event.source == workspace.jobs_surface.id {
+			workspace_draw_jobs_list(workspace)
 		} else if event.source == workspace.search_surface.id {
 			workspace_draw_search_bar(workspace)
 		} else if event.source == workspace.close_surface.id {
@@ -1096,8 +1145,15 @@ workspace_event :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
 		}
 		pointer_y := event.mouse.y
 		if pointer_pane := workspace_find_pane(workspace, event.source); pointer_pane != nil do pointer_y += pointer_pane.surface.y
+		if event.source == workspace.statusbar_surface.id do pointer_y += workspace.statusbar_surface.y
+		if event.source == workspace.jobs_surface.id do pointer_y += workspace.jobs_surface.y
 		if statusbar_auto_hide_pointer(workspace, pointer_y) do return true
-		if event.source == workspace.root.id && statusbar_mouse(workspace, event.mouse) do return true
+		if event.source == workspace.jobs_surface.id && statusbar_jobs_mouse(workspace, event.mouse) do return true
+		if event.source == workspace.statusbar_surface.id && statusbar_mouse(workspace, event.mouse) do return true
+		if workspace.jobs_visible && event.mouse.action == .Press {
+			workspace_toggle_jobs_list(workspace)
+			return true
+		}
 		if event.source == workspace.root.id && workspace_tab_bar_mouse(workspace, event.mouse, event.timestamp) do return true
 		pane := workspace_find_pane(workspace, event.source)
 		if pane == nil do return true
@@ -1498,8 +1554,16 @@ workspace_shortcut :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
 	tab := workspace_active_tab(workspace)
 	if tab == nil do return false
 	bindings := &workspace.settings.bindings
+	if event_matches(event, bindings.reload_config) {
+		_ = workspace_reload_config(workspace)
+		return true
+	}
 	if event_matches(event, bindings.toggle_statusbar) {
 		workspace.statusbar.visible = !workspace.statusbar.visible
+		if !workspace.statusbar.visible {
+			workspace.jobs_visible = false
+			if workspace.jobs_surface.id != 0 do x11.show_child(&workspace.jobs_surface, false)
+		}
 		workspace.statusbar.auto_hide_revealed = !workspace.settings.statusbar.auto_hide
 		workspace.statusbar.auto_hide_pending = false
 		if workspace.statusbar.visible {
@@ -1621,6 +1685,105 @@ workspace_shortcut :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
 		return true
 	}
 	return false
+}
+
+workspace_reload_config :: proc(workspace: ^Workspace) -> bool {
+	if workspace == nil || workspace.settings == nil || workspace.settings.config_path == "" {
+		fmt.eprintln("nare: configuration reload is unavailable without a configuration file")
+		return false
+	}
+	path := strings.clone(workspace.settings.config_path)
+	defer delete(path)
+	fresh: config.Settings
+	config.settings_init(&fresh)
+	defer config.settings_destroy(&fresh)
+	config.replace_string(&fresh.config_path, path)
+	result := config.load(&fresh, path)
+	if result.error != .None {
+		if result.line > 0 do fmt.eprintf("nare: %s:%d: %s\n", path, result.line, config.error_string(result.error))
+		else do fmt.eprintf("nare: %s: %s\n", path, config.error_string(result.error))
+		return false
+	}
+
+	// These values describe the current launch rather than reloadable preferences.
+	config.replace_string(&fresh.working_directory, workspace.settings.working_directory)
+	config.replace_string(&fresh.launch_rule, workspace.settings.launch_rule)
+	fresh.tmux.explicit_launch = workspace.settings.tmux.explicit_launch
+	config.replace_string(&fresh.tmux.explicit_ssh_host, workspace.settings.tmux.explicit_ssh_host)
+
+	render_changed := workspace.renderer != fresh.renderer || workspace.ligatures != fresh.ligatures ||
+	                  workspace.font_size != fresh.font_size || workspace.settings.font != fresh.font ||
+	                  workspace.settings.bold_font != fresh.bold_font || workspace.settings.italic_font != fresh.italic_font ||
+	                  workspace.settings.bold_italic_font != fresh.bold_italic_font ||
+	                  workspace.settings.font_bold != fresh.font_bold ||
+	                  workspace.settings.cell_width_percent != fresh.cell_width_percent ||
+	                  workspace.settings.cell_height_percent != fresh.cell_height_percent
+	new_entry := workspace.font_entry
+	if render_changed {
+		new_entry = workspace_font_cache_acquire(workspace.font_cache, &fresh, fresh.font_size)
+		if new_entry == nil {
+			fmt.eprintln("nare: could not load configured fonts")
+			return false
+		}
+	}
+
+	old_entry := workspace.font_entry
+	config.settings_destroy(workspace.settings)
+	workspace.settings^ = fresh
+	fresh = {}
+	workspace.renderer = workspace.settings.renderer
+	workspace.ligatures = workspace.settings.ligatures
+	workspace.initial_font_size = workspace.settings.font_size
+	workspace.font_size = workspace.settings.font_size
+	config.replace_string(&workspace.title, workspace.settings.title)
+	drawing.set_theme(workspace.settings.theme)
+	x11.set_opacity(workspace.root, workspace.settings.window.background_opacity)
+	x11.set_decorations(workspace.root, workspace.settings.window.decorations)
+	x11.set_surface_colors(workspace.root, workspace.settings.theme.background, workspace.settings.ui_colors.active_border, clear = false)
+	if workspace.statusbar_surface.id != 0 {
+		x11.set_surface_colors(
+			&workspace.statusbar_surface, workspace.settings.statusbar.background,
+			workspace.settings.statusbar.background, clear = false,
+		)
+	}
+	if workspace.jobs_surface.id != 0 {
+		x11.set_surface_colors(
+			&workspace.jobs_surface, workspace.settings.statusbar.background,
+			workspace.settings.statusbar.accent, clear = false,
+		)
+	}
+	workspace.statusbar.visible = workspace.settings.statusbar.enabled
+	workspace.statusbar.auto_hide_revealed = !workspace.settings.statusbar.auto_hide
+	workspace.statusbar.auto_hide_pending = false
+	workspace.statusbar.module_mask_ready = false
+	if !workspace.statusbar.visible {
+		workspace.jobs_visible = false
+		if workspace.jobs_surface.id != 0 do x11.show_child(&workspace.jobs_surface, false)
+	}
+	statusbar_render_cache_invalidate(&workspace.statusbar.render_cache)
+
+	if render_changed {
+		workspace.font_entry = new_entry
+		for tab in workspace.tabs do for pane in tab.panes {
+			drawing.destroy(&pane.renderer, &pane.surface)
+			_ = drawing.init(
+				&pane.renderer, &pane.surface, workspace.renderer, workspace.ligatures,
+				workspace.settings.font, workspace.font_size, workspace.settings.font_bold,
+				workspace.settings.bold_font, workspace.settings.italic_font, workspace.settings.bold_italic_font,
+				workspace.settings.cell_width_percent, workspace.settings.cell_height_percent,
+				&workspace.font_entry.manager,
+			)
+		}
+		workspace_font_cache_release(workspace.font_cache, old_entry)
+	}
+	for tab in workspace.tabs do for pane in tab.panes {
+		pane.terminal.main_screen.scrollback_limit = workspace.settings.scrollback_lines
+		pane.terminal.osc52_policy = workspace.settings.osc52_policy
+		workspace_apply_cursor(workspace, pane)
+	}
+	statusbar_tick(workspace, true)
+	workspace_layout(workspace)
+	return true
 }
 
 event_matches :: proc(event: x11.Event, chord: string) -> bool {

@@ -38,6 +38,8 @@ Job :: struct {
 	state: State,
 	started, finished: time.Time,
 	pid, exit_code, signal, progress: int,
+	cancel_requested: bool,
+	cancel_attempts: int,
 	reporter: u64,
 	external_id: string,
 }
@@ -102,7 +104,8 @@ finish :: proc(registry: ^Registry, id: u64, exit_code, signal: int) {
 	if job == nil || (job.state != .Running && job.state != .Starting) do return
 	job.exit_code = exit_code
 	job.signal = signal
-	job.state = .Succeeded if exit_code == 0 && signal == 0 else .Failed
+	if job.cancel_requested do job.state = .Cancelled
+	else do job.state = .Succeeded if exit_code == 0 && signal == 0 else .Failed
 	job.finished = time.now()
 	registry.revision += 1
 }
@@ -113,6 +116,15 @@ cancel :: proc(registry: ^Registry, id: u64) {
 	job.state = .Cancelled
 	job.finished = time.now()
 	registry.revision += 1
+}
+
+request_cancel :: proc(registry: ^Registry, id: u64) -> bool {
+	job := by_id(registry, id)
+	if job == nil || (job.state != .Running && job.state != .Starting) do return false
+	job.cancel_requested = true
+	job.cancel_attempts += 1
+	registry.revision += 1
+	return true
 }
 
 mark_running :: proc(registry: ^Registry, id: u64, pid: int = 0) -> bool {
@@ -128,6 +140,14 @@ set_progress :: proc(registry: ^Registry, id: u64, percent: int, message: string
 	job := by_id(registry, id)
 	if job == nil || (job.state != .Running && job.state != .Starting) || percent < 0 || percent > 100 || len(message) > MAX_MESSAGE_BYTES do return false
 	job.progress = percent
+	replace_string(&job.message, message)
+	registry.revision += 1
+	return true
+}
+
+set_message :: proc(registry: ^Registry, id: u64, message: string) -> bool {
+	job := by_id(registry, id)
+	if job == nil || (job.state != .Running && job.state != .Starting) || len(message) > MAX_MESSAGE_BYTES do return false
 	replace_string(&job.message, message)
 	registry.revision += 1
 	return true

@@ -30,6 +30,7 @@ Kind :: enum u16 {
 	Job_Progress,
 	Job_Finish,
 	Job_Fail,
+	Job_Output,
 	Job_Ack,
 }
 
@@ -158,6 +159,7 @@ valid_kind :: proc(value: u16) -> (Kind, bool) {
 	case u16(Kind.Job_Progress): return .Job_Progress, true
 	case u16(Kind.Job_Finish): return .Job_Finish, true
 	case u16(Kind.Job_Fail): return .Job_Fail, true
+	case u16(Kind.Job_Output): return .Job_Output, true
 	case u16(Kind.Job_Ack): return .Job_Ack, true
 	}
 	return {}, false

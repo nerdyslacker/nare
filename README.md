@@ -53,19 +53,30 @@ make
 
 Configuration is loaded from `$XDG_CONFIG_HOME/nare/nare.conf`, or `~/.config/nare/nare.conf`. Copy [nare.conf](nare.conf) as a starting point; command-line options override it.
 
+After editing `nare.conf`, press `Alt+Shift+R` to reload it. Invalid changes are reported without replacing the running configuration; customize the shortcut with `reload-config` under `[bindings]`.
+
 Set `[shell] startup-command=/usr/bin/fish --login` to replace the default `$SHELL` command for local tabs and panes. Explicit `-e COMMAND [ARG...]` launches still override it.
 
 Run `nare /path/to/folder` to open a shell in that folder. `make install` also installs the desktop entry used by file managers for **Open with nare**.
 
-Start a tracked background command from any local nare tab; the prompt returns immediately and tracking continues even when the bar is hidden:
+## Background jobs
+
+Initialize the `+` command once in your shell:
 
 ```sh
-nare job run build -- make
+# bash (.bashrc)
+eval "$(nare job init bash)"
+
+# zsh (.zshrc)
+eval "$(nare job init zsh)"
+
+# fish (config.fish)
+nare job init fish | source
 ```
 
-For the statusbar-style shell shortcut, add `eval "$(nare job init zsh)"` to `.zshrc`, or `nare job init fish | source` to `config.fish`. Then `+ make` starts and tracks `make` in the background; `+ +build make` supplies an explicit label.
+Use `+ make` to run and track a command in the background, or `+ +build make` to give it the label `build`. The prompt returns immediately; click the jobs module or press `Alt+Shift+J` to open the jobs popup. The popup shows each job's latest output line; use Up/Down to select, Enter to focus its originating pane, Delete to interrupt it, and Escape to close. Repeated Delete presses escalate from `SIGINT` to `SIGTERM` and then `SIGKILL`.
 
-Scripts may report progress with `nare status job start|progress|finish|fail`. Run `nare status job` for the compact command summary. Job reporting is scoped to the originating nare window and does not inspect unrelated shell processes.
+The equivalent direct command is `nare job run build -- make`. Scripts may report progress with `nare status job start|progress|finish|fail`. Tracking is scoped to the originating nare window and does not inspect unrelated processes.
 
 ## Server mode
 
