@@ -16,6 +16,11 @@ Tab_Draw_Label :: struct {
 	tmux: bool,
 }
 
+Statusbar_Draw_Module :: struct {
+	text: string,
+	foreground, background: u32,
+}
+
 Statusbar_Render_Cache :: struct {
 	image: ^xlib.XImage,
 	pixels: []u32,
@@ -23,6 +28,7 @@ Statusbar_Render_Cache :: struct {
 	font: ^fonts.Manager,
 	font_ascent, font_cell_height: int,
 	background, foreground, accent: u32,
+	blocks, border: bool,
 	left, center, right: string,
 }
 
@@ -160,6 +166,8 @@ draw_workspace_statusbar :: proc(
 	window: ^x11.Window,
 	font: ^fonts.Manager,
 	left, center, right: string,
+	left_modules, center_modules, right_modules: []Statusbar_Draw_Module,
+	blocks, border: bool,
 	y, height: int,
 	background, foreground, accent: u32,
 ) {
@@ -181,40 +189,90 @@ draw_workspace_statusbar :: proc(
 	}
 	content_changed := geometry_changed || cache.font != font || cache.font_ascent != font.ascent || cache.font_cell_height != font.cell_height ||
 	                   cache.background != background || cache.foreground != foreground || cache.accent != accent ||
+	                   cache.blocks != blocks || cache.border != border ||
 	                   cache.left != left || cache.center != center || cache.right != right
 	if content_changed {
 		background_pixel := drawing.rgb_to_pixel(window, background)
 		for &pixel in cache.pixels do pixel = background_pixel
-		fill_tab_rect(cache.pixels, window, 0, 0, window.width, min(2, height), accent)
+		if border do fill_tab_rect(cache.pixels, window, 0, 0, window.width, min(2, height), accent)
 		padding := 8
 		baseline := max(font.ascent+2, (height-font.cell_height)/2+font.ascent)
-		right_text := ui_fit_text(font, right, max(0, window.width-padding*2))
-		right_width := tab_text_width(font, right_text, false)
-		right_x := max(padding, window.width-padding-right_width)
-		if right_text != "" do draw_tab_text(cache.pixels, window, font, right_text, right_x, baseline, foreground, false, right_x, window.width-padding)
-		left_available := max(0, right_x-padding*2)
-		left_text := ui_fit_text(font, left, left_available)
-		left_width := tab_text_width(font, left_text, false)
-		left_end := padding+left_width
-		if left_text != "" do draw_tab_text(cache.pixels, window, font, left_text, padding, baseline, foreground, false, padding, left_end)
-		if center != "" {
+		if blocks {
+			padding = 0
+			right_width := statusbar_module_group_width(font, right_modules)
+			right_x := max(padding, window.width-padding-right_width)
+			statusbar_draw_module_group(cache.pixels, window, font, right_modules, right_x, baseline, height, padding, window.width-padding)
+			left_right := max(padding, right_x-padding)
+			left_width := min(statusbar_module_group_width(font, left_modules), max(0, left_right-padding))
+			left_end := statusbar_draw_module_group(cache.pixels, window, font, left_modules, padding, baseline, height, padding, padding+left_width)
 			center_left := min(right_x, left_end+padding)
 			center_right := max(center_left, right_x-padding)
-			center_text := ui_fit_text(font, center, center_right-center_left)
-			center_width := tab_text_width(font, center_text, false)
+			center_width := min(statusbar_module_group_width(font, center_modules), center_right-center_left)
 			center_x := clamp((window.width-center_width)/2, center_left, max(center_left, center_right-center_width))
-			draw_tab_text(cache.pixels, window, font, center_text, center_x, baseline, foreground, false, center_left, center_right)
+			statusbar_draw_module_group(cache.pixels, window, font, center_modules, center_x, baseline, height, center_left, center_right)
+		} else {
+			right_text := ui_fit_text(font, right, max(0, window.width-padding*2))
+			right_width := tab_text_width(font, right_text, false)
+			right_x := max(padding, window.width-padding-right_width)
+			if right_text != "" do draw_tab_text(cache.pixels, window, font, right_text, right_x, baseline, foreground, false, right_x, window.width-padding)
+			left_available := max(0, right_x-padding*2)
+			left_text := ui_fit_text(font, left, left_available)
+			left_width := tab_text_width(font, left_text, false)
+			left_end := padding+left_width
+			if left_text != "" do draw_tab_text(cache.pixels, window, font, left_text, padding, baseline, foreground, false, padding, left_end)
+			if center != "" {
+				center_left := min(right_x, left_end+padding)
+				center_right := max(center_left, right_x-padding)
+				center_text := ui_fit_text(font, center, center_right-center_left)
+				center_width := tab_text_width(font, center_text, false)
+				center_x := clamp((window.width-center_width)/2, center_left, max(center_left, center_right-center_width))
+				draw_tab_text(cache.pixels, window, font, center_text, center_x, baseline, foreground, false, center_left, center_right)
+			}
 		}
 		cache.font = font
 		cache.font_ascent = font.ascent
 		cache.font_cell_height = font.cell_height
 		cache.background, cache.foreground, cache.accent = background, foreground, accent
+		cache.blocks, cache.border = blocks, border
 		statusbar_cache_string(&cache.left, left)
 		statusbar_cache_string(&cache.center, center)
 		statusbar_cache_string(&cache.right, right)
 	}
 	xlib.PutImage(window.display, xlib.Drawable(window.id), window.gc, cache.image, 0, 0, 0, i32(y), u32(window.width), u32(height))
 	_ = xlib.Flush(window.display)
+}
+
+statusbar_module_group_width :: proc(font: ^fonts.Manager, modules: []Statusbar_Draw_Module) -> int {
+	width := 0
+	for module in modules do width += tab_text_width(font, module.text, false)+12
+	return width
+}
+
+statusbar_draw_module_group :: proc(
+	pixels: []u32,
+	window: ^x11.Window,
+	font: ^fonts.Manager,
+	modules: []Statusbar_Draw_Module,
+	x, baseline, height, clip_left, clip_right: int,
+) -> int {
+	cursor := x
+	for module in modules {
+		module_width := tab_text_width(font, module.text, false)+12
+		visible_left := max(cursor, clip_left)
+		visible_right := min(cursor+module_width, clip_right)
+		if visible_right > visible_left {
+			fill_tab_rect(pixels, window, visible_left, 0, visible_right-visible_left, height, module.background)
+			text_left := max(cursor+6, visible_left)
+			text_right := min(cursor+module_width-6, visible_right)
+			if text_right > text_left {
+				text := ui_fit_text(font, module.text, text_right-text_left)
+				draw_tab_text(pixels, window, font, text, text_left, baseline, module.foreground, false, text_left, text_right)
+			}
+		}
+		cursor += module_width
+		if cursor >= clip_right do break
+	}
+	return min(cursor, clip_right)
 }
 
 statusbar_render_cache_destroy :: proc(cache: ^Statusbar_Render_Cache) {

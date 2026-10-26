@@ -633,6 +633,31 @@ statusbar_group_text :: proc(workspace: ^Workspace, modules: []config.Status_Mod
 	return string(output[:])
 }
 
+statusbar_group_modules :: proc(workspace: ^Workspace, modules: []config.Status_Module) -> []Statusbar_Draw_Module {
+	result := make([dynamic]Statusbar_Draw_Module, 0, len(modules), context.temp_allocator)
+	settings := &workspace.settings.statusbar
+	for module in modules {
+		value := statusbar_module_text(workspace, module)
+		if value == "" do continue
+		style := settings.module_styles[int(module)]
+		foreground := settings.foreground
+		background := settings.background
+		if style.foreground_set do foreground = style.foreground
+		if style.background_set do background = style.background
+		append(&result, {text = value, foreground = foreground, background = background})
+	}
+	return result[:]
+}
+
+statusbar_module_group_key :: proc(modules: []Statusbar_Draw_Module) -> string {
+	output := make([dynamic]byte, 0, len(modules)*32, context.temp_allocator)
+	for module in modules {
+		part := fmt.tprintf("%08x:%08x:%s\x00", module.foreground, module.background, module.text)
+		append(&output, ..transmute([]byte)part)
+	}
+	return string(output[:])
+}
+
 statusbar_module_text :: proc(workspace: ^Workspace, module: config.Status_Module) -> string {
 	tab := workspace_active_tab(workspace)
 	pane := workspace_active_pane(workspace)
@@ -713,10 +738,26 @@ workspace_draw_statusbar :: proc(workspace: ^Workspace) {
 		y = workspace.root.height-settings.height
 		if workspace.settings.tabs.edge == .Bottom do y -= tab_height
 	}
-	left := statusbar_group_text(workspace, settings.left[:])
-	center := statusbar_group_text(workspace, settings.center[:])
-	right := statusbar_group_text(workspace, settings.right[:])
-	draw_workspace_statusbar(&workspace.statusbar.render_cache, workspace.root, pane.renderer.font, left, center, right, y, settings.height, settings.background, settings.foreground, statusbar_active_accent(workspace))
+	left, center, right: string
+	left_modules, center_modules, right_modules: []Statusbar_Draw_Module
+	if settings.module_blocks {
+		left_modules = statusbar_group_modules(workspace, settings.left[:])
+		center_modules = statusbar_group_modules(workspace, settings.center[:])
+		right_modules = statusbar_group_modules(workspace, settings.right[:])
+		left = statusbar_module_group_key(left_modules)
+		center = statusbar_module_group_key(center_modules)
+		right = statusbar_module_group_key(right_modules)
+	} else {
+		left = statusbar_group_text(workspace, settings.left[:])
+		center = statusbar_group_text(workspace, settings.center[:])
+		right = statusbar_group_text(workspace, settings.right[:])
+	}
+	draw_workspace_statusbar(
+		&workspace.statusbar.render_cache, workspace.root, pane.renderer.font,
+		left, center, right, left_modules, center_modules, right_modules,
+		settings.module_blocks, settings.border, y, settings.height,
+		settings.background, settings.foreground, statusbar_active_accent(workspace),
+	)
 }
 
 statusbar_active_accent :: proc(workspace: ^Workspace) -> u32 {

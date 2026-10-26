@@ -24,6 +24,12 @@ Quake_Horizontal_Align :: enum { Left, Center, Right }
 Quake_Animation :: enum { None, Slide, Fade }
 Status_Position :: enum { Top, Bottom }
 Status_Module :: enum { Mode, Session, Host, Cwd, Git, Command, Size, Tabs, Clock, Battery, Resource }
+STATUS_MODULE_COUNT :: int(Status_Module.Resource)+1
+
+Status_Module_Style :: struct {
+	foreground, background: u32,
+	foreground_set, background_set: bool,
+}
 
 Window_Settings :: struct {
 	background_opacity: f32,
@@ -74,8 +80,9 @@ Statusbar_Settings :: struct {
 	height: int,
 	left, center, right: [dynamic]Status_Module,
 	separator: string,
-	show_in_quake: bool,
+	show_in_quake, border, module_blocks: bool,
 	background, foreground, accent: u32,
+	module_styles: [STATUS_MODULE_COUNT]Status_Module_Style,
 	clock_format: string,
 	clock_update_ms, cwd_update_ms, git_update_ms, command_update_ms, battery_update_ms, resource_update_ms: int,
 }
@@ -249,7 +256,7 @@ settings_init :: proc(settings: ^Settings) {
 		toggle_statusbar = strings.clone("alt+shift+b"),
 	}
 	settings.statusbar = {
-		position = .Bottom, height = 24, separator = strings.clone(" | "), show_in_quake = true,
+		position = .Bottom, height = 24, separator = strings.clone(" | "), show_in_quake = true, border = true,
 		background = 0x071c33, foreground = 0xb9c7da, accent = 0x13ba19,
 		clock_format = strings.clone("%H:%M"), clock_update_ms = 1000, cwd_update_ms = 2000,
 		git_update_ms = 2000, command_update_ms = 1000,
@@ -330,7 +337,7 @@ parse :: proc(settings: ^Settings, contents: string) -> Result {
 		if line[0] == '[' {
 			if len(line) < 3 || line[len(line)-1] != ']' do return {error = .Syntax, line = line_number}
 			section = strings.trim_space(line[1:len(line)-1])
-			if section != "main" && section != "scrollback" && section != "url" && section != "shell" && section != "security" && section != "graphics" && section != "window" && section != "tabs" && section != "colors" && section != "bindings" && section != "cursor" && section != "tmux" && section != "quake" && section != "statusbar" && section != "statusbar.clock" && section != "statusbar.cwd" && section != "statusbar.git" && section != "statusbar.command" && section != "statusbar.battery" && section != "statusbar.resource" && !tmux_profile_section(section) {
+			if section != "main" && section != "scrollback" && section != "url" && section != "shell" && section != "security" && section != "graphics" && section != "window" && section != "tabs" && section != "colors" && section != "bindings" && section != "cursor" && section != "tmux" && section != "quake" && section != "statusbar" && !status_module_section(section) && !tmux_profile_section(section) {
 				return {error = .Unknown_Section, line = line_number}
 			}
 			if tmux_profile_section(section) {
@@ -635,6 +642,15 @@ apply :: proc(settings: ^Settings, section, key, value: string) -> Error {
 		case "separator":
 			parsed, ok := parse_string(value); if !ok || len(parsed) > 32 do return .Invalid_Value
 			replace_string(&settings.statusbar.separator, parsed)
+		case "border":
+			parsed, ok := parse_bool(value); if !ok do return .Invalid_Value
+			settings.statusbar.border = parsed
+		case "module-style":
+			switch value {
+			case "plain": settings.statusbar.module_blocks = false
+			case "blocks": settings.statusbar.module_blocks = true
+			case: return .Invalid_Value
+			}
 		case "show-in-quake":
 			parsed, ok := parse_bool(value); if !ok do return .Invalid_Value
 			settings.statusbar.show_in_quake = parsed
@@ -645,24 +661,38 @@ apply :: proc(settings: ^Settings, section, key, value: string) -> Error {
 			else do settings.statusbar.accent = parsed
 		case: return .Unknown_Key
 		}
-	} else if section == "statusbar.clock" {
+	} else if status_module_section(section) {
+		module, _ := status_module_from_name(section[len("statusbar."):])
+		style := &settings.statusbar.module_styles[int(module)]
 		switch key {
+		case "foreground", "background":
+			parsed, ok := parse_color(value); if !ok do return .Invalid_Value
+			if key == "foreground" {
+				style.foreground = parsed
+				style.foreground_set = true
+			} else {
+				style.background = parsed
+				style.background_set = true
+			}
 		case "format":
+			if module != .Clock do return .Unknown_Key
 			parsed, ok := parse_string(value); if !ok || len(parsed) > 128 do return .Invalid_Value
 			replace_string(&settings.statusbar.clock_format, parsed)
 		case "update-ms":
-			parsed, ok := strconv.parse_int(value); if !ok || parsed < 250 || parsed > 60000 do return .Invalid_Value
-			settings.statusbar.clock_update_ms = parsed
+			parsed, ok := strconv.parse_int(value)
+			minimum := 250 if module == .Clock else 500
+			if !ok || parsed < minimum || parsed > 60000 do return .Invalid_Value
+			#partial switch module {
+			case .Clock: settings.statusbar.clock_update_ms = parsed
+			case .Cwd: settings.statusbar.cwd_update_ms = parsed
+			case .Git: settings.statusbar.git_update_ms = parsed
+			case .Command: settings.statusbar.command_update_ms = parsed
+			case .Battery: settings.statusbar.battery_update_ms = parsed
+			case .Resource: settings.statusbar.resource_update_ms = parsed
+			case: return .Unknown_Key
+			}
 		case: return .Unknown_Key
 		}
-	} else if section == "statusbar.cwd" || section == "statusbar.git" || section == "statusbar.command" || section == "statusbar.battery" || section == "statusbar.resource" {
-		if key != "update-ms" do return .Unknown_Key
-		parsed, ok := strconv.parse_int(value); if !ok || parsed < 500 || parsed > 60000 do return .Invalid_Value
-		if section == "statusbar.cwd" do settings.statusbar.cwd_update_ms = parsed
-		else if section == "statusbar.git" do settings.statusbar.git_update_ms = parsed
-		else if section == "statusbar.command" do settings.statusbar.command_update_ms = parsed
-		else if section == "statusbar.battery" do settings.statusbar.battery_update_ms = parsed
-		else do settings.statusbar.resource_update_ms = parsed
 	} else if section == "cursor" {
 		switch key {
 		case "shape":
@@ -831,26 +861,36 @@ parse_status_modules :: proc(target: ^[dynamic]Status_Module, value: string) -> 
 			remaining = ""
 		}
 		name = strings.trim_space(name)
-		module: Status_Module
-		switch name {
-		case "mode": module = .Mode
-		case "session": module = .Session
-		case "host": module = .Host
-		case "cwd": module = .Cwd
-		case "git": module = .Git
-		case "command": module = .Command
-		case "size": module = .Size
-		case "tabs": module = .Tabs
-		case "clock": module = .Clock
-		case "battery": module = .Battery
-		case "resource", "resources": module = .Resource
-		case: return false
-		}
+		module, found := status_module_from_name(name)
+		if !found do return false
 		append(&parsed, module)
 	}
 	clear(target)
 	append(target, ..parsed[:])
 	return true
+}
+
+status_module_from_name :: proc(name: string) -> (Status_Module, bool) {
+	switch name {
+	case "mode": return .Mode, true
+	case "session": return .Session, true
+	case "host": return .Host, true
+	case "cwd": return .Cwd, true
+	case "git": return .Git, true
+	case "command": return .Command, true
+	case "size": return .Size, true
+	case "tabs": return .Tabs, true
+	case "clock": return .Clock, true
+	case "battery": return .Battery, true
+	case "resource", "resources": return .Resource, true
+	}
+	return {}, false
+}
+
+status_module_section :: proc(section: string) -> bool {
+	if !strings.has_prefix(section, "statusbar.") do return false
+	_, found := status_module_from_name(section[len("statusbar."):])
+	return found
 }
 
 valid_quake_monitor :: proc(value: string) -> bool {
