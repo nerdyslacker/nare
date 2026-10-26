@@ -13,6 +13,7 @@ MIN_FONT_SIZE :: 6
 MAX_FONT_SIZE :: 96
 MAX_SCROLLBACK_LINES :: 1_000_000
 MAX_TERM_BYTES :: 64
+MAX_STARTUP_COMMAND_BYTES :: 4096
 MAX_TMUX_PROFILES :: 32
 MAX_TMUX_PROFILE_BINDINGS :: 64
 
@@ -162,6 +163,7 @@ Settings :: struct {
 	title: string,
 	url_opener: string,
 	shell_output_pipe: string,
+	startup_command: string,
 	term: string,
 	working_directory: string,
 	scrollback_lines: int,
@@ -195,6 +197,7 @@ settings_init :: proc(settings: ^Settings) {
 	settings.title = strings.clone("nare")
 	settings.url_opener = strings.clone("xdg-open")
 	settings.shell_output_pipe = strings.clone("")
+	settings.startup_command = strings.clone("")
 	settings.term = strings.clone("xterm-256color")
 	settings.working_directory = strings.clone("")
 	settings.scrollback_lines = 10000
@@ -282,6 +285,7 @@ settings_destroy :: proc(settings: ^Settings) {
 	delete(settings.title)
 	delete(settings.url_opener)
 	delete(settings.shell_output_pipe)
+	delete(settings.startup_command)
 	delete(settings.term)
 	delete(settings.working_directory)
 	delete(settings.quake.monitor)
@@ -428,6 +432,9 @@ apply :: proc(settings: ^Settings, section, key, value: string) -> Error {
 		replace_string(&settings.url_opener, value)
 	} else if section == "shell" {
 		switch key {
+		case "startup-command":
+			if len(value) > MAX_STARTUP_COMMAND_BYTES do return .Invalid_Value
+			replace_string(&settings.startup_command, value)
 		case "output-pipe":
 			if value == "" do return .Invalid_Value
 			replace_string(&settings.shell_output_pipe, value)

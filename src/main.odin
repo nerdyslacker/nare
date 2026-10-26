@@ -254,14 +254,68 @@ command_from_args :: proc(args: []string) -> (options: config.Settings, command:
 		return options, command, ""
 	}
 	if len(command_args) == 0 {
-		shell := os.get_env("SHELL", context.temp_allocator)
-		if shell == "" do shell = "/bin/sh"
-		append(&command, strings.clone_to_cstring(shell))
+		if options.startup_command != "" {
+			if !append_command_line(&command, options.startup_command) {
+				return options, command, strings.clone("invalid [shell] startup-command")
+			}
+		} else {
+			shell := os.get_env("SHELL", context.temp_allocator)
+			if shell == "" do shell = "/bin/sh"
+			append(&command, strings.clone_to_cstring(shell))
+		}
 	} else {
 		for arg in command_args do append(&command, strings.clone_to_cstring(arg))
 	}
 	append(&command, nil)
 	return options, command, ""
+}
+
+append_command_line :: proc(command: ^[dynamic]cstring, line: string) -> bool {
+	token: [dynamic]byte
+	defer delete(token)
+	quote: byte
+	escaped := false
+	started := false
+	for character in transmute([]byte)line {
+		if character == 0 do return false
+		if escaped {
+			append(&token, character)
+			escaped = false
+			started = true
+			continue
+		}
+		if quote != 0 {
+			if character == quote {
+				quote = 0
+			} else if character == '\\' && quote == '"' {
+				escaped = true
+			} else {
+				append(&token, character)
+			}
+			started = true
+			continue
+		}
+		switch character {
+		case '\\':
+			escaped = true
+			started = true
+		case '\'', '"':
+			quote = character
+			started = true
+		case ' ', '\t', '\r', '\n':
+			if started {
+				append(command, strings.clone_to_cstring(string(token[:])))
+				clear(&token)
+				started = false
+			}
+		case:
+			append(&token, character)
+			started = true
+		}
+	}
+	if escaped || quote != 0 do return false
+	if started do append(command, strings.clone_to_cstring(string(token[:])))
+	return len(command^) > 0
 }
 
 set_working_directory :: proc(options: ^config.Settings, path: string) -> bool {

@@ -553,7 +553,13 @@ workspace_layout :: proc(workspace: ^Workspace) {
 	if workspace.settings.statusbar.position == .Top do content_y += status_bar
 	content_height := max(1, root.height-tab_bar-status_bar-padding*2)
 	content_width := max(1, root.width-padding*2)
-	for tab, tab_index in workspace.tabs {
+	for layout_index in 0..<len(workspace.tabs) {
+		tab_index := workspace.active
+		if layout_index > 0 {
+			tab_index = layout_index-1
+			if tab_index >= workspace.active do tab_index += 1
+		}
+		tab := workspace.tabs[tab_index]
 		active_tab := tab_index == workspace.active
 		count := len(tab.panes)
 		tmux_columns, tmux_rows := workspace_tmux_window_size(tab)

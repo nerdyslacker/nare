@@ -72,8 +72,6 @@ create_child :: proc(parent: ^Window, x, y, width, height: int) -> (child: Windo
 		return {}, false
 	}
 	xlib.SelectInput(parent.display, child.id, base_event_mask())
-	_ = xlib.MapWindow(parent.display, child.id)
-	_ = xlib.Sync(parent.display, false)
 	return child, true
 }
 

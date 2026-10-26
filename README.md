@@ -53,6 +53,8 @@ make
 
 Configuration is loaded from `$XDG_CONFIG_HOME/nare/nare.conf`, or `~/.config/nare/nare.conf`. Copy [nare.conf](nare.conf) as a starting point; command-line options override it.
 
+Set `[shell] startup-command=/usr/bin/fish --login` to replace the default `$SHELL` command for local tabs and panes. Explicit `-e COMMAND [ARG...]` launches still override it.
+
 Run `nare /path/to/folder` to open a shell in that folder. `make install` also installs the desktop entry used by file managers for **Open with nare**.
 
 ## Server mode
