@@ -62,6 +62,7 @@ app_main :: proc() -> int {
 		return 1
 	}
 	defer x11.close(&window)
+	if options.launch_rule != "" do x11.set_rule_identity(&window, options.launch_rule)
 	x11.set_opacity(&window, options.window.background_opacity)
 	x11.set_decorations(&window, options.window.decorations)
 	drawing.set_theme(options.theme)
@@ -204,6 +205,12 @@ command_from_args :: proc(args: []string) -> (options: config.Settings, command:
 			command_args = args[index+1:]
 			index = len(args)
 		case:
+			if strings.has_prefix(argument, "--rule-instance=") {
+				name := argument[len("--rule-instance="):]
+				if !config.valid_tmux_name(name) do return options, command, strings.clone(usage())
+				config.replace_string(&options.launch_rule, name)
+				continue
+			}
 			if strings.has_prefix(argument, "--tmux-profile=") {
 				explicit_tmux = true
 				tmux_profile_name = argument[len("--tmux-profile="):]

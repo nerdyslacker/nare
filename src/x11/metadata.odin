@@ -5,6 +5,8 @@ import xlib "vendor:x11/xlib"
 
 WINDOW_ICON_SIZE :: 128
 WINDOW_ICON_PNG :: #load("../../assets/logo_256.png")
+RULE_IDENTITY_PROPERTY :: "_NARE_RULE_INSTANCE"
+MAX_RULE_IDENTITY_BYTES :: 128
 
 set_window_metadata :: proc(window: ^Window) {
 	class_hint := xlib.XClassHint{res_name = "nare", res_class = "nare"}
@@ -27,6 +29,61 @@ set_window_metadata :: proc(window: ^Window) {
 		raw_data(icon),
 		i32(len(icon)),
 	)
+}
+
+set_rule_identity :: proc(window: ^Window, name: string) {
+	if window == nil || window.display == nil || window.id == 0 || name == "" || len(name) > MAX_RULE_IDENTITY_BYTES do return
+	property := xlib.InternAtom(window.display, RULE_IDENTITY_PROPERTY, false)
+	type_atom := xlib.InternAtom(window.display, "UTF8_STRING", false)
+	if property == 0 || type_atom == 0 do return
+	_ = xlib.ChangeProperty(window.display, window.id, property, type_atom, 8, xlib.PropModeReplace, raw_data(name), i32(len(name)))
+	_ = xlib.Flush(window.display)
+}
+
+focus_rule_instance :: proc(window: ^Window, name: string) -> bool {
+	if window == nil || window.display == nil || name == "" || len(name) > MAX_RULE_IDENTITY_BYTES do return false
+	previous_handler := xlib.SetErrorHandler(ignore_rule_lookup_error)
+	defer {
+		_ = xlib.Sync(window.display, false)
+		_ = xlib.SetErrorHandler(previous_handler)
+	}
+	property := xlib.InternAtom(window.display, RULE_IDENTITY_PROPERTY, true)
+	if property == 0 do return false
+	root := xlib.RootWindow(window.display, xlib.DefaultScreen(window.display))
+	target := find_rule_window(window.display, root, property, name, 0)
+	if target == 0 do return false
+	request_window_activation(window, target)
+	_ = xlib.MapRaised(window.display, target)
+	_ = xlib.Flush(window.display)
+	return true
+}
+
+ignore_rule_lookup_error :: proc "c" (_: ^xlib.Display, _: ^xlib.XErrorEvent) -> i32 {
+	return 0
+}
+
+find_rule_window :: proc(display: ^xlib.Display, parent: xlib.Window, property: xlib.Atom, name: string, depth: int) -> xlib.Window {
+	if depth > 3 do return 0
+	root, ignored_parent: xlib.Window
+	children: [^]xlib.Window
+	count: u32
+	if xlib.QueryTree(display, parent, &root, &ignored_parent, &children, &count) != .Success do return 0
+	defer if children != nil do xlib.Free(children)
+	for index in 0..<int(count) {
+		candidate := children[index]
+		actual_type: xlib.Atom
+		actual_format: i32
+		items, remaining: uint
+		data: rawptr
+		status := xlib.GetWindowProperty(display, candidate, property, 0, MAX_RULE_IDENTITY_BYTES, false, xlib.AnyPropertyType, &actual_type, &actual_format, &items, &remaining, &data)
+		if status == 0 && data != nil {
+			matches := actual_format == 8 && int(items) == len(name) && string(([^]byte)(data)[:int(items)]) == name
+			xlib.Free(data)
+			if matches do return candidate
+		}
+		if nested := find_rule_window(display, candidate, property, name, depth+1); nested != 0 do return nested
+	}
+	return 0
 }
 
 set_opacity :: proc(window: ^Window, opacity: f32) {

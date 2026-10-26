@@ -73,28 +73,34 @@ spawn :: proc(argv: []cstring, size: Size, term: string = "xterm-256color", work
 		return process, .Slave_Name
 	}
 	slave_name := cstring(&slave_name_buffer[0])
-	ready_pipe: [2]posix.FD
-	if posix.pipe(&ready_pipe) != .OK {
+	exec_pipe: [2]posix.FD
+	if posix.pipe(&exec_pipe) != .OK {
+		close(&process)
+		return process, .Fork
+	}
+	if posix.fcntl(exec_pipe[1], .SETFD, posix.FD_CLOEXEC) < 0 {
+		_ = posix.close(exec_pipe[0])
+		_ = posix.close(exec_pipe[1])
 		close(&process)
 		return process, .Fork
 	}
 
 	child := posix.fork()
 	if child < 0 {
-		_ = posix.close(ready_pipe[0])
-		_ = posix.close(ready_pipe[1])
+		_ = posix.close(exec_pipe[0])
+		_ = posix.close(exec_pipe[1])
 		close(&process)
 		return process, .Fork
 	}
 	if child == 0 {
-		_ = posix.close(ready_pipe[0])
-		child_exec(master, slave_name, argv, size, ready_pipe[1], term_cstring, working_directory_cstring)
+		_ = posix.close(exec_pipe[0])
+		child_exec(master, slave_name, argv, size, exec_pipe[1], term_cstring, working_directory_cstring)
 	}
-	_ = posix.close(ready_pipe[1])
+	_ = posix.close(exec_pipe[1])
 	process.child = child
-	ready_count := wait_child_ready(ready_pipe[0])
-	_ = posix.close(ready_pipe[0])
-	if ready_count != 1 {
+	exec_status := wait_child_exec(exec_pipe[0])
+	_ = posix.close(exec_pipe[0])
+	if exec_status != 0 {
 		shutdown(&process)
 		return process, .Child_Setup
 	}
@@ -131,41 +137,42 @@ spawn_detached :: proc(argv: []cstring) -> Error {
 	return .None if posix.WIFEXITED(status) && posix.WEXITSTATUS(status) == 0 else .Child_Setup
 }
 
-child_exec :: proc(master: posix.FD, slave_name: cstring, argv: []cstring, size: Size, ready_fd: posix.FD, term, working_directory: cstring) -> ! {
+child_exec :: proc(master: posix.FD, slave_name: cstring, argv: []cstring, size: Size, exec_fd: posix.FD, term, working_directory: cstring) -> ! {
 	if posix.setsid() < 0 {
-		posix._exit(127)
+		child_exec_failed(exec_fd)
 	}
 	slave := posix.open(slave_name, {.RDWR})
 	if slave < 0 {
-		posix._exit(127)
+		child_exec_failed(exec_fd)
 	}
 	if ioctl(c.int(slave), TIOCSCTTY, 0) != 0 || !apply_size(slave, size) ||
 	   posix.dup2(slave, 0) < 0 || posix.dup2(slave, 1) < 0 || posix.dup2(slave, 2) < 0 {
-		posix._exit(127)
+		child_exec_failed(exec_fd)
 	}
 	if slave > 2 {
 		_ = posix.close(slave)
 	}
 	_ = posix.close(master)
 	if posix.setenv("TERM", term, true) != .OK {
-		posix._exit(127)
+		child_exec_failed(exec_fd)
 	}
 	if working_directory != nil && (^byte)(working_directory)^ != 0 && posix.chdir(working_directory) != .OK {
-		posix._exit(127)
+		child_exec_failed(exec_fd)
 	}
-	ready: [1]byte = {1}
-	if posix.write(ready_fd, &ready[0], len(ready)) != 1 {
-		posix._exit(127)
-	}
-	_ = posix.close(ready_fd)
 	_ = posix.execvp(argv[0], raw_data(argv))
+	child_exec_failed(exec_fd)
+}
+
+child_exec_failed :: proc(fd: posix.FD) -> ! {
+	failed: [1]byte = {1}
+	_ = posix.write(fd, &failed[0], len(failed))
 	posix._exit(127)
 }
 
-wait_child_ready :: proc(fd: posix.FD) -> c.ssize_t {
-	ready: [1]byte
+wait_child_exec :: proc(fd: posix.FD) -> c.ssize_t {
+	status: [1]byte
 	for {
-		count := posix.read(fd, &ready[0], len(ready))
+		count := posix.read(fd, &status[0], len(status))
 		if count < 0 && posix.errno() == .EINTR do continue
 		return count
 	}
@@ -296,6 +303,11 @@ exit_code :: proc(process: ^Process) -> int {
 	if posix.WIFEXITED(process.wait_status) do return int(posix.WEXITSTATUS(process.wait_status))
 	if posix.WIFSIGNALED(process.wait_status) do return 128 + int(posix.WTERMSIG(process.wait_status))
 	return -1
+}
+
+termination_signal :: proc(process: ^Process) -> int {
+	if process == nil || !process.reaped || !posix.WIFSIGNALED(process.wait_status) do return 0
+	return int(posix.WTERMSIG(process.wait_status))
 }
 
 close :: proc(process: ^Process) {

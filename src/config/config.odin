@@ -16,11 +16,15 @@ MAX_TERM_BYTES :: 64
 MAX_STARTUP_COMMAND_BYTES :: 4096
 MAX_TMUX_PROFILES :: 32
 MAX_TMUX_PROFILE_BINDINGS :: 64
+MAX_TAB_RULES :: 64
+MAX_TAB_RULE_BINDINGS :: 64
 
 Tab_Edge :: enum { Top, Bottom }
 Tab_Style :: enum { Separator, Hidden }
 Cursor_Shape :: enum { Block, Beam, Underline }
 Tmux_Target :: enum { New_Tab, New_Window }
+Tab_Rule_Target :: enum { New_Tab, New_Pane_Horizontal, New_Pane_Vertical, New_Window }
+Tab_Rule_Reuse :: enum { Always_New, Focus }
 Quake_Horizontal_Align :: enum { Left, Center, Right }
 Quake_Animation :: enum { None, Slide, Fade }
 Status_Position :: enum { Top, Bottom }
@@ -116,6 +120,19 @@ Tmux_Profile_Binding :: struct {
 	chord: string,
 }
 
+Tab_Rule :: struct {
+	name, command, working_directory, title, job_name: string,
+	target: Tab_Rule_Target,
+	reuse: Tab_Rule_Reuse,
+	track_job: bool,
+	source_line, command_line: int,
+}
+
+Tab_Rule_Binding :: struct {
+	rule, chord: string,
+	source_line: int,
+}
+
 Cursor_Settings :: struct {
 	shape: Cursor_Shape,
 	blink: bool,
@@ -166,6 +183,7 @@ Settings :: struct {
 	startup_command: string,
 	term: string,
 	working_directory: string,
+	launch_rule: string,
 	scrollback_lines: int,
 	scrollbar_enabled: bool,
 	osc52_policy: vt.OSC52_Policy,
@@ -181,6 +199,8 @@ Settings :: struct {
 	statusbar: Statusbar_Settings,
 	tmux_profiles: [dynamic]Tmux_Profile,
 	tmux_profile_bindings: [dynamic]Tmux_Profile_Binding,
+	tab_rules: [dynamic]Tab_Rule,
+	tab_rule_bindings: [dynamic]Tab_Rule_Binding,
 }
 
 settings_init :: proc(settings: ^Settings) {
@@ -288,6 +308,7 @@ settings_destroy :: proc(settings: ^Settings) {
 	delete(settings.startup_command)
 	delete(settings.term)
 	delete(settings.working_directory)
+	delete(settings.launch_rule)
 	delete(settings.quake.monitor)
 	delete(settings.tabs.separator)
 	delete(settings.tabs.title_template)
@@ -305,6 +326,13 @@ settings_destroy :: proc(settings: ^Settings) {
 		delete(binding.chord)
 	}
 	delete(settings.tmux_profile_bindings)
+	for &rule in settings.tab_rules do destroy_tab_rule(&rule)
+	delete(settings.tab_rules)
+	for &binding in settings.tab_rule_bindings {
+		delete(binding.rule)
+		delete(binding.chord)
+	}
+	delete(settings.tab_rule_bindings)
 	settings^ = {}
 }
 
@@ -342,12 +370,19 @@ parse :: proc(settings: ^Settings, contents: string) -> Result {
 		if line[0] == '[' {
 			if len(line) < 3 || line[len(line)-1] != ']' do return {error = .Syntax, line = line_number}
 			section = strings.trim_space(line[1:len(line)-1])
-			if section != "main" && section != "scrollback" && section != "url" && section != "shell" && section != "security" && section != "graphics" && section != "window" && section != "tabs" && section != "colors" && section != "bindings" && section != "cursor" && section != "tmux" && section != "quake" && section != "statusbar" && !status_module_section(section) && !tmux_profile_section(section) {
+			if section != "main" && section != "scrollback" && section != "url" && section != "shell" && section != "security" && section != "graphics" && section != "window" && section != "tabs" && section != "colors" && section != "bindings" && section != "cursor" && section != "tmux" && section != "quake" && section != "statusbar" && !status_module_section(section) && !tmux_profile_section(section) && !tab_rule_section(section) {
 				return {error = .Unknown_Section, line = line_number}
 			}
 			if tmux_profile_section(section) {
 				name := section[len("tmux.profile."):]
 				if !valid_tmux_name(name) || ensure_tmux_profile(settings, name) == nil do return {error = .Invalid_Value, line = line_number}
+			}
+			if tab_rule_section(section) {
+				name := section[len("tab."):]
+				if !valid_tmux_name(name) || tab_rule(settings, name) != nil do return {error = .Invalid_Value, line = line_number}
+				rule := ensure_tab_rule(settings, name)
+				if rule == nil do return {error = .Invalid_Value, line = line_number}
+				rule.source_line = line_number
 			}
 			continue
 		}
@@ -359,9 +394,22 @@ parse :: proc(settings: ^Settings, contents: string) -> Result {
 		if result := apply(settings, section, key, value); result != .None {
 			return {error = result, line = line_number}
 		}
+		if tab_rule_section(section) && key == "command" {
+			tab_rule(settings, section[len("tab."):]).command_line = line_number
+		} else if section == "bindings" && strings.has_prefix(key, "tab.") {
+			for &binding in settings.tab_rule_bindings do if binding.rule == key[len("tab."):] {binding.source_line = line_number; break}
+		}
 	}
 	for binding in settings.tmux_profile_bindings {
 		if tmux_profile(settings, binding.profile) == nil do return {error = .Invalid_Value, line = line_number}
+	}
+	for rule in settings.tab_rules {
+		if rule.command == "" || !valid_command_line(rule.command) {
+			return {error = .Invalid_Value, line = rule.command_line if rule.command_line > 0 else rule.source_line}
+		}
+	}
+	for binding in settings.tab_rule_bindings {
+		if tab_rule(settings, binding.rule) == nil || shortcut_conflicts(settings, binding.chord, binding.rule) do return {error = .Invalid_Value, line = binding.source_line}
 	}
 	return {}
 }
@@ -626,9 +674,15 @@ apply :: proc(settings: ^Settings, section, key, value: string) -> Error {
 		case "tmux-reconnect": replace_string(&settings.bindings.tmux_reconnect, value)
 		case "toggle-statusbar": replace_string(&settings.bindings.toggle_statusbar, value)
 		case:
-			if !strings.has_prefix(key, "tmux-profile.") do return .Unknown_Key
-			name := key[len("tmux-profile."):]
-			if !valid_tmux_name(name) || !set_tmux_profile_binding(settings, name, value) do return .Invalid_Value
+			if strings.has_prefix(key, "tmux-profile.") {
+				name := key[len("tmux-profile."):]
+				if !valid_tmux_name(name) || !set_tmux_profile_binding(settings, name, value) do return .Invalid_Value
+			} else if strings.has_prefix(key, "tab.") {
+				name := key[len("tab."):]
+				if !valid_tmux_name(name) || !set_tab_rule_binding(settings, name, value) do return .Invalid_Value
+			} else {
+				return .Unknown_Key
+			}
 		}
 	} else if section == "statusbar" {
 		switch key {
@@ -832,6 +886,45 @@ apply :: proc(settings: ^Settings, section, key, value: string) -> Error {
 			profile.target_set = true
 		case: return .Unknown_Key
 		}
+	} else if tab_rule_section(section) {
+		name := section[len("tab."):]
+		rule := tab_rule(settings, name)
+		if rule == nil do return .Invalid_Value
+		switch key {
+		case "command":
+			parsed, ok := parse_string(value)
+			if !ok || len(parsed) > MAX_STARTUP_COMMAND_BYTES do return .Invalid_Value
+			replace_string(&rule.command, parsed)
+		case "working-directory":
+			parsed, ok := parse_string(value)
+			if !ok || !set_rule_working_directory(rule, parsed) do return .Invalid_Value
+		case "title":
+			parsed, ok := parse_string(value)
+			if !ok || len(parsed) > 256 do return .Invalid_Value
+			replace_string(&rule.title, parsed)
+		case "target":
+			switch value {
+			case "new-tab": rule.target = .New_Tab
+			case "new-pane-horizontal": rule.target = .New_Pane_Horizontal
+			case "new-pane-vertical": rule.target = .New_Pane_Vertical
+			case "new-window": rule.target = .New_Window
+			case: return .Invalid_Value
+			}
+		case "reuse":
+			switch value {
+			case "always-new": rule.reuse = .Always_New
+			case "focus": rule.reuse = .Focus
+			case: return .Invalid_Value
+			}
+		case "track-job":
+			parsed, ok := parse_bool(value); if !ok do return .Invalid_Value
+			rule.track_job = parsed
+		case "job-name":
+			parsed, ok := parse_string(value)
+			if !ok || len(parsed) > 128 do return .Invalid_Value
+			replace_string(&rule.job_name, parsed)
+		case: return .Unknown_Key
+		}
 	} else {
 		return .Unknown_Section
 	}
@@ -950,8 +1043,75 @@ set_tmux_profile_binding :: proc(settings: ^Settings, name, chord: string) -> bo
 	return true
 }
 
+tab_rule :: proc(settings: ^Settings, name: string) -> ^Tab_Rule {
+	for &rule in settings.tab_rules do if rule.name == name do return &rule
+	return nil
+}
+
+ensure_tab_rule :: proc(settings: ^Settings, name: string) -> ^Tab_Rule {
+	if len(settings.tab_rules) >= MAX_TAB_RULES do return nil
+	append(&settings.tab_rules, Tab_Rule{name = strings.clone(name)})
+	return &settings.tab_rules[len(settings.tab_rules)-1]
+}
+
+set_tab_rule_binding :: proc(settings: ^Settings, name, chord: string) -> bool {
+	for binding in settings.tab_rule_bindings do if binding.rule == name do return false
+	if len(settings.tab_rule_bindings) >= MAX_TAB_RULE_BINDINGS do return false
+	append(&settings.tab_rule_bindings, Tab_Rule_Binding{rule = strings.clone(name), chord = strings.clone(chord)})
+	return true
+}
+
+set_rule_working_directory :: proc(rule: ^Tab_Rule, value: string) -> bool {
+	if value == "~" || strings.has_prefix(value, "~/") {
+		home := os.get_env("HOME", context.temp_allocator)
+		if home == "" do return false
+		expanded := strings.concatenate({home, value[1:]})
+		if !os.is_directory(expanded) {
+			delete(expanded)
+			return false
+		}
+		replace_string(&rule.working_directory, expanded)
+		delete(expanded)
+		return true
+	} else if strings.has_prefix(value, "~") {
+		return false
+	}
+	if !os.is_directory(value) do return false
+	replace_string(&rule.working_directory, value)
+	return true
+}
+
+tab_rule_section :: proc(section: string) -> bool {
+	return strings.has_prefix(section, "tab.") && len(section) > len("tab.")
+}
+
+shortcut_conflicts :: proc(settings: ^Settings, chord, rule_name: string) -> bool {
+	b := &settings.bindings
+	if chord == b.new_tab || chord == b.previous_tab || chord == b.next_tab ||
+	   chord == b.close_pane || chord == b.split_horizontal || chord == b.split_vertical ||
+	   chord == b.focus_left || chord == b.focus_right || chord == b.focus_up || chord == b.focus_down ||
+	   chord == b.toggle_stack || chord == b.swap_pane || chord == b.move_tab_left || chord == b.move_tab_right ||
+	   chord == b.copy || chord == b.paste || chord == b.font_increase || chord == b.font_decrease || chord == b.font_reset ||
+	   chord == b.tmux_new_tab || chord == b.tmux_new_window || chord == b.tmux_attach_last ||
+	   chord == b.tmux_detach || chord == b.tmux_reconnect || chord == b.toggle_statusbar {
+		return true
+	}
+	for binding in settings.tmux_profile_bindings do if binding.chord == chord do return true
+	for binding in settings.tab_rule_bindings do if binding.rule != rule_name && binding.chord == chord do return true
+	return false
+}
+
 tmux_profile_section :: proc(section: string) -> bool {
 	return strings.has_prefix(section, "tmux.profile.") && len(section) > len("tmux.profile.")
+}
+
+destroy_tab_rule :: proc(rule: ^Tab_Rule) {
+	delete(rule.name)
+	delete(rule.command)
+	delete(rule.working_directory)
+	delete(rule.title)
+	delete(rule.job_name)
+	rule^ = {}
 }
 
 valid_tmux_name :: proc(value: string) -> bool {
@@ -978,6 +1138,37 @@ parse_string :: proc(value: string) -> (string, bool) {
 		return value[1:len(value)-1], true
 	}
 	return value, value != ""
+}
+
+valid_command_line :: proc(line: string) -> bool {
+	quote: byte
+	escaped := false
+	started := false
+	arguments := 0
+	for character in transmute([]byte)line {
+		if character == 0 do return false
+		if escaped {
+			escaped = false
+			started = true
+			continue
+		}
+		if quote != 0 {
+			if character == quote do quote = 0
+			else if character == '\\' && quote == '"' do escaped = true
+			started = true
+			continue
+		}
+		switch character {
+		case '\\': escaped = true; started = true
+		case '\'', '"': quote = character; started = true
+		case ' ', '\t', '\r', '\n':
+			if started {arguments += 1; started = false}
+		case: started = true
+		}
+	}
+	if escaped || quote != 0 do return false
+	if started do arguments += 1
+	return arguments > 0
 }
 
 parse_color :: proc(value: string) -> (u32, bool) {

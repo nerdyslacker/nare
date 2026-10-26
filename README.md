@@ -19,7 +19,7 @@
 - Native VT parser with Unicode, true color, alternate screens, synchronized updates, mouse, focus, and bracketed paste.
 - Fontconfig, FreeType, and HarfBuzz rendering with font fallback, combining and wide characters, color glyphs, and configurable ligatures.
 - Automatic OpenGL rendering with CPU fallback and a separate CPU-only build.
-- Native tabs and split/stack pane layouts, configurable font zoom, optional close confirmation, and a red tab warning for root foreground sessions.
+- Native tabs and split/stack pane layouts, named command bindings with focus-or-create rules, configurable font zoom, optional close confirmation, and a red tab warning for root foreground sessions.
 - Automatic tmux `-CC` detection with native window tabs and split-pane views, local/SSH profiles, bounded reconnect, external-state reconciliation, and detach/restoration.
 - Bounded, resize-reflowing scrollback with incremental search, smooth wheel navigation, and a draggable scrollbar.
 - X11 PRIMARY and CLIPBOARD selection, bracketed paste, large INCR transfers, OSC 8 links, and keyboard URL hints.

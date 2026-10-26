@@ -9,6 +9,7 @@ import config "config"
 import features "features"
 import fonts "font"
 import keyboard "input"
+import jobs "jobs"
 import pty "pty"
 import quake "quake"
 import drawing "render"
@@ -19,6 +20,7 @@ import x11 "x11"
 import xlib "vendor:x11/xlib"
 
 Pane :: struct {
+	workspace: ^Workspace,
 	surface: x11.Window,
 	renderer: drawing.Renderer,
 	process: pty.Process,
@@ -42,6 +44,8 @@ Pane :: struct {
 	visible: bool,
 	exited: bool,
 	root_foreground: bool,
+	tracked_job_id: u64,
+	rule_name: string,
 	display_title: string,
 	remote_host: string,
 	local_display_title: string,
@@ -137,6 +141,11 @@ Tab_Bounds :: struct {
 	tab_index: int,
 }
 
+Pending_Rule_Window :: struct {
+	name: string,
+	started: time.Time,
+}
+
 Workspace :: struct {
 	root: ^x11.Window,
 	search_surface: x11.Window,
@@ -145,6 +154,7 @@ Workspace :: struct {
 	settings: ^config.Settings,
 	command: []cstring,
 	tabs: [dynamic]^Tab,
+	pending_rule_windows: [dynamic]Pending_Rule_Window,
 	active: int,
 	close_confirmation: bool,
 	initial_font_size: int,
@@ -169,6 +179,7 @@ Workspace :: struct {
 	title: string,
 	quake: ^quake.Controller,
 	statusbar: Statusbar_State,
+	jobs: jobs.Registry,
 	layout_pending: bool,
 	grid_resize_pending: bool,
 	last_resize: time.Tick,
@@ -309,6 +320,7 @@ workspace_init :: proc(
 	}
 	x11.set_surface_colors(root, settings.theme.background, settings.ui_colors.active_border)
 	pane := workspace_new_pane_command(workspace, command, initial_cwd, settings.tmux.explicit_launch)
+	if pane != nil && settings.launch_rule != "" do config.replace_string(&pane.rule_name, settings.launch_rule)
 	remote_host := overrides.remote_host if overrides.remote_host != "" else settings.tmux.explicit_ssh_host
 	if pane != nil && remote_host != "" do config.replace_string(&pane.remote_host, remote_host)
 	created := workspace_append_new_tab(workspace, pane)
@@ -318,6 +330,10 @@ workspace_init :: proc(
 		if workspace.font_cache == &workspace.local_font_cache do workspace_font_cache_destroy(&workspace.local_font_cache)
 		delete(workspace.title)
 		return false
+	}
+	if settings.launch_rule != "" {
+		rule := config.tab_rule(settings, settings.launch_rule)
+		if rule != nil && rule.track_job do pane.tracked_job_id = workspace_register_rule_job(workspace, pane, rule)
 	}
 	search_surface, search_ok := x11.create_child(root, 0, 0, 1, 1)
 	if search_ok {
@@ -424,6 +440,7 @@ workspace_new_pane :: proc(workspace: ^Workspace, cwd: string = "") -> ^Pane {
 
 workspace_new_pane_command :: proc(workspace: ^Workspace, command: []cstring, cwd: string = "", tmux_expected: bool = false) -> ^Pane {
 	pane := new(Pane)
+	pane.workspace = workspace
 	pane.tmux_pane_id = -1
 	surface, ok := x11.create_child(workspace.root, 0, 0, workspace.root.width, workspace.root.height)
 	if !ok { free(pane); return nil }
@@ -461,6 +478,7 @@ workspace_new_pane_command :: proc(workspace: ^Workspace, command: []cstring, cw
 
 workspace_new_tmux_view :: proc(workspace: ^Workspace, owner: ^Pane, pane_id: int) -> ^Pane {
 	pane := new(Pane)
+	pane.workspace = workspace
 	pane.tmux_owner = owner
 	pane.tmux_pane_id = pane_id
 	surface, ok := x11.create_child(workspace.root, 0, 0, workspace.root.width, workspace.root.height)
@@ -519,6 +537,7 @@ workspace_tmux_view :: proc(workspace: ^Workspace, owner: ^Pane, pane_id: int) -
 
 pane_destroy :: proc(pane: ^Pane) {
 	if pane == nil do return
+	if pane.workspace != nil && pane.tracked_job_id != 0 do jobs.cancel(&pane.workspace.jobs, pane.tracked_job_id)
 	if pane.tmux_owner == nil do pty.shutdown(&pane.process)
 	vt.terminal_destroy(&pane.terminal)
 	if pane.tmux_owner == nil {
@@ -530,6 +549,7 @@ pane_destroy :: proc(pane: ^Pane) {
 	features.shell_destroy(&pane.shell_state)
 	features.scrollback_destroy(&pane.scrollback_state)
 	delete(pane.display_title)
+	delete(pane.rule_name)
 	delete(pane.remote_host)
 	if pane.tmux_owner == nil {
 		delete(pane.local_display_title)
@@ -554,6 +574,9 @@ workspace_destroy :: proc(workspace: ^Workspace) {
 		free(tab)
 	}
 	delete(workspace.tabs)
+	for pending in workspace.pending_rule_windows do delete(pending.name)
+	delete(workspace.pending_rule_windows)
+	jobs.destroy(&workspace.jobs)
 	delete(workspace.tab_bounds)
 	delete(workspace.rename_buffer)
 	delete(workspace.title)
@@ -587,17 +610,18 @@ workspace_append_new_tab :: proc(workspace: ^Workspace, pane: ^Pane) -> bool {
 	return true
 }
 
-workspace_split :: proc(workspace: ^Workspace, axis: Split_Axis) {
+workspace_insert_split_pane :: proc(workspace: ^Workspace, pane: ^Pane, axis: Split_Axis) -> bool {
+	if pane == nil do return false
 	tab := workspace_active_tab(workspace)
-	if tab == nil do return
+	if tab == nil || tab_is_tmux(tab) {
+		pane_destroy(pane)
+		return false
+	}
 	current := tab.panes[tab.active]
-	cwd := current.terminal.cwd_path if current.terminal.cwd_local else ""
-	pane := workspace_new_pane(workspace, cwd)
-	if pane == nil do return
 	leaf := split_find(tab.layout, current)
 	if leaf == nil {
 		pane_destroy(pane)
-		return
+		return false
 	}
 	leaf.pane = nil
 	leaf.axis = axis
@@ -607,6 +631,17 @@ workspace_split :: proc(workspace: ^Workspace, axis: Split_Axis) {
 	tab.active = len(tab.panes)-1
 	tab.stacked = false
 	workspace_layout(workspace)
+	return true
+}
+
+workspace_split :: proc(workspace: ^Workspace, axis: Split_Axis) {
+	tab := workspace_active_tab(workspace)
+	if tab == nil do return
+	current := tab.panes[tab.active]
+	cwd := current.terminal.cwd_path if current.terminal.cwd_local else ""
+	pane := workspace_new_pane(workspace, cwd)
+	if pane == nil do return
+	_ = workspace_insert_split_pane(workspace, pane, axis)
 }
 
 workspace_active_tab :: proc(workspace: ^Workspace) -> ^Tab {
@@ -1269,6 +1304,108 @@ workspace_clear_scrollbar_hover :: proc(workspace: ^Workspace, source: xlib.Wind
 	}
 }
 
+workspace_focus_rule_instance :: proc(workspace: ^Workspace, rule: ^config.Tab_Rule) -> bool {
+	for tab, tab_index in workspace.tabs {
+		for pane, pane_index in tab.panes {
+			if pane.exited || pane.rule_name != rule.name do continue
+			tab.active = pane_index
+			workspace_select_tab(workspace, tab_index)
+			return true
+		}
+	}
+	if rule.target == .New_Window && x11.focus_rule_instance(workspace.root, rule.name) {
+		workspace_clear_pending_rule_window(workspace, rule.name)
+		return true
+	}
+	return false
+}
+
+workspace_clear_pending_rule_window :: proc(workspace: ^Workspace, name: string) {
+	for index := len(workspace.pending_rule_windows)-1; index >= 0; index -= 1 {
+		if workspace.pending_rule_windows[index].name != name do continue
+		delete(workspace.pending_rule_windows[index].name)
+		unordered_remove(&workspace.pending_rule_windows, index)
+	}
+}
+
+workspace_rule_window_pending :: proc(workspace: ^Workspace, name: string) -> bool {
+	for index := len(workspace.pending_rule_windows)-1; index >= 0; index -= 1 {
+		pending := &workspace.pending_rule_windows[index]
+		if time.since(pending.started) < 2*time.Second {
+			if pending.name == name do return true
+			continue
+		}
+		delete(pending.name)
+		unordered_remove(&workspace.pending_rule_windows, index)
+	}
+	return false
+}
+
+workspace_rule_new_window :: proc(workspace: ^Workspace, rule: ^config.Tab_Rule, rule_command: []cstring) -> bool {
+	if len(os.args) == 0 do return false
+	command: [dynamic]cstring
+	defer command_destroy(&command)
+	append_command_argument(&command, os.args[0])
+	for index := 1; index < len(os.args); index += 1 {
+		argument := os.args[index]
+		if argument == "-e" do break
+		if argument == "--config" {
+			if index+1 < len(os.args) {
+				append_command_argument(&command, argument)
+				index += 1
+				append_command_argument(&command, os.args[index])
+			}
+			continue
+		}
+		if argument == "--no-config" || strings.has_prefix(argument, "--config=") {
+			append_command_argument(&command, argument)
+			continue
+		}
+	}
+	if rule.working_directory != "" do append_command_argument(&command, fmt.tprintf("--working-directory=%s", rule.working_directory))
+	if rule.title != "" do append_command_argument(&command, fmt.tprintf("--title=%s", rule.title))
+	append_command_argument(&command, fmt.tprintf("--rule-instance=%s", rule.name))
+	append_command_argument(&command, "-e")
+	for argument in rule_command[:len(rule_command)-1] do append_command_argument(&command, string(argument))
+	append(&command, nil)
+	if pty.spawn_detached(command[:]) != .None do return false
+	append(&workspace.pending_rule_windows, Pending_Rule_Window{name = strings.clone(rule.name), started = time.now()})
+	return true
+}
+
+workspace_invoke_tab_rule :: proc(workspace: ^Workspace, rule: ^config.Tab_Rule) -> bool {
+	if rule == nil do return false
+	if rule.reuse == .Focus && workspace_focus_rule_instance(workspace, rule) do return true
+	if rule.target == .New_Window && rule.reuse == .Focus && workspace_rule_window_pending(workspace, rule.name) do return true
+	command: [dynamic]cstring
+	defer command_destroy(&command)
+	if !append_command_line(&command, rule.command) do return false
+	append(&command, nil)
+	if rule.target == .New_Window do return workspace_rule_new_window(workspace, rule, command[:])
+
+	active_tab := workspace_active_tab(workspace)
+	target := rule.target
+	if tab_is_tmux(active_tab) do target = .New_Tab
+	pane := workspace_new_pane_command(workspace, command[:], rule.working_directory, false)
+	if pane == nil do return false
+	config.replace_string(&pane.rule_name, rule.name)
+	if rule.title != "" do config.replace_string(&pane.display_title, rule.title)
+	launched := false
+	switch target {
+	case .New_Tab:
+		launched = workspace_append_new_tab(workspace, pane)
+	case .New_Pane_Horizontal:
+		launched = workspace_insert_split_pane(workspace, pane, .Rows)
+	case .New_Pane_Vertical:
+		launched = workspace_insert_split_pane(workspace, pane, .Columns)
+	case .New_Window:
+		pane_destroy(pane)
+		return false
+	}
+	if launched && rule.track_job do pane.tracked_job_id = workspace_register_rule_job(workspace, pane, rule)
+	return launched
+}
+
 workspace_shortcut :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
 	tab := workspace_active_tab(workspace)
 	if tab == nil do return false
@@ -1286,6 +1423,12 @@ workspace_shortcut :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
 			statusbar_tick(workspace, true)
 		}
 		workspace_layout(workspace)
+		return true
+	}
+	for &binding in workspace.settings.tab_rule_bindings {
+		if !event_matches(event, binding.chord) do continue
+		rule := config.tab_rule(workspace.settings, binding.rule)
+		if rule != nil && !workspace_invoke_tab_rule(workspace, rule) do x11.set_title(workspace.root, "nare - named tab launch failed")
 		return true
 	}
 	if event_matches(event, bindings.tmux_new_tab) {
@@ -1581,8 +1724,16 @@ workspace_session_count :: proc(workspace: ^Workspace) -> int {
 
 workspace_record_exit :: proc(workspace: ^Workspace, pane: ^Pane) {
 	if pane == nil || pane.tmux_owner != nil do return
-	workspace.exit_status = pty.exit_code(&pane.process)
+	code := pty.exit_code(&pane.process)
+	workspace.exit_status = code
 	workspace.exit_status_set = true
+	if pane.tracked_job_id != 0 do jobs.finish(&workspace.jobs, pane.tracked_job_id, code, pty.termination_signal(&pane.process))
+}
+
+workspace_register_rule_job :: proc(workspace: ^Workspace, pane: ^Pane, rule: ^config.Tab_Rule) -> u64 {
+	if workspace == nil || pane == nil || rule == nil do return 0
+	label := rule.job_name if rule.job_name != "" else rule.name
+	return jobs.register(&workspace.jobs, u64(pane.surface.id), label, rule.name)
 }
 
 workspace_reap :: proc(workspace: ^Workspace) {
