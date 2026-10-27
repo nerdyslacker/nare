@@ -195,6 +195,8 @@ Workspace :: struct {
 	layout_pending: bool,
 	grid_resize_pending: bool,
 	last_resize: time.Tick,
+	normal_width, normal_height: int,
+	saved_width, saved_height: int,
 }
 
 Workspace_Overrides :: struct {
@@ -339,6 +341,7 @@ workspace_init :: proc(
 		root = root, settings = settings, command = command, initial_font_size = font_size, font_size = font_size,
 		renaming_tab = -1, last_click_tab = -2, last_cursor_toggle = time.now(), tab_reveal_active = true,
 		renderer = renderer, ligatures = ligatures, title = strings.clone(title), quake = quake_controller,
+		normal_width = root.width, normal_height = root.height,
 	}
 	workspace.statusbar.visible = settings.statusbar.enabled
 	workspace.statusbar.auto_hide_revealed = !settings.statusbar.auto_hide
@@ -397,6 +400,8 @@ workspace_init :: proc(
 	}
 	statusbar_tick(workspace, true)
 	workspace_layout(workspace)
+	workspace_capture_window_size(workspace)
+	workspace_remember_window_size(workspace)
 	workspace_refresh_privileged_tabs(workspace, true)
 	x11.set_mouse_tracking(root, 0, settings.scrollbar_enabled || (settings.statusbar.auto_hide && workspace.statusbar.visible))
 	return true
@@ -425,6 +430,8 @@ workspace_service :: proc(workspace: ^Workspace) -> bool {
 	if workspace_resize_settled(workspace) {
 		workspace.grid_resize_pending = false
 		workspace_layout(workspace)
+		workspace_capture_window_size(workspace)
+		workspace_remember_window_size(workspace)
 	}
 	if workspace.scroll_redraw_source != 0 {
 		if pane := workspace_find_pane(workspace, workspace.scroll_redraw_source); pane != nil && pane.visible {
@@ -689,6 +696,8 @@ pane_destroy :: proc(pane: ^Pane) {
 }
 
 workspace_destroy :: proc(workspace: ^Workspace) {
+	workspace_capture_window_size(workspace)
+	workspace_remember_window_size(workspace)
 	if workspace.search_surface.id != 0 do x11.destroy_child(&workspace.search_surface)
 	if workspace.close_surface.id != 0 do x11.destroy_child(&workspace.close_surface)
 	if workspace.statusbar_surface.id != 0 do x11.destroy_child(&workspace.statusbar_surface)
@@ -800,6 +809,27 @@ workspace_resize_settled :: proc(workspace: ^Workspace) -> bool {
 	return workspace.grid_resize_pending &&
 	       time.tick_since(workspace.last_resize) >= RESIZE_SETTLE_INTERVAL &&
 	       !x11.pointer_button_down(workspace.root)
+}
+
+workspace_capture_window_size :: proc(workspace: ^Workspace) {
+	if workspace == nil || workspace.root == nil || workspace.settings == nil || workspace.quake != nil ||
+	   !workspace.settings.window.remember_size || x11.window_is_maximized_or_fullscreen(workspace.root) {
+		return
+	}
+	workspace.normal_width = workspace.root.width
+	workspace.normal_height = workspace.root.height
+}
+
+workspace_remember_window_size :: proc(workspace: ^Workspace) {
+	if workspace == nil || workspace.settings == nil || workspace.quake != nil ||
+	   !workspace.settings.window.remember_size {
+		return
+	}
+	if workspace.normal_width == workspace.saved_width && workspace.normal_height == workspace.saved_height do return
+	if config.save_window_size(workspace.settings.window, workspace.normal_width, workspace.normal_height) {
+		workspace.saved_width = workspace.normal_width
+		workspace.saved_height = workspace.normal_height
+	}
 }
 
 workspace_layout :: proc(workspace: ^Workspace, resize_grid: bool = true) {
@@ -1084,12 +1114,10 @@ workspace_event :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
 		return true
 	case .Resize:
 		if event.dpi_changed do workspace_refresh_dpi(workspace)
+		workspace_capture_window_size(workspace)
+		workspace_remember_window_size(workspace)
 		workspace.tab_reveal_active = true
 		workspace.layout_pending = true
-		// Move/paint child surfaces immediately, but resize the terminal grid and
-		// PTY only after ConfigureNotify has settled. In particular, a quake
-		// window moving between unlike monitors must not send intermediate
-		// SIGWINCH sizes that make shells redraw the live prompt as new lines.
 		workspace.grid_resize_pending = true
 		workspace.last_resize = time.tick_now()
 	case .Redraw:
@@ -1282,6 +1310,11 @@ workspace_event :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
 		if workspace.quake != nil do quake.note_focus(workspace.quake, event.focused)
 		pane := workspace_find_pane(workspace, event.source)
 		if pane == nil && event.source == workspace.root.id do pane = workspace_active_pane(workspace)
+		if event.focused && pane != nil {
+			pane.terminal.cursor_phase_visible = true
+			workspace.last_cursor_toggle = time.now()
+			if pane.visible && !workspace.grid_resize_pending do workspace_redraw(workspace, pane, true)
+		}
 		if pane != nil && pane.terminal.modes.focus_reporting {
 			sequence := "\x1b[I" if event.focused else "\x1b[O"
 			owner := pane_tmux_owner(pane)

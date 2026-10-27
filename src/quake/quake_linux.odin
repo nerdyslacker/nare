@@ -43,6 +43,8 @@ Controller :: struct {
 	state: State,
 	focus_loss_pending: bool,
 	focus_loss_at: time.Time,
+	restore_focus_pending: bool,
+	last_service: time.Tick,
 	last_geometry_check: time.Time,
 	geometry: Rect,
 	animation_from_y, animation_to_y: int,
@@ -105,7 +107,7 @@ open :: proc(controller: ^Controller, window: ^x11.Window, options: Options, vis
 	if socket_error != .None do return socket_error
 	controller^ = {
 		window = window, listener = listener, options = options,
-		state = .Hidden,
+		state = .Hidden, last_service = time.tick_now(),
 	}
 	controller.geometry = monitor_geometry(window, options)
 	x11.configure_top_level(window, controller.geometry.x, controller.geometry.y, controller.geometry.width, controller.geometry.height)
@@ -135,6 +137,7 @@ request :: proc(controller: ^Controller, command: Command, take_focus: bool = tr
 		if controller.state == .Visible || controller.state == .Showing {
 			x11.show_top_level(controller.window, take_focus)
 			controller.focus_loss_pending = false
+			if take_focus do controller.restore_focus_pending = false
 			return
 		}
 		controller.geometry = monitor_geometry(controller.window, controller.options)
@@ -155,6 +158,7 @@ request :: proc(controller: ^Controller, command: Command, take_focus: bool = tr
 			controller.state = .Visible
 		}
 		controller.focus_loss_pending = false
+		if take_focus do controller.restore_focus_pending = false
 	case .Hide:
 		if controller.state == .Hidden do return
 		if slide_enabled(controller) {
@@ -167,6 +171,7 @@ request :: proc(controller: ^Controller, command: Command, take_focus: bool = tr
 			controller.state = .Hidden
 		}
 		controller.focus_loss_pending = false
+		controller.restore_focus_pending = false
 	case .Toggle:
 		if next_state(controller.state, command) == .Visible do request(controller, .Show, take_focus)
 		else do request(controller, .Hide, take_focus)
@@ -188,6 +193,7 @@ note_focus :: proc(controller: ^Controller, focused: bool) {
 	if controller == nil || controller.state != .Visible do return
 	if focused {
 		controller.focus_loss_pending = false
+		controller.restore_focus_pending = false
 	} else {
 		controller.focus_loss_pending = true
 		controller.focus_loss_at = time.now()
@@ -196,6 +202,8 @@ note_focus :: proc(controller: ^Controller, focused: bool) {
 
 service :: proc(controller: ^Controller) -> bool {
 	if controller == nil do return true
+	resumed := controller.last_service != {} && time.tick_since(controller.last_service) >= 2*time.Second
+	controller.last_service = time.tick_now()
 	for len(controller.clients) < MAX_CLIENTS {
 		fd, accept_error := ipc.listener_accept(&controller.listener)
 		if accept_error == .Would_Block do break
@@ -231,9 +239,18 @@ service :: proc(controller: ^Controller) -> bool {
 			if controller.options.hide_on_focus_loss do request(controller, .Hide)
 			else if x11.focused_window_is_override_redirect(controller.window) {
 				x11.lower_top_level(controller.window)
+				controller.restore_focus_pending = true
 			}
 			controller.focus_loss_pending = false
 		}
+	}
+	if resumed && controller.state == .Visible && !x11.focus_within(controller.window) {
+		controller.restore_focus_pending = true
+	}
+	if controller.restore_focus_pending && controller.state == .Visible &&
+	   !x11.focused_window_is_override_redirect(controller.window) {
+		controller.restore_focus_pending = false
+		x11.show_top_level(controller.window, true)
 	}
 	return true
 }

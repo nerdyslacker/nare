@@ -155,7 +155,8 @@ server_launch_window :: proc(server: ^Server, client: ^Server_Client, frame: ^ip
 	append(&window.command, nil)
 	title_value := overrides.title if overrides.override_title else server.settings.title
 	title := strings.clone_to_cstring(title_value)
-	root, window_error := x11.open(title, false)
+	window_width, window_height := config.window_startup_size(server.settings.window)
+	root, window_error := x11.open(title, false, window_width, window_height)
 	delete(title)
 	if window_error != .None {
 		command_destroy(&window.command)

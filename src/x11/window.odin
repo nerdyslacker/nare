@@ -157,20 +157,27 @@ Window :: struct {
 	incoming_selection: Incoming_Selection,
 }
 
-open :: proc(title: cstring = "nare", mapped: bool = true) -> (window: Window, err: Error) {
+open :: proc(
+	title: cstring = "nare",
+	mapped: bool = true,
+	width: int = DEFAULT_WIDTH,
+	height: int = DEFAULT_HEIGHT,
+) -> (window: Window, err: Error) {
 	_ = posix.setlocale(.CTYPE, "")
 	_ = xlib.SetLocaleModifiers("")
 	display := xlib.OpenDisplay(nil)
 	if display == nil do return window, .Open_Display
 	window.display = display
 	screen := xlib.DefaultScreen(display)
+	initial_width := max(1, width)
+	initial_height := max(1, height)
 	window.id = xlib.CreateSimpleWindow(
 		display,
 		xlib.RootWindow(display, screen),
 		0,
 		0,
-		DEFAULT_WIDTH,
-		DEFAULT_HEIGHT,
+		u32(initial_width),
+		u32(initial_height),
 		0,
 		xlib.WhitePixel(display, screen),
 		xlib.BlackPixel(display, screen),
@@ -180,10 +187,10 @@ open :: proc(title: cstring = "nare", mapped: bool = true) -> (window: Window, e
 		return window, .Create_Window
 	}
 
-	window.width = DEFAULT_WIDTH
-	window.height = DEFAULT_HEIGHT
-	window.notified_width = DEFAULT_WIDTH
-	window.notified_height = DEFAULT_HEIGHT
+	window.width = initial_width
+	window.height = initial_height
+	window.notified_width = initial_width
+	window.notified_height = initial_height
 	window.dpi = display_dpi(display, screen)
 	window.black = xlib.BlackPixel(display, screen)
 	window.white = xlib.WhitePixel(display, screen)

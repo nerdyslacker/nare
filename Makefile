@@ -24,12 +24,12 @@ build:
 
 build-lite:
 	mkdir -p $(BUILD_DIR)
-	$(ODIN) build src $(ODIN_FLAGS) -debug -out:$(APP_LITE)
+	$(ODIN) build src $(ODIN_FLAGS) -define:NARE_LITE=true -debug -out:$(APP_LITE)
 
 release:
 	mkdir -p $(BUILD_DIR)
 	$(ODIN) build src $(ODIN_FLAGS) -define:RENDERER_GPU=true -o:speed -out:$(APP)
-	$(ODIN) build src $(ODIN_FLAGS) -o:speed -out:$(APP_LITE)
+	$(ODIN) build src $(ODIN_FLAGS) -define:NARE_LITE=true -o:speed -out:$(APP_LITE)
 
 check:
 	$(ODIN) check src $(ODIN_FLAGS) -define:RENDERER_GPU=true

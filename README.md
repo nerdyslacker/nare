@@ -53,9 +53,13 @@ make
 ./build/nare
 ```
 
-`nare` uses OpenGL when available and falls back to CPU rendering. `make cpu` builds the optional no-OpenGL `build/nare-lite` binary.
+`nare` uses OpenGL when available and falls back to CPU rendering. `make build-lite` builds the optional no-OpenGL `build/nare-lite` binary.
 
 Configuration is loaded from `$XDG_CONFIG_HOME/nare/nare.conf`, or `~/.config/nare/nare.conf`. Copy [nare.conf](nare.conf) as a starting point; command-line options override it.
+
+`nare-lite` keeps an independent profile under `$XDG_CONFIG_HOME/nare-lite/nare.conf`, or `~/.config/nare-lite/nare.conf`.
+
+Normal-window startup dimensions use `[window] width` and `height`. Set `remember-size=yes` to restore the last manually resized, non-maximized window; saved dimensions use the matching `nare` or `nare-lite` directory under `$XDG_STATE_HOME`, or `~/.local/state`.
 
 After editing `nare.conf`, press `Alt+Shift+R` to reload it. Invalid changes are reported without replacing the running configuration; customize the shortcut with `reload-config` under `[bindings]`.
 

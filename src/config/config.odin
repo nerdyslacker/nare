@@ -18,6 +18,15 @@ MAX_TMUX_PROFILES :: 32
 MAX_TMUX_PROFILE_BINDINGS :: 64
 MAX_TAB_RULES :: 64
 MAX_TAB_RULE_BINDINGS :: 64
+MIN_WINDOW_WIDTH :: 160
+MIN_WINDOW_HEIGHT :: 120
+MAX_WINDOW_SIZE :: 16384
+NARE_LITE :: #config(NARE_LITE, false)
+when NARE_LITE {
+	PROFILE_NAME :: "nare-lite"
+} else {
+	PROFILE_NAME :: "nare"
+}
 
 Tab_Edge :: enum { Top, Bottom }
 Tab_Style :: enum { Separator, Hidden }
@@ -42,6 +51,8 @@ Status_Module_Style :: struct {
 Window_Settings :: struct {
 	background_opacity: f32,
 	padding: int,
+	width, height: int,
+	remember_size: bool,
 	decorations: bool,
 	confirm_close: bool,
 	audio_bell: bool,
@@ -258,6 +269,9 @@ settings_init :: proc(settings: ^Settings) {
 	settings.window = {
 		background_opacity = 1,
 		padding = 0,
+		width = 800,
+		height = 480,
+		remember_size = false,
 		decorations = true,
 		confirm_close = false,
 		audio_bell = false,
@@ -381,9 +395,9 @@ settings_destroy :: proc(settings: ^Settings) {
 
 default_path :: proc() -> string {
 	base := os.get_env("XDG_CONFIG_HOME", context.temp_allocator)
-	if base != "" do return fmt.aprintf("%s/nare/nare.conf", base)
+	if base != "" do return fmt.aprintf("%s/%s/nare.conf", base, PROFILE_NAME)
 	home := os.get_env("HOME", context.temp_allocator)
-	if home != "" do return fmt.aprintf("%s/.config/nare/nare.conf", home)
+	if home != "" do return fmt.aprintf("%s/.config/%s/nare.conf", home, PROFILE_NAME)
 	return ""
 }
 
@@ -604,6 +618,16 @@ apply :: proc(settings: ^Settings, section, key, value: string) -> Error {
 			parsed, ok := strconv.parse_int(value)
 			if !ok || parsed < 0 || parsed > 128 do return .Invalid_Value
 			settings.window.padding = parsed
+		case "width", "height":
+			parsed, ok := strconv.parse_int(value)
+			minimum := MIN_WINDOW_WIDTH if key == "width" else MIN_WINDOW_HEIGHT
+			if !ok || parsed < minimum || parsed > MAX_WINDOW_SIZE do return .Invalid_Value
+			if key == "width" do settings.window.width = parsed
+			else do settings.window.height = parsed
+		case "remember-size":
+			parsed, ok := parse_bool(value)
+			if !ok do return .Invalid_Value
+			settings.window.remember_size = parsed
 		case "decorations":
 			parsed, ok := parse_bool(value)
 			if !ok do return .Invalid_Value

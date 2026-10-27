@@ -57,7 +57,8 @@ app_main :: proc() -> int {
 
 	title := strings.clone_to_cstring(options.title)
 	defer delete(title)
-	window, window_err := x11.open(title, false)
+	window_width, window_height := config.window_startup_size(options.window)
+	window, window_err := x11.open(title, false, window_width, window_height)
 	if window_err != .None {
 		fmt.eprintln(x11.error_string(window_err))
 		return 1

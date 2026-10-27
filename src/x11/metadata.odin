@@ -7,9 +7,20 @@ WINDOW_ICON_SIZE :: 128
 WINDOW_ICON_PNG :: #load("../../assets/logo_256.png")
 RULE_IDENTITY_PROPERTY :: "_NARE_RULE_INSTANCE"
 MAX_RULE_IDENTITY_BYTES :: 128
+NARE_LITE :: #config(NARE_LITE, false)
+
+when NARE_LITE {
+	WINDOW_INSTANCE :: "nare-lite"
+	WINDOW_CLASS :: "nare-lite"
+	QUAKE_INSTANCE :: "nare-lite-quake"
+} else {
+	WINDOW_INSTANCE :: "nare"
+	WINDOW_CLASS :: "nare"
+	QUAKE_INSTANCE :: "nare-quake"
+}
 
 set_window_metadata :: proc(window: ^Window) {
-	class_hint := xlib.XClassHint{res_name = "nare", res_class = "nare"}
+	class_hint := xlib.XClassHint{res_name = WINDOW_INSTANCE, res_class = WINDOW_CLASS}
 	xlib.SetClassHint(window.display, window.id, &class_hint)
 	icon_atom := xlib.InternAtom(window.display, "_NET_WM_ICON", false)
 	if icon_atom == 0 do return
@@ -129,8 +140,37 @@ set_quake_hints :: proc(window: ^Window, keep_above, skip_taskbar: bool) {
 	if state_atom != 0 {
 		_ = xlib.ChangeProperty(window.display, window.id, state_atom, xlib.XA_ATOM, 32, xlib.PropModeReplace, raw_data(states[:]), i32(count))
 	}
-	class_hint := xlib.XClassHint{res_name = "nare-quake", res_class = "nare"}
+	class_hint := xlib.XClassHint{res_name = QUAKE_INSTANCE, res_class = WINDOW_CLASS}
 	xlib.SetClassHint(window.display, window.id, &class_hint)
+}
+
+window_is_maximized_or_fullscreen :: proc(window: ^Window) -> bool {
+	if window == nil || window.display == nil || window.id == 0 do return false
+	state_atom := xlib.InternAtom(window.display, "_NET_WM_STATE", true)
+	maximized_horizontal := xlib.InternAtom(window.display, "_NET_WM_STATE_MAXIMIZED_HORZ", true)
+	maximized_vertical := xlib.InternAtom(window.display, "_NET_WM_STATE_MAXIMIZED_VERT", true)
+	fullscreen := xlib.InternAtom(window.display, "_NET_WM_STATE_FULLSCREEN", true)
+	if state_atom == 0 do return false
+	actual: xlib.Atom
+	format: i32
+	count, after: uint
+	data: rawptr
+	if xlib.GetWindowProperty(
+		window.display, window.id, state_atom, 0, 32, false, xlib.XA_ATOM,
+		&actual, &format, &count, &after, &data,
+	) != 0 || data == nil {
+		return false
+	}
+	defer xlib.Free(data)
+	if actual != xlib.XA_ATOM || format != 32 do return false
+	values := ([^]xlib.Atom)(data)
+	horizontal, vertical := false, false
+	for index in 0..<int(count) {
+		if fullscreen != 0 && values[index] == fullscreen do return true
+		if maximized_horizontal != 0 && values[index] == maximized_horizontal do horizontal = true
+		if maximized_vertical != 0 && values[index] == maximized_vertical do vertical = true
+	}
+	return horizontal && vertical
 }
 
 window_icon_data :: proc(image: ^graphics.Decoded_Image, size: int) -> []uint {

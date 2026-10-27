@@ -11,3 +11,4 @@ Exec=nare-lite %f
 Icon=nare-lite
 Categories=System;TerminalEmulator;
 MimeType=inode/directory;
+StartupWMClass=nare-lite
