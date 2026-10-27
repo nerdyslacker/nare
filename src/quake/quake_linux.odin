@@ -364,18 +364,26 @@ usable_area :: proc(window: ^x11.Window, monitor: Rect) -> Rect {
 		_ = xlib.SetErrorHandler(previous_handler)
 	}
 	strut_atom := xlib.InternAtom(window.display, "_NET_WM_STRUT_PARTIAL", true)
+	legacy_strut_atom := xlib.InternAtom(window.display, "_NET_WM_STRUT", true)
 	type_atom := xlib.InternAtom(window.display, "_NET_WM_WINDOW_TYPE", true)
 	dock_atom := xlib.InternAtom(window.display, "_NET_WM_WINDOW_TYPE_DOCK", true)
+	clients_atom := xlib.InternAtom(window.display, "_NET_CLIENT_LIST", true)
 	root_geometry := Rect{
 		width = int(xlib.DisplayWidth(window.display, screen)),
 		height = int(xlib.DisplayHeight(window.display, screen)),
 	}
 	area, found := collect_work_area_reservations(
 		window.display, root, root, monitor, monitor, root_geometry,
-		strut_atom, type_atom, dock_atom, 0,
+		strut_atom, legacy_strut_atom, type_atom, dock_atom, 0,
 	)
+	client_found: bool
+	area, client_found = collect_client_work_area_reservations(
+		window.display, root, clients_atom, monitor, area, root_geometry,
+		strut_atom, legacy_strut_atom, type_atom, dock_atom,
+	)
+	found = found || client_found
 	// EWMH work areas are desktop-wide, so they cannot identify which output
-	// owns an XFCE panel. Dock windows and partial struts remain monitor-local.
+	// owns a panel. Dock geometry and partial struts remain monitor-local.
 	if found || connected_monitor_count(window, root) > 1 do return area
 	return usable_area_from_workarea(window, monitor, root)
 }
@@ -388,7 +396,7 @@ collect_work_area_reservations :: proc(
 	display: ^xlib.Display,
 	root, parent: xlib.Window,
 	monitor, area, root_geometry: Rect,
-	strut_atom, type_atom, dock_atom: xlib.Atom,
+	strut_atom, legacy_strut_atom, type_atom, dock_atom: xlib.Atom,
 	depth: int,
 ) -> (Rect, bool) {
 	if depth > 3 do return area, false
@@ -403,26 +411,88 @@ collect_work_area_reservations :: proc(
 	found := false
 	for index in 0..<int(child_count) {
 		child := children[index]
-		if strut_atom != 0 {
-			if strut, ok := window_strut_partial(display, child, strut_atom); ok {
-				result = apply_strut_partial(result, root_geometry, strut)
-				found = true
-			}
-		}
-		if type_atom != 0 && dock_atom != 0 && window_has_atom(display, child, type_atom, dock_atom) {
-			if dock, ok := root_window_geometry(display, root, child); ok {
-				result = apply_dock_geometry(result, monitor, dock)
-				found = true
-			}
-		}
+		child_found: bool
+		result, child_found = apply_window_work_area_reservation(
+			display, root, child, monitor, result, root_geometry,
+			strut_atom, legacy_strut_atom, type_atom, dock_atom,
+		)
+		found = found || child_found
 		nested_area, nested_found := collect_work_area_reservations(
 			display, root, child, monitor, result, root_geometry,
-			strut_atom, type_atom, dock_atom, depth+1,
+			strut_atom, legacy_strut_atom, type_atom, dock_atom, depth+1,
 		)
 		result = nested_area
 		found = found || nested_found
 	}
 	return result, found
+}
+
+collect_client_work_area_reservations :: proc(
+	display: ^xlib.Display,
+	root: xlib.Window,
+	clients_atom: xlib.Atom,
+	monitor, area, root_geometry: Rect,
+	strut_atom, legacy_strut_atom, type_atom, dock_atom: xlib.Atom,
+) -> (Rect, bool) {
+	if clients_atom == 0 do return area, false
+	actual: xlib.Atom
+	format: i32
+	count, after: uint
+	data: rawptr
+	if xlib.GetWindowProperty(display, root, clients_atom, 0, 65536, false, xlib.AnyPropertyType, &actual, &format, &count, &after, &data) != 0 || data == nil {
+		return area, false
+	}
+	defer xlib.Free(data)
+	if actual == 0 || format != 32 do return area, false
+	result := area
+	found := false
+	windows := ([^]xlib.Window)(data)
+	for index in 0..<int(count) {
+		window_found: bool
+		result, window_found = apply_window_work_area_reservation(
+			display, root, windows[index], monitor, result, root_geometry,
+			strut_atom, legacy_strut_atom, type_atom, dock_atom,
+		)
+		found = found || window_found
+	}
+	return result, found
+}
+
+apply_window_work_area_reservation :: proc(
+	display: ^xlib.Display,
+	root, window: xlib.Window,
+	monitor, area, root_geometry: Rect,
+	strut_atom, legacy_strut_atom, type_atom, dock_atom: xlib.Atom,
+) -> (Rect, bool) {
+	result := area
+	found := false
+	if strut_atom != 0 {
+		if strut, ok := window_strut_partial(display, window, strut_atom); ok {
+			result = apply_strut_partial(result, root_geometry, strut)
+			found = true
+		}
+	}
+	is_dock := type_atom != 0 && dock_atom != 0 && window_has_atom(display, window, type_atom, dock_atom)
+	has_legacy_strut := legacy_strut_atom != 0 && window_has_cardinal_property(display, window, legacy_strut_atom, 4)
+	if is_dock || has_legacy_strut {
+		if dock, ok := root_window_geometry(display, root, window); ok {
+			result = apply_dock_geometry(result, monitor, dock)
+			found = true
+		}
+	}
+	return result, found
+}
+
+window_has_cardinal_property :: proc(display: ^xlib.Display, window: xlib.Window, property: xlib.Atom, minimum_count: uint) -> bool {
+	actual: xlib.Atom
+	format: i32
+	count, after: uint
+	data: rawptr
+	if xlib.GetWindowProperty(display, window, property, 0, int(minimum_count), false, xlib.XA_CARDINAL, &actual, &format, &count, &after, &data) != 0 || data == nil {
+		return false
+	}
+	defer xlib.Free(data)
+	return actual == xlib.XA_CARDINAL && format == 32 && count >= minimum_count
 }
 
 window_has_atom :: proc(display: ^xlib.Display, window: xlib.Window, property, expected: xlib.Atom) -> bool {
