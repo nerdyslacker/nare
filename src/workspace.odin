@@ -299,22 +299,24 @@ workspace_run :: proc(root: ^x11.Window, command: []cstring, settings: ^config.S
 		return 1
 	}
 	defer workspace_destroy(&workspace)
+	fds: [dynamic]posix.pollfd
+	targets: [dynamic]Workspace_Poll_Target
+	defer {
+		delete(fds)
+		delete(targets)
+	}
 	for workspace_service(&workspace) {
-		fds: [dynamic]posix.pollfd
-		targets: [dynamic]Workspace_Poll_Target
+		clear(&fds)
+		clear(&targets)
 		workspace_append_poll(&workspace, &fds, &targets)
 		poll_timeout := 50
 		if workspace.quake != nil do poll_timeout = quake.poll_timeout_ms(workspace.quake, poll_timeout)
 		if posix.poll(raw_data(fds), u64(len(fds)), i32(poll_timeout)) < 0 {
-			delete(fds)
-			delete(targets)
 			if posix.errno() == .EINTR do continue
 			return 1
 		}
 		for index in 0..<len(fds) do workspace_dispatch_poll(targets[index], fds[index].revents)
 		workspace_finish_cycle(&workspace)
-		delete(fds)
-		delete(targets)
 	}
 	return 0
 }

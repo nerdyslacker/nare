@@ -27,6 +27,17 @@ CPU :: struct {
 	previous_scrollbar: Scrollbar_Geometry,
 }
 
+cpu_damage_resize :: proc(cpu: ^CPU, width, height: int) -> bool {
+	if width <= 0 || height <= 0 do return false
+	cpu.width = width
+	cpu.height = height
+	delete(cpu.previous)
+	cpu.previous = nil
+	delete(cpu.dirty_rows)
+	cpu.dirty_rows = nil
+	return true
+}
+
 cpu_resize :: proc(cpu: ^CPU, window: ^x11.Window) -> bool {
 	if window.width <= 0 || window.height <= 0 do return false
 	byte_count := window.width * window.height * size_of(u32)
@@ -60,13 +71,7 @@ cpu_resize :: proc(cpu: ^CPU, window: ^x11.Window) -> bool {
 	cpu.pixels = (([^]u32)(data))[:window.width*window.height]
 	background := rgb_to_pixel(window, active_theme.background)
 	for &pixel in cpu.pixels do pixel = background
-	cpu.width = window.width
-	cpu.height = window.height
-	delete(cpu.previous)
-	cpu.previous = nil
-	delete(cpu.dirty_rows)
-	cpu.dirty_rows = nil
-	return true
+	return cpu_damage_resize(cpu, window.width, window.height)
 }
 
 cpu_destroy :: proc(cpu: ^CPU) {
@@ -107,7 +112,9 @@ damage_rows :: proc(
 	selection_state: ^selection.State = nil,
 	scrollbar: Scrollbar_Geometry = {},
 ) -> bool {
-	if cpu.image == nil do return false
+	// GPU rendering uses this state only for row damage tracking and does not
+	// allocate an XImage. Surface validation belongs to the renderer entry
+	// points; the terminal screen is authoritative for row damage.
 	full_redraw := force
 	if len(cpu.previous) != len(screen.cells) {
 		delete(cpu.previous)

@@ -36,6 +36,14 @@ build_row_commands :: proc(
 	scrollbar: Scrollbar = {},
 ) {
 	clear(output)
+	text: [dynamic]rune
+	clusters: [dynamic]int
+	shaped: [dynamic]fonts.Shaped_Glyph
+	defer {
+		delete(text)
+		delete(clusters)
+		delete(shaped)
+	}
 	y := row * window.cell_h
 	for column in 0..<screen.columns {
 		append_rectangle(output, column*window.cell_w, y, window.cell_w, window.cell_h, active_theme.background)
@@ -98,8 +106,9 @@ build_row_commands :: proc(
 		}
 		run_start := column
 		attributes := cell.attributes
-		text: [dynamic]rune
-		clusters: [dynamic]int
+		clear(&text)
+		clear(&clusters)
+		clear(&shaped)
 		for column < screen.columns {
 			current := vt.cell_at(screen, row, column)
 			if current.continuation {
@@ -116,7 +125,6 @@ build_row_commands :: proc(
 			}
 			column += max(1, int(current.width))
 		}
-		shaped: [dynamic]fonts.Shaped_Glyph
 		style := fonts.style_for_attributes(attributes.bold, attributes.italic)
 		if fonts.shape(font, text[:], ligatures, &shaped, style) {
 			for shaped_glyph in shaped {
@@ -144,9 +152,6 @@ build_row_commands :: proc(
 				})
 			}
 		}
-		delete(shaped)
-		delete(clusters)
-		delete(text)
 	}
 	append_image_commands(output, window, screen, row, .Above_Text)
 	append_cursor_commands(output, window, terminal, screen, row)

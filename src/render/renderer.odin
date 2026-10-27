@@ -80,10 +80,6 @@ init :: proc(
 		renderer.owns_font = true
 	}
 	x11.set_cell_size(window, renderer.font.cell_width, renderer.font.cell_height)
-	if !cpu_resize(&renderer.cpu, window) {
-		destroy(renderer)
-		return .CPU
-	}
 	renderer.active = .CPU
 	gpu_ready := false
 	if kind != .CPU {
@@ -93,6 +89,15 @@ init :: proc(
 	if !available {
 		destroy(renderer, window)
 		return .GPU_Unavailable
+	}
+	if selected == .GPU {
+		if !cpu_damage_resize(&renderer.cpu, window.width, window.height) {
+			destroy(renderer, window)
+			return .CPU
+		}
+	} else if !cpu_resize(&renderer.cpu, window) {
+		destroy(renderer, window)
+		return .CPU
 	}
 	renderer.active = selected
 	renderer.ligatures = ligatures
@@ -120,12 +125,15 @@ destroy :: proc(renderer: ^Renderer, window: ^x11.Window = nil) {
 }
 
 resize :: proc(renderer: ^Renderer, window: ^x11.Window) -> bool {
-	if !cpu_resize(&renderer.cpu, window) do return false
-	if renderer.active == .GPU && !gpu_resize(&renderer.gpu, window) {
+	if renderer.active == .GPU {
+		if !cpu_damage_resize(&renderer.cpu, window.width, window.height) do return false
+		if gpu_resize(&renderer.gpu, window) do return true
 		gpu_destroy(&renderer.gpu, window)
+		if !cpu_resize(&renderer.cpu, window) do return false
 		renderer.active = .CPU
+		return true
 	}
-	return true
+	return cpu_resize(&renderer.cpu, window)
 }
 
 present_cached :: proc(renderer: ^Renderer, window: ^x11.Window) {
@@ -152,6 +160,7 @@ draw :: proc(
 	}
 	if !gpu_draw(&renderer.gpu, &renderer.cpu, renderer.font, window, terminal, renderer.ligatures, force, selection_state, screen_override, scrollbar) {
 		gpu_destroy(&renderer.gpu, window)
+		if !cpu_resize(&renderer.cpu, window) do return
 		renderer.active = .CPU
 		_ = cpu_render(&renderer.cpu, renderer.font, window, terminal, renderer.ligatures, true, selection_state, screen_override, scrollbar)
 		screen := screen_override

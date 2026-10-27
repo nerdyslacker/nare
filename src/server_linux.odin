@@ -297,11 +297,21 @@ server_run :: proc(settings: ^config.Settings, socket_path: string = "") -> int 
 	defer posix.signal(.SIGTERM, previous_terminate)
 	drawing.set_theme(settings.theme)
 	drawing.set_bold_is_bright(settings.bold_is_bright)
+	fds: [dynamic]posix.pollfd
+	targets: [dynamic]Server_Poll_Target
+	workspace_fds: [dynamic]posix.pollfd
+	workspace_targets: [dynamic]Workspace_Poll_Target
+	defer {
+		delete(fds)
+		delete(targets)
+		delete(workspace_fds)
+		delete(workspace_targets)
+	}
 	for intrinsics.volatile_load(&server_stop_requested) == 0 {
 		server_close_finished_windows(&server)
 		server_cleanup_disconnected(&server)
-		fds: [dynamic]posix.pollfd
-		targets: [dynamic]Server_Poll_Target
+		clear(&fds)
+		clear(&targets)
 		append(&fds, {fd = server.listener.fd, events = {.IN}})
 		append(&targets, {kind = .Listener})
 		for client in server.clients {
@@ -311,19 +321,15 @@ server_run :: proc(settings: ^config.Settings, socket_path: string = "") -> int 
 			append(&targets, {kind = .Client, client = client})
 		}
 		for window in server.windows {
-			workspace_fds: [dynamic]posix.pollfd
-			workspace_targets: [dynamic]Workspace_Poll_Target
+			clear(&workspace_fds)
+			clear(&workspace_targets)
 			workspace_append_poll(&window.workspace, &workspace_fds, &workspace_targets)
 			for index in 0..<len(workspace_fds) {
 				append(&fds, workspace_fds[index])
 				append(&targets, {kind = .Workspace, workspace = workspace_targets[index]})
 			}
-			delete(workspace_fds)
-			delete(workspace_targets)
 		}
 		if posix.poll(raw_data(fds), u64(len(fds)), 50) < 0 {
-			delete(fds)
-			delete(targets)
 			if posix.errno() == .EINTR do continue
 			return 1
 		}
@@ -335,8 +341,6 @@ server_run :: proc(settings: ^config.Settings, socket_path: string = "") -> int 
 			server_client_poll(&server, targets[index].client, fds[index].revents)
 		}
 		if .IN in fds[0].revents do server_accept_clients(&server)
-		delete(fds)
-		delete(targets)
 	}
 	return 0
 }
