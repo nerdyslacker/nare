@@ -23,6 +23,7 @@ MAX_OSC133_BYTES :: 4 * 1024
 MAX_XTGETTCAP_BYTES :: 4 * 1024
 MAX_XTGETTCAP_NAMES :: 32
 MAX_XTGETTCAP_NAME_BYTES :: 32
+RESIZE_PROMPT_REDRAW_TIMEOUT :: 750*time.Millisecond
 
 XTGETTCAP_Entry :: struct {
 	name: string,
@@ -148,6 +149,7 @@ Terminal :: struct {
 	implicit_prompt_active: bool,
 	resize_prompt_erase_pending: bool,
 	resize_prompt_erase_row: int,
+	resize_prompt_erase_started: time.Time,
 	osc52_policy: OSC52_Policy,
 	osc52_actions: [dynamic]OSC52_Action,
 	osc52_queued_bytes: int,
@@ -233,12 +235,14 @@ terminal_feed :: proc(terminal: ^Terminal, data: []byte) {
 terminal_input :: proc(terminal: ^Terminal, data: []byte) {
 	if terminal == nil do return
 	terminal.resize_prompt_erase_pending = false
-	if terminal.explicit_shell_integration || !terminal.implicit_prompt_active do return
 	for value in data {
 		if value != '\r' && value != '\n' && value != 0x03 do continue
 		screen := terminal_screen(terminal)
-		cell_at(screen, screen.cursor.row, screen.cursor.column).shell_markers += {.Command}
-		terminal.implicit_prompt_active = false
+		screen.live_prompt_active = false
+		if !terminal.explicit_shell_integration && terminal.implicit_prompt_active {
+			cell_at(screen, screen.cursor.row, screen.cursor.column).shell_markers += {.Command}
+			terminal.implicit_prompt_active = false
+		}
 		return
 	}
 }
@@ -257,10 +261,14 @@ terminal_expect_resize_prompt_redraw :: proc(terminal: ^Terminal) {
 	if !active do return
 	terminal.resize_prompt_erase_pending = true
 	terminal.resize_prompt_erase_row = prompt_row
+	terminal.resize_prompt_erase_started = time.now()
 }
 
 terminal_finish_resize_prompt_redraw :: proc(terminal: ^Terminal) {
-	if terminal != nil do terminal.resize_prompt_erase_pending = false
+	if terminal != nil && terminal.resize_prompt_erase_pending &&
+	   time.since(terminal.resize_prompt_erase_started) >= RESIZE_PROMPT_REDRAW_TIMEOUT {
+		terminal.resize_prompt_erase_pending = false
+	}
 }
 
 terminal_take_replies :: proc(terminal: ^Terminal) -> []byte {
@@ -663,6 +671,8 @@ handle_osc :: proc(terminal: ^Terminal, data: []byte) {
 		if !terminal.explicit_shell_integration && !terminal.using_alternate {
 			screen := terminal_screen(terminal)
 			cell_at(screen, screen.cursor.row, screen.cursor.column).shell_markers += {.Prompt}
+			screen.live_prompt_active = true
+			screen.live_prompt_row = screen.cursor.row
 			terminal.implicit_prompt_active = true
 		}
 	case "8": set_hyperlink(terminal, payload)
@@ -750,6 +760,12 @@ handle_osc133 :: proc(terminal: ^Terminal, payload: []byte) {
 	screen := terminal_screen(terminal)
 	cell := cell_at(screen, screen.cursor.row, screen.cursor.column)
 	cell.shell_markers += {marker}
+	if marker == .Prompt {
+		screen.live_prompt_active = true
+		screen.live_prompt_row = screen.cursor.row
+	} else {
+		screen.live_prompt_active = false
+	}
 	if marker != .Finished || parameter_end == len(payload) do return
 	status_text := string(payload[parameter_end+1:])
 	if separator := strings.index_byte(status_text, ';'); separator >= 0 do status_text = status_text[:separator]
@@ -1153,10 +1169,16 @@ erase_display :: proc(terminal: ^Terminal, screen: ^Screen, mode: int, attribute
 		// later resize still knows that these rows are a live prompt rather
 		// than ordinary output to reflow. Explicit full-screen clears continue
 		// to discard all markers.
-		if terminal.resize_prompt_erase_pending && screen == &terminal.main_screen {
+		if terminal.resize_prompt_erase_pending &&
+		   time.since(terminal.resize_prompt_erase_started) < RESIZE_PROMPT_REDRAW_TIMEOUT &&
+		   screen == &terminal.main_screen {
 			screen.cursor.row = clamp(terminal.resize_prompt_erase_row, 0, screen.rows-1)
 			screen.cursor.column = 0
 			screen.wrap_pending = false
+			terminal.resize_prompt_erase_pending = false
+		}
+		if terminal.resize_prompt_erase_pending &&
+		   time.since(terminal.resize_prompt_erase_started) >= RESIZE_PROMPT_REDRAW_TIMEOUT {
 			terminal.resize_prompt_erase_pending = false
 		}
 		prompt_boundary := .Prompt in cell_at(screen, screen.cursor.row, screen.cursor.column).shell_markers
@@ -1168,6 +1190,7 @@ erase_display :: proc(terminal: ^Terminal, screen: ^Screen, mode: int, attribute
 		erase_cells(screen, screen.cursor.row, 0, screen.cursor.column, attributes)
 	case 2:
 		terminal.resize_prompt_erase_pending = false
+		screen.live_prompt_active = false
 		for row in 0..<screen.rows do clear_row(screen, row, attributes)
 		if screen.image_registry != nil {
 			graphics.clear_visible(screen.image_registry, screen.image_screen, 0, screen.rows-1)

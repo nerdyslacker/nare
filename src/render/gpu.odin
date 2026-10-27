@@ -272,7 +272,7 @@ gpu_draw :: proc(
 			if y >= gpu.height do continue
 			height := min(window.cell_h, gpu.height-y)
 			Scissor(0, i32(gpu.height-y-height), i32(gpu.width), i32(height))
-			build_row_commands(&gpu.commands, font, window, terminal, screen, row, ligatures, selection_state, scrollbar, active_force_bold)
+			build_row_commands(&gpu.commands, font, window, terminal, screen, row, ligatures, selection_state, scrollbar)
 			if !gpu_prepare_atlas(gpu, font) {
 				BindFramebuffer(GL_FRAMEBUFFER, 0)
 				return false

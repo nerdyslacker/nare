@@ -54,6 +54,8 @@ Screen :: struct {
 	scroll_top: int,
 	scroll_bottom: int,
 	wrap_pending: bool,
+	live_prompt_active: bool,
+	live_prompt_row: int,
 	tab_stops: []bool,
 	wrapped: []bool,
 	scrollback: [dynamic][]Cell,
@@ -120,6 +122,8 @@ screen_clear :: proc(screen: ^Screen, attributes: Attributes) {
 	screen.scroll_top = 0
 	screen.scroll_bottom = screen.rows - 1
 	screen.wrap_pending = false
+	screen.live_prompt_active = false
+	screen.live_prompt_row = 0
 }
 
 screen_resize :: proc(screen: ^Screen, columns, rows: int, attributes: Attributes) -> bool {
@@ -135,11 +139,15 @@ screen_resize :: proc(screen: ^Screen, columns, rows: int, attributes: Attribute
 	mapped_prompt_start := max(0, screen.cursor.row-prompt_lines_above_cursor)
 	for row in mapped_prompt_start..=screen.cursor.row do clear_row(screen, row, attributes)
 	cell_at(screen, mapped_prompt_start, 0).shell_markers += {.Prompt}
+	screen.live_prompt_row = mapped_prompt_start
 	return true
 }
 
 screen_active_prompt_start :: proc(screen: ^Screen) -> (int, bool) {
 	if screen == nil || screen.rows <= 0 || screen.columns <= 0 do return 0, false
+	if screen.live_prompt_active {
+		return clamp(screen.live_prompt_row, 0, min(screen.cursor.row, screen.rows-1)), true
+	}
 	for row := clamp(screen.cursor.row, 0, screen.rows-1); row >= 0; row -= 1 {
 		for column := screen.columns-1; column >= 0; column -= 1 {
 			markers := cell_at(screen, row, column).shell_markers
@@ -636,6 +644,9 @@ reverse_index :: proc(screen: ^Screen, attributes: Attributes) {
 scroll_up :: proc(screen: ^Screen, count: int, attributes: Attributes) {
 	amount := clamp(count, 1, screen.scroll_bottom-screen.scroll_top+1)
 	for _ in 0..<amount {
+		if screen.live_prompt_active && screen.live_prompt_row >= screen.scroll_top && screen.live_prompt_row <= screen.scroll_bottom {
+			screen.live_prompt_row = max(screen.scroll_top, screen.live_prompt_row-1)
+		}
 		if screen.scroll_top == 0 && screen.scroll_bottom == screen.rows-1 && screen.scrollback_limit > 0 {
 			row := make([]Cell, screen.columns)
 			copy(row, screen.cells[:screen.columns])
@@ -670,6 +681,9 @@ scroll_up :: proc(screen: ^Screen, count: int, attributes: Attributes) {
 scroll_down :: proc(screen: ^Screen, count: int, attributes: Attributes) {
 	amount := clamp(count, 1, screen.scroll_bottom-screen.scroll_top+1)
 	for _ in 0..<amount {
+		if screen.live_prompt_active && screen.live_prompt_row >= screen.scroll_top && screen.live_prompt_row <= screen.scroll_bottom {
+			screen.live_prompt_row = min(screen.scroll_bottom, screen.live_prompt_row+1)
+		}
 		for row := screen.scroll_bottom; row > screen.scroll_top; row -= 1 {
 			copy(screen.cells[row*screen.columns:(row+1)*screen.columns], screen.cells[(row-1)*screen.columns:row*screen.columns])
 			screen.wrapped[row] = screen.wrapped[row-1]

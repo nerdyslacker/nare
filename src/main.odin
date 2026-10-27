@@ -57,7 +57,7 @@ app_main :: proc() -> int {
 
 	title := strings.clone_to_cstring(options.title)
 	defer delete(title)
-	window, window_err := x11.open(title, !quake_mode)
+	window, window_err := x11.open(title, false)
 	if window_err != .None {
 		fmt.eprintln(x11.error_string(window_err))
 		return 1
@@ -68,7 +68,10 @@ app_main :: proc() -> int {
 	x11.set_decorations(&window, options.window.decorations)
 	drawing.set_theme(options.theme)
 	drawing.set_bold_is_bright(options.bold_is_bright)
-	if !quake_mode do return workspace_run(&window, command[:], &options)
+	if !quake_mode {
+		x11.map_and_settle(&window)
+		return workspace_run(&window, command[:], &options)
+	}
 	x11.set_quake_hints(&window, options.quake.keep_above, options.quake.skip_taskbar)
 	align: quake.Horizontal_Align
 	switch options.quake.horizontal_align {

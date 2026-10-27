@@ -39,12 +39,12 @@
 Void Linux and LazyLinux use the same XBPS packages:
 
 ```sh
-sudo xbps-install -S base-devel libX11-devel libXrandr-devel fontconfig-devel freetype-devel harfbuzz-devel libglvnd-devel ncurses
+sudo xbps-install -S base-devel libX11-devel libXext-devel libXrandr-devel fontconfig-devel freetype-devel harfbuzz-devel libglvnd-devel ncurses
 ```
 
 Install Odin `dev-2026-10` separately and make sure `odin` is in `PATH`.
 
-The binary requires `libX11 libXrandr fontconfig freetype libharfbuzz libglvnd`. A usable font is required (`dejavu-fonts-ttf` is a small default); install `noto-fonts-emoji` for color emoji. `xdg-utils` enables the default URL opener, and `git` optionally enables complete status-bar repository state detection.
+The binary requires `libX11 libXext libXrandr fontconfig freetype libharfbuzz libglvnd`. A usable font is required (`dejavu-fonts-ttf` is a small default); install `noto-fonts-emoji` for color emoji. `xdg-utils` enables the default URL opener, and `git` optionally enables complete status-bar repository state detection.
 
 Build and run:
 
@@ -110,7 +110,7 @@ Quake mode is a special top-level window around the normal nare workspace. Hidin
 nare --quake          # toggle an existing instance, or start one visible
 ```
 
-The private Unix socket is scoped to the current UID and `DISPLAY`, uses peer-credential checks, and exists only while the quake GUI runs. Configuration lives under `[quake]` in `nare.conf`. `monitor` accepts `focused`, `primary`, or an XRandR output name; a missing output falls back to the primary output and then the first connected output. Geometry is intersected with `_NET_WORKAREA`, clamped to the selected monitor, and refreshed after output changes.
+The private Unix socket is scoped to the current UID and `DISPLAY`, uses peer-credential checks, and exists only while the quake GUI runs. Configuration lives under `[quake]` in `nare.conf`. `monitor` accepts `focused`, `primary`, or an XRandR output name; a missing output falls back to the primary output and then the first connected output. Geometry honors per-monitor panel struts, is clamped to the selected monitor, and refreshes after output changes.
 
 Nare does not install a focused-window Quake binding. For a global X11 shortcut, use an external hotkey daemon such as sxhkd:
 

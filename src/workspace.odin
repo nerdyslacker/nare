@@ -290,7 +290,7 @@ Workspace_Poll_Target :: struct {
 PRIVILEGE_CHECK_INTERVAL :: 250*time.Millisecond
 TMUX_RECONCILE_INTERVAL :: 2*time.Second
 TMUX_MAX_RECONNECT_ATTEMPTS :: 8
-RESIZE_SETTLE_INTERVAL :: 100*time.Millisecond
+RESIZE_SETTLE_INTERVAL :: 250*time.Millisecond
 
 workspace_run :: proc(root: ^x11.Window, command: []cstring, settings: ^config.Settings, quake_controller: ^quake.Controller = nil) -> int {
 	workspace: Workspace
@@ -538,13 +538,14 @@ workspace_new_pane_command :: proc(workspace: ^Workspace, command: []cstring, cw
 	pane.surface = surface
 	if drawing.init(
 		&pane.renderer, &pane.surface, workspace.renderer, workspace.ligatures,
-		workspace.settings.font, workspace.font_size, workspace.settings.font_bold,
+		workspace.settings.font, workspace.font_size,
 		workspace.settings.bold_font, workspace.settings.italic_font, workspace.settings.bold_italic_font,
 		workspace.settings.cell_width_percent, workspace.settings.cell_height_percent,
 		&workspace.font_entry.manager,
 	) != .None {
 		x11.destroy_child(&pane.surface); free(pane); return nil
 	}
+	if len(workspace.tabs) == 0 do workspace_place_initial_pane(workspace, pane)
 	columns, rows := x11.grid_size(&pane.surface)
 	directory := cwd
 	if directory == "" do directory = workspace.settings.working_directory
@@ -571,6 +572,24 @@ workspace_new_pane_command :: proc(workspace: ^Workspace, command: []cstring, cw
 	return pane
 }
 
+workspace_place_initial_pane :: proc(workspace: ^Workspace, pane: ^Pane) {
+	padding := workspace.settings.window.padding
+	tab_bar := 0
+	if workspace.settings.tabs.enabled && workspace.settings.tabs.style != .Hidden && workspace.settings.tabs.minimum <= 1 {
+		tab_bar = pane.renderer.font.cell_height+4
+	}
+	status_bar := 0
+	if statusbar_visible(workspace) {
+		status_bar = max(workspace.settings.statusbar.height, pane.renderer.font.cell_height+6)
+	}
+	y := padding
+	if workspace.settings.tabs.edge == .Top do y += tab_bar
+	if workspace.settings.statusbar.position == .Top do y += status_bar
+	width := max(1, workspace.root.width-padding*2)
+	height := max(1, workspace.root.height-tab_bar-status_bar-padding*2)
+	x11.place_child(&pane.surface, padding, y, width, height)
+}
+
 workspace_job_environment :: proc(workspace: ^Workspace, pane: ^Pane, environment: ^[4]pty.Environment_Variable) -> []pty.Environment_Variable {
 	if workspace == nil || pane == nil || environment == nil || !workspace.job_reporter.enabled do return nil
 	environment[0] = {name = "NARE_JOB_SOCKET", value = workspace.job_reporter.path}
@@ -590,7 +609,7 @@ workspace_new_tmux_view :: proc(workspace: ^Workspace, owner: ^Pane, pane_id: in
 	pane.surface = surface
 	if drawing.init(
 		&pane.renderer, &pane.surface, workspace.renderer, workspace.ligatures,
-		workspace.settings.font, workspace.font_size, workspace.settings.font_bold,
+		workspace.settings.font, workspace.font_size,
 		workspace.settings.bold_font, workspace.settings.italic_font, workspace.settings.bold_italic_font,
 		workspace.settings.cell_width_percent, workspace.settings.cell_height_percent,
 		&workspace.font_entry.manager,
@@ -860,7 +879,7 @@ workspace_layout :: proc(workspace: ^Workspace, resize_grid: bool = true) {
 				_ = vt.terminal_resize(&pane.terminal, columns, rows)
 				if pane.search_state.active do features.refresh(&pane.search_state, vt.terminal_screen(&pane.terminal))
 				if !tab_is_tmux(tab) {
-					if workspace.quake != nil do vt.terminal_expect_resize_prompt_redraw(&pane.terminal)
+					vt.terminal_expect_resize_prompt_redraw(&pane.terminal)
 					_ = pty.resize(&pane.process, pty_size(columns, rows, width, height))
 				}
 			}
@@ -1740,7 +1759,6 @@ workspace_reload_config :: proc(workspace: ^Workspace) -> bool {
 	                  workspace.font_size != fresh.font_size || workspace.settings.font != fresh.font ||
 	                  workspace.settings.bold_font != fresh.bold_font || workspace.settings.italic_font != fresh.italic_font ||
 	                  workspace.settings.bold_italic_font != fresh.bold_italic_font ||
-	                  workspace.settings.font_bold != fresh.font_bold ||
 	                  workspace.settings.cell_width_percent != fresh.cell_width_percent ||
 	                  workspace.settings.cell_height_percent != fresh.cell_height_percent
 	new_entry := workspace.font_entry
@@ -1791,7 +1809,7 @@ workspace_reload_config :: proc(workspace: ^Workspace) -> bool {
 			drawing.destroy(&pane.renderer, &pane.surface)
 			_ = drawing.init(
 				&pane.renderer, &pane.surface, workspace.renderer, workspace.ligatures,
-				workspace.settings.font, workspace.font_size, workspace.settings.font_bold,
+				workspace.settings.font, workspace.font_size,
 				workspace.settings.bold_font, workspace.settings.italic_font, workspace.settings.bold_italic_font,
 				workspace.settings.cell_width_percent, workspace.settings.cell_height_percent,
 				&workspace.font_entry.manager,
@@ -1847,7 +1865,7 @@ workspace_font_size :: proc(workspace: ^Workspace, size: int) {
 		drawing.destroy(&pane.renderer, &pane.surface)
 		font_error := drawing.init(
 			&pane.renderer, &pane.surface, workspace.renderer, workspace.ligatures,
-			workspace.settings.font, new_size, workspace.settings.font_bold,
+			workspace.settings.font, new_size,
 			workspace.settings.bold_font, workspace.settings.italic_font, workspace.settings.bold_italic_font,
 			workspace.settings.cell_width_percent, workspace.settings.cell_height_percent,
 			&new_entry.manager,
@@ -1872,7 +1890,7 @@ workspace_refresh_dpi :: proc(workspace: ^Workspace) -> bool {
 		drawing.destroy(&pane.renderer, &pane.surface)
 		if drawing.init(
 			&pane.renderer, &pane.surface, workspace.renderer, workspace.ligatures,
-			workspace.settings.font, workspace.font_size, workspace.settings.font_bold,
+			workspace.settings.font, workspace.font_size,
 			workspace.settings.bold_font, workspace.settings.italic_font, workspace.settings.bold_italic_font,
 			workspace.settings.cell_width_percent, workspace.settings.cell_height_percent,
 			&new_entry.manager,

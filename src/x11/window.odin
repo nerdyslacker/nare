@@ -3,6 +3,7 @@ package x11
 import "core:strings"
 import "core:strconv"
 import "core:sys/posix"
+import "core:time"
 import keyboard "../input"
 import xlib "vendor:x11/xlib"
 
@@ -12,6 +13,8 @@ DIRECT_SELECTION_BYTES :: 32 * 1024
 SELECTION_CHUNK_BYTES :: 32 * 1024
 MAX_SELECTION_BYTES :: 16 * 1024 * 1024
 MAX_OUTGOING_TRANSFERS :: 4
+INITIAL_MAP_QUIET_INTERVAL :: 120*time.Millisecond
+INITIAL_MAP_TIMEOUT :: 500*time.Millisecond
 
 Error :: enum { None, Open_Display, Create_Window, Create_Renderer, WM_Protocol, Selection_Atoms }
 Event_Kind :: enum { None, Close, Redraw, Resize, Focus, Input, Mouse, Paste, Paste_Failed }
@@ -135,6 +138,8 @@ Window :: struct {
 	mapped:    bool,
 	pending_focus: bool,
 	previous_focus: xlib.Window,
+	shape_checked: bool,
+	shape_available: bool,
 	mouse_tracking: int,
 	pointer_motion: bool,
 	primary_atom: xlib.Atom,
@@ -246,6 +251,40 @@ open :: proc(title: cstring = "nare", mapped: bool = true) -> (window: Window, e
 	}
 	_ = xlib.Flush(display)
 	return window, .None
+}
+
+map_and_settle :: proc(window: ^Window) {
+	if window == nil || window.display == nil || window.id == 0 || window.mapped do return
+	_ = xlib.MapWindow(window.display, window.id)
+	window.mapped = true
+	_ = xlib.Flush(window.display)
+	started := time.tick_now()
+	last_geometry := started
+	mapped := false
+	for time.tick_since(started) < INITIAL_MAP_TIMEOUT {
+		event: xlib.XEvent
+		for xlib.CheckTypedWindowEvent(window.display, window.id, .ConfigureNotify, &event) != false {
+			_ = note_configure(
+				window,
+				int(event.xconfigure.x),
+				int(event.xconfigure.y),
+				int(event.xconfigure.width),
+				int(event.xconfigure.height),
+			)
+			last_geometry = time.tick_now()
+		}
+		for xlib.CheckTypedWindowEvent(window.display, window.id, .MapNotify, &event) != false do mapped = true
+		if mapped && time.tick_since(last_geometry) >= INITIAL_MAP_QUIET_INTERVAL do break
+		connection := posix.pollfd{fd = posix.FD(xlib.ConnectionNumber(window.display)), events = {.IN}}
+		_ = posix.poll(&connection, 1, 10)
+	}
+	attributes: xlib.XWindowAttributes
+	if xlib.GetWindowAttributes(window.display, window.id, &attributes) != 0 {
+		window.width = max(1, int(attributes.width))
+		window.height = max(1, int(attributes.height))
+		window.notified_width = window.width
+		window.notified_height = window.height
+	}
 }
 
 display_dpi :: proc(display: ^xlib.Display, screen: i32) -> f32 {

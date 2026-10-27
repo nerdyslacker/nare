@@ -34,7 +34,6 @@ DEFAULT_THEME :: Theme{
 }
 
 active_theme := DEFAULT_THEME
-active_force_bold := false
 active_bold_is_bright := false
 
 set_theme :: proc(theme: Theme) {
@@ -53,7 +52,6 @@ Renderer :: struct {
 	gpu: GPU,
 	active: Kind,
 	ligatures: bool,
-	force_bold: bool,
 }
 
 init :: proc(
@@ -63,7 +61,6 @@ init :: proc(
 	ligatures: bool = true,
 	family: string = fonts.DEFAULT_FAMILY,
 	point_size: int = fonts.DEFAULT_POINT_SIZE,
-	force_bold: bool = false,
 	bold_family: string = "auto",
 	italic_family: string = "auto",
 	bold_italic_family: string = "auto",
@@ -99,8 +96,6 @@ init :: proc(
 	}
 	renderer.active = selected
 	renderer.ligatures = ligatures
-	renderer.force_bold = force_bold
-	active_force_bold = force_bold
 	return .None
 }
 

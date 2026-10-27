@@ -17,6 +17,14 @@ Animation :: enum { None, Slide, Fade }
 
 Rect :: struct { x, y, width, height: int }
 
+Strut_Partial :: struct {
+	left, right, top, bottom: int,
+	left_start_y, left_end_y: int,
+	right_start_y, right_end_y: int,
+	top_start_x, top_end_x: int,
+	bottom_start_x, bottom_end_x: int,
+}
+
 Options :: struct {
 	monitor: string,
 	width_percent, height_percent: int,
@@ -138,8 +146,10 @@ request :: proc(controller: ^Controller, command: Command, take_focus: bool = tr
 			controller.animation_started = time.now()
 			controller.state = .Showing
 			x11.configure_top_level(controller.window, controller.geometry.x, from_y, controller.geometry.width, controller.geometry.height)
+			apply_animation_clip(controller, from_y)
 			x11.show_top_level(controller.window, take_focus)
 		} else {
+			x11.clear_top_level_clip(controller.window)
 			x11.configure_top_level(controller.window, controller.geometry.x, controller.geometry.y, controller.geometry.width, controller.geometry.height)
 			x11.show_top_level(controller.window, take_focus)
 			controller.state = .Visible
@@ -243,13 +253,27 @@ service_animation :: proc(controller: ^Controller) {
 	elapsed_ms := int(time.since(controller.animation_started)/time.Millisecond)
 	y := animation_position(controller.animation_from_y, controller.animation_to_y, elapsed_ms, controller.options.animation_duration_ms)
 	x11.configure_top_level(controller.window, controller.geometry.x, y, controller.geometry.width, controller.geometry.height)
+	apply_animation_clip(controller, y)
 	if elapsed_ms < controller.options.animation_duration_ms do return
 	if controller.state == .Showing {
+		x11.clear_top_level_clip(controller.window)
 		controller.state = .Visible
 	} else {
 		x11.hide_top_level(controller.window)
+		x11.clear_top_level_clip(controller.window)
 		controller.state = .Hidden
 	}
+}
+
+animation_clip :: proc(geometry: Rect, window_y: int) -> (top, height: int) {
+	top = clamp(geometry.y-window_y, 0, geometry.height)
+	bottom := clamp(geometry.y+geometry.height-window_y, 0, geometry.height)
+	return top, max(0, bottom-top)
+}
+
+apply_animation_clip :: proc(controller: ^Controller, window_y: int) {
+	top, height := animation_clip(controller.geometry, window_y)
+	_ = x11.set_top_level_clip(controller.window, 0, top, controller.geometry.width, height)
 }
 
 poll_timeout_ms :: proc(controller: ^Controller, fallback: int = 50) -> int {
@@ -334,6 +358,79 @@ selected_monitor :: proc(window: ^x11.Window, selector: string) -> Rect {
 usable_area :: proc(window: ^x11.Window, monitor: Rect) -> Rect {
 	screen := xlib.DefaultScreen(window.display)
 	root := xlib.RootWindow(window.display, screen)
+	strut_atom := xlib.InternAtom(window.display, "_NET_WM_STRUT_PARTIAL", true)
+	if strut_atom != 0 {
+		root_geometry := Rect{
+			width = int(xlib.DisplayWidth(window.display, screen)),
+			height = int(xlib.DisplayHeight(window.display, screen)),
+		}
+		area := monitor
+		found := false
+		root_return, parent_return: xlib.Window
+		children: [^]xlib.Window
+		child_count: u32
+		if xlib.QueryTree(window.display, root, &root_return, &parent_return, &children, &child_count) == .Success {
+			defer if children != nil do xlib.Free(children)
+			for index in 0..<int(child_count) {
+				strut, ok := window_strut_partial(window.display, children[index], strut_atom)
+				if !ok do continue
+				found = true
+				area = apply_strut_partial(area, root_geometry, strut)
+			}
+		}
+		// _NET_WORKAREA is desktop-wide and can incorrectly reserve one
+		// monitor's panel on every output. Once partial struts are available,
+		// they are the authoritative per-monitor usable area.
+		if found do return area
+	}
+	return usable_area_from_workarea(window, monitor, root)
+}
+
+window_strut_partial :: proc(display: ^xlib.Display, window: xlib.Window, property: xlib.Atom) -> (Strut_Partial, bool) {
+	actual: xlib.Atom
+	format: i32
+	count, after: uint
+	data: rawptr
+	if xlib.GetWindowProperty(display, window, property, 0, 12, false, xlib.XA_CARDINAL, &actual, &format, &count, &after, &data) != 0 || data == nil {
+		return {}, false
+	}
+	defer xlib.Free(data)
+	if actual != xlib.XA_CARDINAL || format != 32 || count < 12 do return {}, false
+	values := ([^]uint)(data)
+	return {
+		left = int(values[0]), right = int(values[1]), top = int(values[2]), bottom = int(values[3]),
+		left_start_y = int(values[4]), left_end_y = int(values[5]),
+		right_start_y = int(values[6]), right_end_y = int(values[7]),
+		top_start_x = int(values[8]), top_end_x = int(values[9]),
+		bottom_start_x = int(values[10]), bottom_end_x = int(values[11]),
+	}, true
+}
+
+inclusive_ranges_overlap :: proc(a_start, a_end, b_start, b_end: int) -> bool {
+	return a_start <= b_end && b_start <= a_end
+}
+
+apply_strut_partial :: proc(area, root: Rect, strut: Strut_Partial) -> Rect {
+	if area.width <= 0 || area.height <= 0 do return area
+	left, top := area.x, area.y
+	right, bottom := area.x+area.width, area.y+area.height
+	if strut.left > 0 && inclusive_ranges_overlap(top, bottom-1, strut.left_start_y, strut.left_end_y) {
+		left = max(left, root.x+strut.left)
+	}
+	if strut.right > 0 && inclusive_ranges_overlap(top, bottom-1, strut.right_start_y, strut.right_end_y) {
+		right = min(right, root.x+root.width-strut.right)
+	}
+	if strut.top > 0 && inclusive_ranges_overlap(left, right-1, strut.top_start_x, strut.top_end_x) {
+		top = max(top, root.y+strut.top)
+	}
+	if strut.bottom > 0 && inclusive_ranges_overlap(left, right-1, strut.bottom_start_x, strut.bottom_end_x) {
+		bottom = min(bottom, root.y+root.height-strut.bottom)
+	}
+	if right <= left || bottom <= top do return area
+	return {x = left, y = top, width = right-left, height = bottom-top}
+}
+
+usable_area_from_workarea :: proc(window: ^x11.Window, monitor: Rect, root: xlib.Window) -> Rect {
 	workarea_atom := xlib.InternAtom(window.display, "_NET_WORKAREA", true)
 	desktop_atom := xlib.InternAtom(window.display, "_NET_CURRENT_DESKTOP", true)
 	if workarea_atom == 0 do return monitor

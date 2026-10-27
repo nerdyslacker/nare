@@ -34,7 +34,6 @@ build_row_commands :: proc(
 	ligatures: bool,
 	selection_state: ^selection.State = nil,
 	scrollbar: Scrollbar = {},
-	force_bold: bool = false,
 ) {
 	clear(output)
 	y := row * window.cell_h
@@ -118,7 +117,7 @@ build_row_commands :: proc(
 			column += max(1, int(current.width))
 		}
 		shaped: [dynamic]fonts.Shaped_Glyph
-		style := fonts.style_for_attributes(attributes.bold || force_bold, attributes.italic)
+		style := fonts.style_for_attributes(attributes.bold, attributes.italic)
 		if fonts.shape(font, text[:], ligatures, &shaped, style) {
 			for shaped_glyph in shaped {
 				if shaped_glyph.cluster < 0 || shaped_glyph.cluster >= len(clusters) do continue

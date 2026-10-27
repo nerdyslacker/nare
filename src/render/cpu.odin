@@ -257,7 +257,7 @@ render_row :: proc(
 	scrollbar: Scrollbar,
 ) {
 	if row*window.cell_h >= cpu.height do return
-	build_row_commands(&cpu.commands, font, window, terminal, screen, row, ligatures, selection_state, scrollbar, active_force_bold)
+	build_row_commands(&cpu.commands, font, window, terminal, screen, row, ligatures, selection_state, scrollbar)
 	for command in cpu.commands {
 		switch command.kind {
 		case .Rectangle:

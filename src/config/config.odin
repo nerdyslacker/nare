@@ -191,7 +191,6 @@ Settings :: struct {
 	italic_font: string,
 	bold_italic_font: string,
 	font_size: int,
-	font_bold: bool,
 	bold_is_bright: bool,
 	cell_width_percent: int,
 	cell_height_percent: int,
@@ -230,7 +229,6 @@ settings_init :: proc(settings: ^Settings) {
 	settings.italic_font = strings.clone("auto")
 	settings.bold_italic_font = strings.clone("auto")
 	settings.font_size = 16
-	settings.font_bold = false
 	settings.bold_is_bright = false
 	settings.cell_width_percent = 100
 	settings.cell_height_percent = 100
@@ -486,10 +484,6 @@ apply :: proc(settings: ^Settings, section, key, value: string) -> Error {
 			size := int(parsed+0.5)
 			if !ok || size < MIN_FONT_SIZE || size > MAX_FONT_SIZE do return .Invalid_Value
 			settings.font_size = size
-		case "font-bold":
-			parsed, ok := parse_bool(value)
-			if !ok do return .Invalid_Value
-			settings.font_bold = parsed
 		case "bold-is-bright":
 			parsed, ok := parse_bool(value)
 			if !ok do return .Invalid_Value
