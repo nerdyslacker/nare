@@ -211,7 +211,7 @@ Workspace_Overrides :: struct {
 
 Workspace_Font_Cache_Entry :: struct {
 	manager: fonts.Manager,
-	pixel_size: int,
+	point_size, dpi: int,
 	font, bold_font, italic_font, bold_italic_font: string,
 	cell_width_percent, cell_height_percent: int,
 	references: int,
@@ -221,10 +221,11 @@ Workspace_Font_Cache :: struct {
 	entries: [dynamic]^Workspace_Font_Cache_Entry,
 }
 
-workspace_font_cache_acquire :: proc(cache: ^Workspace_Font_Cache, settings: ^config.Settings, pixel_size: int) -> ^Workspace_Font_Cache_Entry {
+workspace_font_cache_acquire :: proc(cache: ^Workspace_Font_Cache, settings: ^config.Settings, point_size: int, dpi: f32) -> ^Workspace_Font_Cache_Entry {
 	if cache == nil || settings == nil do return nil
+	dpi_key := clamp(int(dpi+0.5), 1, 1000)
 	for entry in cache.entries {
-		if entry.pixel_size == pixel_size && entry.font == settings.font && entry.bold_font == settings.bold_font &&
+		if entry.point_size == point_size && entry.dpi == dpi_key && entry.font == settings.font && entry.bold_font == settings.bold_font &&
 		   entry.italic_font == settings.italic_font && entry.bold_italic_font == settings.bold_italic_font &&
 		   entry.cell_width_percent == settings.cell_width_percent && entry.cell_height_percent == settings.cell_height_percent {
 			entry.references += 1
@@ -233,13 +234,14 @@ workspace_font_cache_acquire :: proc(cache: ^Workspace_Font_Cache, settings: ^co
 	}
 	entry := new(Workspace_Font_Cache_Entry)
 	if fonts.init(
-		&entry.manager, settings.font, pixel_size, settings.bold_font, settings.italic_font,
-		settings.bold_italic_font, settings.cell_width_percent, settings.cell_height_percent,
+		&entry.manager, settings.font, point_size, settings.bold_font, settings.italic_font,
+		settings.bold_italic_font, settings.cell_width_percent, settings.cell_height_percent, f32(dpi_key),
 	) != .None {
 		free(entry)
 		return nil
 	}
-	entry.pixel_size = pixel_size
+	entry.point_size = point_size
+	entry.dpi = dpi_key
 	entry.font = strings.clone(settings.font)
 	entry.bold_font = strings.clone(settings.bold_font)
 	entry.italic_font = strings.clone(settings.italic_font)
@@ -343,7 +345,7 @@ workspace_init :: proc(
 	selected_font_cache := font_cache
 	if selected_font_cache == nil do selected_font_cache = &workspace.local_font_cache
 	workspace.font_cache = selected_font_cache
-	workspace.font_entry = workspace_font_cache_acquire(selected_font_cache, settings, workspace.font_size)
+	workspace.font_entry = workspace_font_cache_acquire(selected_font_cache, settings, workspace.font_size, root.dpi)
 	if workspace.font_entry == nil {
 		jobs.reporter_close(&workspace.job_reporter)
 		delete(workspace.title)
@@ -1720,7 +1722,7 @@ workspace_reload_config :: proc(workspace: ^Workspace) -> bool {
 	                  workspace.settings.cell_height_percent != fresh.cell_height_percent
 	new_entry := workspace.font_entry
 	if render_changed {
-		new_entry = workspace_font_cache_acquire(workspace.font_cache, &fresh, fresh.font_size)
+		new_entry = workspace_font_cache_acquire(workspace.font_cache, &fresh, fresh.font_size, workspace.root.dpi)
 		if new_entry == nil {
 			fmt.eprintln("nare: could not load configured fonts")
 			return false
@@ -1815,7 +1817,7 @@ event_matches :: proc(event: x11.Event, chord: string) -> bool {
 workspace_font_size :: proc(workspace: ^Workspace, size: int) {
 	new_size := clamp(size, config.MIN_FONT_SIZE, config.MAX_FONT_SIZE)
 	if new_size == workspace.font_size do return
-	new_entry := workspace_font_cache_acquire(workspace.font_cache, workspace.settings, new_size)
+	new_entry := workspace_font_cache_acquire(workspace.font_cache, workspace.settings, new_size, workspace.root.dpi)
 	if new_entry == nil do return
 	statusbar_render_cache_invalidate(&workspace.statusbar.render_cache)
 	old_entry := workspace.font_entry

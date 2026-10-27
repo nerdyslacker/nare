@@ -6,7 +6,8 @@ import "core:strings"
 import "core:unicode"
 
 DEFAULT_FAMILY :: "monospace"
-DEFAULT_PIXEL_SIZE :: 16
+DEFAULT_POINT_SIZE :: 16
+DEFAULT_DPI :: 96.0
 MAX_GLYPH_COUNT :: 2048
 MAX_GLYPH_BYTES :: 16 * 1024 * 1024
 MAX_FALLBACK_FACES :: 8
@@ -51,7 +52,8 @@ Manager :: struct {
 	glyphs: [dynamic]Glyph,
 	glyph_bytes: int,
 	clock: u64,
-	pixel_size: int,
+	point_size: int,
+	dpi: f32,
 	cell_width, cell_height: int,
 	ascent, descent: int,
 	family: string,
@@ -60,17 +62,19 @@ Manager :: struct {
 init :: proc(
 	manager: ^Manager,
 	family: string = DEFAULT_FAMILY,
-	pixel_size: int = DEFAULT_PIXEL_SIZE,
+	point_size: int = DEFAULT_POINT_SIZE,
 	bold_family: string = "auto",
 	italic_family: string = "auto",
 	bold_italic_family: string = "auto",
 	cell_width_percent: int = 100,
 	cell_height_percent: int = 100,
+	dpi: f32 = DEFAULT_DPI,
 ) -> Error {
-	if pixel_size <= 0 do return .Size
+	if point_size <= 0 || dpi <= 0 do return .Size
 	manager.config = FcInitLoadConfigAndFonts()
 	if manager.config == nil do return .Fontconfig
-	manager.pixel_size = pixel_size
+	manager.point_size = point_size
+	manager.dpi = dpi
 	manager.family = strings.clone(family)
 	if FT_Init_FreeType(&manager.library) != 0 {
 		destroy(manager)
@@ -151,7 +155,12 @@ load_face :: proc(manager: ^Manager, query: string) -> (result: Font_Face, ok: b
 	face_index: c.int
 	_ = FcPatternGetInteger(match, "index", 0, &face_index)
 	if FT_New_Face(manager.library, cstring(path), c.long(face_index), &result.face) != 0 do return
-	if FT_Set_Pixel_Sizes(result.face, 0, c.uint(manager.pixel_size)) != 0 {
+	// Configuration uses typographic points, like Kitty and other desktop apps.
+	// FreeType expects the point size in 26.6 units and resolves it at the
+	// display DPI (13 pt at 96 DPI is about 17 physical pixels).
+	point_height := c.long(manager.point_size*64)
+	face_dpi := c.uint(clamp(int(manager.dpi+0.5), 1, 1000))
+	if FT_Set_Char_Size(result.face, 0, point_height, face_dpi, face_dpi) != 0 {
 		_ = FT_Done_Face(result.face)
 		result.face = nil
 		return

@@ -62,7 +62,7 @@ init :: proc(
 	kind: Kind,
 	ligatures: bool = true,
 	family: string = fonts.DEFAULT_FAMILY,
-	pixel_size: int = fonts.DEFAULT_PIXEL_SIZE,
+	point_size: int = fonts.DEFAULT_POINT_SIZE,
 	force_bold: bool = false,
 	bold_family: string = "auto",
 	italic_family: string = "auto",
@@ -74,7 +74,10 @@ init :: proc(
 	if shared_font != nil {
 		renderer.font = shared_font
 	} else {
-		font_error := fonts.init(&renderer.owned_font, family, pixel_size, bold_family, italic_family, bold_italic_family, cell_width_percent, cell_height_percent)
+		font_error := fonts.init(
+			&renderer.owned_font, family, point_size, bold_family, italic_family, bold_italic_family,
+			cell_width_percent, cell_height_percent, window.dpi,
+		)
 		if font_error != .None do return .Font
 		renderer.font = &renderer.owned_font
 		renderer.owns_font = true

@@ -116,7 +116,7 @@ foreign freetype {
 	FT_Done_FreeType :: proc(library: FT_Library) -> c.int ---
 	FT_New_Face :: proc(library: FT_Library, path: cstring, face_index: c.long, face: ^FT_Face) -> c.int ---
 	FT_Done_Face :: proc(face: FT_Face) -> c.int ---
-	FT_Set_Pixel_Sizes :: proc(face: FT_Face, width, height: c.uint) -> c.int ---
+	FT_Set_Char_Size :: proc(face: FT_Face, width, height: c.long, horizontal_dpi, vertical_dpi: c.uint) -> c.int ---
 	FT_Get_Char_Index :: proc(face: FT_Face, codepoint: c.ulong) -> c.uint ---
 	FT_Load_Glyph :: proc(face: FT_Face, glyph_index: c.uint, flags: c.int) -> c.int ---
 }
