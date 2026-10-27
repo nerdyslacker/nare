@@ -102,6 +102,8 @@ Statusbar_Settings :: struct {
 	background, foreground, accent: u32,
 	module_styles: [STATUS_MODULE_COUNT]Status_Module_Style,
 	resource_cpu_label, resource_ram_label, resource_storage_label: string,
+	cwd_full_path: bool,
+	cwd_depth_marker: string,
 	clock_format: string,
 	jobs: Statusbar_Jobs_Settings,
 	auto_hide_delay_ms: int,
@@ -310,6 +312,8 @@ settings_init :: proc(settings: ^Settings) {
 	settings.statusbar.module_styles[int(Status_Module.Battery)].label = strings.clone("BAT")
 	settings.statusbar.module_styles[int(Status_Module.Clock)].label = strings.clone("")
 	settings.statusbar.module_styles[int(Status_Module.Jobs)].label = strings.clone("")
+	settings.statusbar.cwd_full_path = true
+	settings.statusbar.cwd_depth_marker = strings.clone("..")
 	settings.statusbar.resource_cpu_label = strings.clone("CPU")
 	settings.statusbar.resource_ram_label = strings.clone("RAM")
 	settings.statusbar.resource_storage_label = strings.clone("STORAGE")
@@ -354,6 +358,7 @@ settings_destroy :: proc(settings: ^Settings) {
 	delete(settings.statusbar.resource_cpu_label)
 	delete(settings.statusbar.resource_ram_label)
 	delete(settings.statusbar.resource_storage_label)
+	delete(settings.statusbar.cwd_depth_marker)
 	for &style in settings.statusbar.module_styles do delete(style.label)
 	delete(settings.tmux.explicit_ssh_host)
 	destroy_bindings(&settings.bindings)
@@ -816,6 +821,14 @@ apply :: proc(settings: ^Settings, section, key, value: string) -> Error {
 		module, _ := status_module_from_name(section[len("statusbar."):])
 		style := &settings.statusbar.module_styles[int(module)]
 		switch key {
+		case "full-path":
+			if module != .Cwd do return .Unknown_Key
+			parsed, ok := parse_bool(value); if !ok do return .Invalid_Value
+			settings.statusbar.cwd_full_path = parsed
+		case "depth-marker":
+			if module != .Cwd do return .Unknown_Key
+			parsed, ok := parse_string(value); if !ok || len(parsed) == 0 || len(parsed) > 32 do return .Invalid_Value
+			replace_string(&settings.statusbar.cwd_depth_marker, parsed)
 		case "label":
 			parsed, ok := parse_string(value); if !ok || len(parsed) > 64 do return .Invalid_Value
 			replace_string(&style.label, parsed)

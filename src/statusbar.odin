@@ -626,28 +626,29 @@ statusbar_update_cwd :: proc(workspace: ^Workspace) -> bool {
 	tab := workspace_active_tab(workspace)
 	pane := workspace_active_pane(workspace)
 	state.cwd_pane = pane
-	if tab == nil || pane == nil do return statusbar_set_cwd(state, "", false)
+	if tab == nil || pane == nil do return statusbar_set_cwd(workspace, "", false)
 	owner := pane_tmux_owner(pane)
 	remote := owner != nil && owner.remote_host != ""
 
 	if tab_is_tmux(tab) {
 		if info := workspace_tmux_pane_info(tab.tmux_owner, pane.tmux_pane_id); info != nil && len(info.current_path) > 0 {
 			pane.terminal.cwd_changed = false
-			return statusbar_set_cwd(state, string(info.current_path[:]), !remote)
+			return statusbar_set_cwd(workspace, string(info.current_path[:]), !remote)
 		}
 	}
 	if pane.terminal.cwd_path != "" {
 		pane.terminal.cwd_changed = false
-		return statusbar_set_cwd(state, pane.terminal.cwd_path, !remote)
+		return statusbar_set_cwd(workspace, pane.terminal.cwd_path, !remote)
 	}
-	if remote do return statusbar_set_cwd(state, "", false)
+	if remote do return statusbar_set_cwd(workspace, "", false)
 	cwd, ok := pty.foreground_cwd(&pane.process)
-	if !ok do return statusbar_set_cwd(state, "", false)
+	if !ok do return statusbar_set_cwd(workspace, "", false)
 	defer delete(cwd)
-	return statusbar_set_cwd(state, cwd, true)
+	return statusbar_set_cwd(workspace, cwd, true)
 }
 
-statusbar_set_cwd :: proc(state: ^Statusbar_State, value: string, local: bool) -> bool {
+statusbar_set_cwd :: proc(workspace: ^Workspace, value: string, local: bool) -> bool {
+	state := &workspace.statusbar
 	display_value := value
 	if local && value != "" {
 		home := os.get_env("HOME", context.temp_allocator)
@@ -658,12 +659,58 @@ statusbar_set_cwd :: proc(state: ^Statusbar_State, value: string, local: bool) -
 			display_value = fmt.tprintf("~%s", value[len(home):])
 		}
 	}
+	if !workspace.settings.statusbar.cwd_full_path do display_value = statusbar_compact_cwd(display_value, workspace.settings.statusbar.cwd_depth_marker)
 	changed := statusbar_replace(&state.cwd, statusbar_sanitize(display_value))
 	source := value
 	if len(source) > MAX_STATUSBAR_CWD_BYTES do source = ""
 	if state.cwd_source != source do config.replace_string(&state.cwd_source, source)
 	state.cwd_local = local && source != ""
 	return changed
+}
+
+statusbar_compact_cwd :: proc(value, marker: string) -> string {
+	if value == "" || marker == "" do return value
+	home_relative := value == "~" || strings.has_prefix(value, "~/")
+	absolute := !home_relative && value[0] == '/'
+	start := 0
+	anchor := ""
+	if home_relative {
+		anchor = "~"
+		if value == "~" do return value
+		start = 2
+	} else if absolute {
+		start = 1
+	}
+	components := make([dynamic]string, 0, 8, context.temp_allocator)
+	remaining := value[start:]
+	for remaining != "" {
+		separator := strings.index_byte(remaining, '/')
+		component := remaining
+		if separator >= 0 {
+			component = remaining[:separator]
+			remaining = remaining[separator+1:]
+		} else {
+			remaining = ""
+		}
+		if component != "" do append(&components, component)
+	}
+	if home_relative {
+		if len(components) <= 1 do return value
+	} else {
+		if len(components) <= 2 do return value
+		anchor = fmt.tprintf("%s%s", "/" if absolute else "", components[0])
+	}
+	current := components[len(components)-1]
+	omitted := len(components)-1 if home_relative else len(components)-2
+	output := make([dynamic]byte, 0, len(anchor)+len(current)+min(2, omitted)*(len(marker)+1)+1, context.temp_allocator)
+	append(&output, ..transmute([]byte)anchor)
+	for _ in 0..<min(2, omitted) {
+		append(&output, '/')
+		append(&output, ..transmute([]byte)marker)
+	}
+	append(&output, '/')
+	append(&output, ..transmute([]byte)current)
+	return string(output[:])
 }
 
 statusbar_collect_command :: proc(pid: int) -> string {
