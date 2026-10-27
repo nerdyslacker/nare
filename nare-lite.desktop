@@ -1,0 +1,13 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=nare-lite
+GenericName=Terminal emulator
+Comment=Lightweight software-rendered terminal emulator
+TryExec=nare-lite
+StartupNotify=true
+Terminal=false
+Exec=nare-lite %f
+Icon=nare-lite
+Categories=System;TerminalEmulator;
+MimeType=inode/directory;

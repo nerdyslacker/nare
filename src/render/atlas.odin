@@ -1,7 +1,10 @@
 package render
 
-ATLAS_WIDTH :: 2048
-ATLAS_HEIGHT :: 2048
+// A 2048x2048 RGBA atlas reserved 16 MiB for every pane, including an idle
+// shell. 1024x1024 still holds the 2,048-entry cap for normal terminal glyphs;
+// unusually large glyph sets use the existing safe reset/reupload path.
+ATLAS_WIDTH :: 1024
+ATLAS_HEIGHT :: 1024
 ATLAS_PADDING :: 1
 MAX_ATLAS_GLYPHS :: 2048
 

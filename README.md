@@ -53,7 +53,7 @@ make
 ./build/nare
 ```
 
-`nare` uses OpenGL when available and falls back to CPU rendering. `make cpu` builds the optional no-OpenGL `build/nare-cpu` binary.
+`nare` uses OpenGL when available and falls back to CPU rendering. `make cpu` builds the optional no-OpenGL `build/nare-lite` binary.
 
 Configuration is loaded from `$XDG_CONFIG_HOME/nare/nare.conf`, or `~/.config/nare/nare.conf`. Copy [nare.conf](nare.conf) as a starting point; command-line options override it.
 
