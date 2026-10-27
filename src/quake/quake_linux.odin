@@ -229,10 +229,10 @@ service :: proc(controller: ^Controller) -> bool {
 			controller.focus_loss_pending = false
 		} else if !x11.pointer_button_down(controller.window) {
 			if controller.options.hide_on_focus_loss do request(controller, .Hide)
-			else {
+			else if x11.focused_window_is_override_redirect(controller.window) {
 				x11.lower_top_level(controller.window)
-				controller.focus_loss_pending = false
 			}
+			controller.focus_loss_pending = false
 		}
 	}
 	return true
@@ -358,32 +358,139 @@ selected_monitor :: proc(window: ^x11.Window, selector: string) -> Rect {
 usable_area :: proc(window: ^x11.Window, monitor: Rect) -> Rect {
 	screen := xlib.DefaultScreen(window.display)
 	root := xlib.RootWindow(window.display, screen)
+	previous_handler := xlib.SetErrorHandler(ignore_work_area_query_error)
+	defer {
+		_ = xlib.Sync(window.display, false)
+		_ = xlib.SetErrorHandler(previous_handler)
+	}
 	strut_atom := xlib.InternAtom(window.display, "_NET_WM_STRUT_PARTIAL", true)
-	if strut_atom != 0 {
-		root_geometry := Rect{
-			width = int(xlib.DisplayWidth(window.display, screen)),
-			height = int(xlib.DisplayHeight(window.display, screen)),
-		}
-		area := monitor
-		found := false
-		root_return, parent_return: xlib.Window
-		children: [^]xlib.Window
-		child_count: u32
-		if xlib.QueryTree(window.display, root, &root_return, &parent_return, &children, &child_count) == .Success {
-			defer if children != nil do xlib.Free(children)
-			for index in 0..<int(child_count) {
-				strut, ok := window_strut_partial(window.display, children[index], strut_atom)
-				if !ok do continue
+	type_atom := xlib.InternAtom(window.display, "_NET_WM_WINDOW_TYPE", true)
+	dock_atom := xlib.InternAtom(window.display, "_NET_WM_WINDOW_TYPE_DOCK", true)
+	root_geometry := Rect{
+		width = int(xlib.DisplayWidth(window.display, screen)),
+		height = int(xlib.DisplayHeight(window.display, screen)),
+	}
+	area, found := collect_work_area_reservations(
+		window.display, root, root, monitor, monitor, root_geometry,
+		strut_atom, type_atom, dock_atom, 0,
+	)
+	// EWMH work areas are desktop-wide, so they cannot identify which output
+	// owns an XFCE panel. Dock windows and partial struts remain monitor-local.
+	if found || connected_monitor_count(window, root) > 1 do return area
+	return usable_area_from_workarea(window, monitor, root)
+}
+
+ignore_work_area_query_error :: proc "c" (_: ^xlib.Display, _: ^xlib.XErrorEvent) -> i32 {
+	return 0
+}
+
+collect_work_area_reservations :: proc(
+	display: ^xlib.Display,
+	root, parent: xlib.Window,
+	monitor, area, root_geometry: Rect,
+	strut_atom, type_atom, dock_atom: xlib.Atom,
+	depth: int,
+) -> (Rect, bool) {
+	if depth > 3 do return area, false
+	result := area
+	root_return, parent_return: xlib.Window
+	children: [^]xlib.Window
+	child_count: u32
+	if xlib.QueryTree(display, parent, &root_return, &parent_return, &children, &child_count) != .Success {
+		return area, false
+	}
+	defer if children != nil do xlib.Free(children)
+	found := false
+	for index in 0..<int(child_count) {
+		child := children[index]
+		if strut_atom != 0 {
+			if strut, ok := window_strut_partial(display, child, strut_atom); ok {
+				result = apply_strut_partial(result, root_geometry, strut)
 				found = true
-				area = apply_strut_partial(area, root_geometry, strut)
 			}
 		}
-		// _NET_WORKAREA is desktop-wide and can incorrectly reserve one
-		// monitor's panel on every output. Once partial struts are available,
-		// they are the authoritative per-monitor usable area.
-		if found do return area
+		if type_atom != 0 && dock_atom != 0 && window_has_atom(display, child, type_atom, dock_atom) {
+			if dock, ok := root_window_geometry(display, root, child); ok {
+				result = apply_dock_geometry(result, monitor, dock)
+				found = true
+			}
+		}
+		nested_area, nested_found := collect_work_area_reservations(
+			display, root, child, monitor, result, root_geometry,
+			strut_atom, type_atom, dock_atom, depth+1,
+		)
+		result = nested_area
+		found = found || nested_found
 	}
-	return usable_area_from_workarea(window, monitor, root)
+	return result, found
+}
+
+window_has_atom :: proc(display: ^xlib.Display, window: xlib.Window, property, expected: xlib.Atom) -> bool {
+	actual: xlib.Atom
+	format: i32
+	count, after: uint
+	data: rawptr
+	if xlib.GetWindowProperty(display, window, property, 0, 32, false, xlib.XA_ATOM, &actual, &format, &count, &after, &data) != 0 || data == nil {
+		return false
+	}
+	defer xlib.Free(data)
+	if actual != xlib.XA_ATOM || format != 32 do return false
+	values := ([^]xlib.Atom)(data)
+	for index in 0..<int(count) {
+		if values[index] == expected do return true
+	}
+	return false
+}
+
+root_window_geometry :: proc(display: ^xlib.Display, root, window: xlib.Window) -> (Rect, bool) {
+	attributes: xlib.XWindowAttributes
+	if xlib.GetWindowAttributes(display, window, &attributes) == 0 || attributes.map_state != .IsViewable {
+		return {}, false
+	}
+	x, y: i32
+	child: xlib.Window
+	if !xlib.TranslateCoordinates(display, window, root, 0, 0, &x, &y, &child) do return {}, false
+	return {x = int(x), y = int(y), width = int(attributes.width), height = int(attributes.height)}, true
+}
+
+apply_dock_geometry :: proc(area, monitor, dock: Rect) -> Rect {
+	if area.width <= 0 || area.height <= 0 || dock.width <= 0 || dock.height <= 0 do return area
+	intersection_left := max(monitor.x, dock.x)
+	intersection_top := max(monitor.y, dock.y)
+	intersection_right := min(monitor.x+monitor.width, dock.x+dock.width)
+	intersection_bottom := min(monitor.y+monitor.height, dock.y+dock.height)
+	if intersection_right <= intersection_left || intersection_bottom <= intersection_top do return area
+	left, top := area.x, area.y
+	right, bottom := area.x+area.width, area.y+area.height
+	if dock.width >= dock.height {
+		if dock.y <= monitor.y && dock.y+dock.height > monitor.y {
+			top = max(top, intersection_bottom)
+		} else if dock.y < monitor.y+monitor.height && dock.y+dock.height >= monitor.y+monitor.height {
+			bottom = min(bottom, intersection_top)
+		}
+	} else {
+		if dock.x <= monitor.x && dock.x+dock.width > monitor.x {
+			left = max(left, intersection_right)
+		} else if dock.x < monitor.x+monitor.width && dock.x+dock.width >= monitor.x+monitor.width {
+			right = min(right, intersection_left)
+		}
+	}
+	if right <= left || bottom <= top do return area
+	return {x = left, y = top, width = right-left, height = bottom-top}
+}
+
+connected_monitor_count :: proc(window: ^x11.Window, root: xlib.Window) -> int {
+	resources := xlib.XRRGetScreenResources(window.display, root)
+	if resources == nil do return 1
+	defer xlib.XRRFreeScreenResources(resources)
+	count := 0
+	for index in 0..<int(resources.noutput) {
+		info := xlib.XRRGetOutputInfo(window.display, resources, resources.outputs[index])
+		if info == nil do continue
+		if info.connection == .RR_Connected && info.crtc != 0 do count += 1
+		xlib.XRRFreeOutputInfo(info)
+	}
+	return count
 }
 
 window_strut_partial :: proc(display: ^xlib.Display, window: xlib.Window, property: xlib.Atom) -> (Strut_Partial, bool) {

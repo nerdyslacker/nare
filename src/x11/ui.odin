@@ -90,6 +90,21 @@ focus_within :: proc(window: ^Window) -> bool {
 	return false
 }
 
+focused_window_is_override_redirect :: proc(window: ^Window) -> bool {
+	if window == nil || window.display == nil || window.id == 0 do return false
+	previous_handler := xlib.SetErrorHandler(ignore_rule_lookup_error)
+	defer {
+		_ = xlib.Sync(window.display, false)
+		_ = xlib.SetErrorHandler(previous_handler)
+	}
+	focused: xlib.Window
+	revert: xlib.FocusRevert
+	xlib.GetInputFocus(window.display, &focused, &revert)
+	if focused == 0 || focused == window.id do return false
+	attributes: xlib.XWindowAttributes
+	return xlib.GetWindowAttributes(window.display, focused, &attributes) != 0 && attributes.override_redirect == true
+}
+
 pointer_button_down :: proc(window: ^Window) -> bool {
 	root, child: xlib.Window
 	root_x, root_y, x, y: i32
