@@ -22,7 +22,10 @@ Font_Face :: struct {
 	hb_font: ^HB_Font,
 }
 
-Fallback_Face :: struct { font: Font_Face }
+Fallback_Face :: struct {
+	font: Font_Face,
+	emoji: bool,
+}
 
 Glyph :: struct {
 	face_id: int,
@@ -163,9 +166,11 @@ load_face :: proc(manager: ^Manager, query: string) -> (result: Font_Face, ok: b
 	point_height := c.long(manager.point_size*64)
 	face_dpi := c.uint(clamp(int(manager.dpi+0.5), 1, 1000))
 	if FT_Set_Char_Size(result.face, 0, point_height, face_dpi, face_dpi) != 0 {
-		_ = FT_Done_Face(result.face)
-		result.face = nil
-		return
+		if !select_nearest_fixed_size(result.face, manager.point_size, manager.dpi) {
+			_ = FT_Done_Face(result.face)
+			result.face = nil
+			return
+		}
 	}
 	result.hb_font = hb_ft_font_create_referenced(result.face)
 	if result.hb_font == nil {
@@ -174,6 +179,21 @@ load_face :: proc(manager: ^Manager, query: string) -> (result: Font_Face, ok: b
 		return
 	}
 	return result, true
+}
+
+select_nearest_fixed_size :: proc(face: FT_Face, point_size: int, dpi: f32) -> bool {
+	if face == nil || face.num_fixed_sizes <= 0 || face.available_sizes == nil do return false
+	target := max(1, int(f32(point_size)*dpi/72+0.5))
+	best := 0
+	best_distance := max(int)
+	for index in 0..<int(face.num_fixed_sizes) {
+		size := ([^]FT_Bitmap_Size)(face.available_sizes)[index]
+		pixels := int((size.y_ppem+32)/64)
+		if pixels <= 0 do pixels = int(size.height)
+		distance := abs(pixels-target)
+		if distance < best_distance do best, best_distance = index, distance
+	}
+	return FT_Select_Size(face, c.int(best)) == 0
 }
 
 style_for_attributes :: proc(bold, italic: bool) -> Style {
@@ -214,29 +234,83 @@ glyph_for_codepoint :: proc(manager: ^Manager, codepoint: rune, style: Style = .
 }
 
 resolve_face :: proc(manager: ^Manager, codepoint: rune, style: Style) -> int {
+	if emoji_default_presentation(codepoint) do return resolve_emoji_face(manager, codepoint, style)
+	return resolve_text_face(manager, codepoint, style)
+}
+
+resolve_text_face :: proc(manager: ^Manager, codepoint: rune, style: Style) -> int {
 	face_id := primary_face_id(manager, style)
 	face := face_for_id(manager, face_id)
 	if FT_Get_Char_Index(face.face, c.ulong(codepoint)) != 0 do return face_id
 	for &fallback, index in manager.fallbacks {
 		if FT_Get_Char_Index(fallback.font.face, c.ulong(codepoint)) != 0 do return PRIMARY_FACE_COUNT+index
 	}
-	if len(manager.fallbacks) < MAX_FALLBACK_FACES && load_fallback(manager, codepoint) {
+	if len(manager.fallbacks) < MAX_FALLBACK_FACES && load_fallback(manager, codepoint, false) {
 		return PRIMARY_FACE_COUNT+len(manager.fallbacks)-1
 	}
 	return face_id
 }
 
-load_fallback :: proc(manager: ^Manager, codepoint: rune) -> bool {
-	query := fmt.aprintf(":charset=%x", codepoint)
+resolve_emoji_face :: proc(manager: ^Manager, codepoint: rune, style: Style) -> int {
+	for &fallback, index in manager.fallbacks {
+		if fallback.emoji && FT_Get_Char_Index(fallback.font.face, c.ulong(codepoint)) != 0 {
+			return PRIMARY_FACE_COUNT+index
+		}
+	}
+	if len(manager.fallbacks) < MAX_FALLBACK_FACES && load_fallback(manager, codepoint, true) {
+		return PRIMARY_FACE_COUNT+len(manager.fallbacks)-1
+	}
+	return resolve_text_face(manager, codepoint, style)
+}
+
+load_fallback :: proc(manager: ^Manager, codepoint: rune, emoji: bool) -> bool {
+	query := fmt.aprintf("emoji:charset=%x", codepoint) if emoji else fmt.aprintf("monospace:charset=%x", codepoint)
 	defer delete(query)
 	face, ok := load_face(manager, query)
 	if !ok do return false
-	if !fit_fallback_face(manager, &face) {
+	// Color emoji fonts commonly expose a large bitmap strike. Keep its
+	// native face size for shaping and scale the rendered BGRA bitmap into
+	// the terminal's two-cell box when it enters the glyph cache.
+	if !emoji && !fit_fallback_face(manager, &face) {
 		destroy_face(&face)
 		return false
 	}
-	append(&manager.fallbacks, Fallback_Face{font = face})
+	append(&manager.fallbacks, Fallback_Face{font = face, emoji = emoji})
 	return true
+}
+
+emoji_default_presentation :: proc(codepoint: rune) -> bool {
+	return codepoint >= 0x1f000 && codepoint <= 0x1faff ||
+	       codepoint >= 0x1f1e6 && codepoint <= 0x1f1ff ||
+	       codepoint == 0x231a || codepoint == 0x231b ||
+	       codepoint >= 0x23e9 && codepoint <= 0x23ec ||
+	       codepoint == 0x23f0 || codepoint == 0x23f3 ||
+	       codepoint >= 0x25fd && codepoint <= 0x25fe ||
+	       codepoint >= 0x2614 && codepoint <= 0x2615 ||
+	       codepoint >= 0x2648 && codepoint <= 0x2653 ||
+	       codepoint == 0x267f || codepoint == 0x2693 || codepoint == 0x26a1 ||
+	       codepoint >= 0x26aa && codepoint <= 0x26ab ||
+	       codepoint >= 0x26bd && codepoint <= 0x26be ||
+	       codepoint >= 0x26c4 && codepoint <= 0x26c5 || codepoint == 0x26ce ||
+	       codepoint == 0x26d4 || codepoint == 0x26ea ||
+	       codepoint >= 0x26f2 && codepoint <= 0x26f3 || codepoint == 0x26f5 ||
+	       codepoint == 0x26fa || codepoint == 0x26fd || codepoint == 0x2705 ||
+	       codepoint >= 0x270a && codepoint <= 0x270b || codepoint == 0x2728 ||
+	       codepoint == 0x274c || codepoint == 0x274e ||
+	       codepoint >= 0x2753 && codepoint <= 0x2755 || codepoint == 0x2757 ||
+	       codepoint >= 0x2795 && codepoint <= 0x2797 || codepoint == 0x27b0 || codepoint == 0x27bf
+}
+
+emoji_sequence_component :: proc(codepoint: rune) -> bool {
+	return codepoint == 0x200d || codepoint == 0xfe0e || codepoint == 0xfe0f || codepoint == 0x20e3 ||
+	       codepoint >= 0x1f3fb && codepoint <= 0x1f3ff ||
+	       codepoint >= 0xe0020 && codepoint <= 0xe007f
+}
+
+emoji_presentation_at :: proc(text: []rune, index: int) -> bool {
+	if index < 0 || index >= len(text) do return false
+	if emoji_default_presentation(text[index]) do return true
+	return index+1 < len(text) && text[index+1] == 0xfe0f
 }
 
 fit_fallback_face :: proc(manager: ^Manager, face: ^Font_Face) -> bool {
@@ -275,7 +349,21 @@ cache_glyph :: proc(manager: ^Manager, face_id: int, index: u32) -> bool {
 	slot := font_face.face.glyph
 	bitmap := &slot.bitmap
 	channels := 4 if bitmap.pixel_mode == FT_PIXEL_MODE_BGRA else 1
-	size := int(bitmap.width)*int(bitmap.rows)*channels
+	source_width := int(bitmap.width)
+	source_height := int(bitmap.rows)
+	width, height := source_width, source_height
+	if channels == 4 && source_width > 0 && source_height > 0 {
+		max_width := max(1, manager.cell_width*2)
+		max_height := max(1, manager.cell_height)
+		if source_width*max_height > source_height*max_width {
+			width = min(source_width, max_width)
+			height = max(1, source_height*width/source_width)
+		} else {
+			height = min(source_height, max_height)
+			width = max(1, source_width*height/source_height)
+		}
+	}
+	size := width*height*channels
 	if size > MAX_GLYPH_BYTES do return false
 	for len(manager.glyphs) >= MAX_GLYPH_COUNT || manager.glyph_bytes+size > MAX_GLYPH_BYTES {
 		if len(manager.glyphs) == 0 do return false
@@ -284,8 +372,8 @@ cache_glyph :: proc(manager: ^Manager, face_id: int, index: u32) -> bool {
 	entry := Glyph{
 		face_id = face_id,
 		index = index,
-		width = int(bitmap.width),
-		height = int(bitmap.rows),
+		width = width,
+		height = height,
 		left = int(slot.bitmap_left),
 		top = int(slot.bitmap_top),
 		advance = int((slot.advance.x+32)/64),
@@ -293,25 +381,62 @@ cache_glyph :: proc(manager: ^Manager, face_id: int, index: u32) -> bool {
 		pixels = make([]u8, size),
 		last_use = manager.clock,
 	}
+	if channels == 4 {
+		entry.left = max(0, (manager.cell_width*2-entry.width)/2)
+		entry.top = manager.ascent-(manager.cell_height-entry.height)/2
+	}
 	if bitmap.buffer != nil {
 		pitch := int(bitmap.pitch)
-		for row in 0..<entry.height {
-			source_row := row if pitch >= 0 else entry.height-row-1
-			source := bitmap.buffer[source_row*abs(pitch):]
-			if bitmap.pixel_mode == FT_PIXEL_MODE_MONO {
-				for column in 0..<entry.width {
-					bit := u8(0x80 >> u32(column&7))
-					entry.pixels[row*entry.width+column] = 255 if source[column/8]&bit != 0 else 0
+		if channels == 4 && (entry.width != source_width || entry.height != source_height) {
+			resample_bgra(entry.pixels, entry.width, entry.height, bitmap.buffer, source_width, source_height, pitch)
+		} else {
+			for row in 0..<entry.height {
+				source_row := row if pitch >= 0 else source_height-row-1
+				source := bitmap.buffer[source_row*abs(pitch):]
+				if bitmap.pixel_mode == FT_PIXEL_MODE_MONO {
+					for column in 0..<entry.width {
+						bit := u8(0x80 >> u32(column&7))
+						entry.pixels[row*entry.width+column] = 255 if source[column/8]&bit != 0 else 0
+					}
+				} else {
+					row_bytes := entry.width*channels
+					copy(entry.pixels[row*row_bytes:(row+1)*row_bytes], source[:row_bytes])
 				}
-			} else {
-				row_bytes := entry.width*channels
-				copy(entry.pixels[row*row_bytes:(row+1)*row_bytes], source[:row_bytes])
 			}
 		}
 	}
 	manager.glyph_bytes += size
 	append(&manager.glyphs, entry)
 	return true
+}
+
+resample_bgra :: proc(
+	destination: []u8,
+	width, height: int,
+	source: [^]u8,
+	source_width, source_height, source_pitch: int,
+) {
+	if len(destination) < width*height*4 || source == nil || source_width <= 0 || source_height <= 0 do return
+	pitch := abs(source_pitch)
+	for y in 0..<height {
+		source_y_fixed := clamp(((2*y+1)*source_height*256)/(2*height)-128, 0, (source_height-1)*256)
+		y0 := source_y_fixed/256
+		y1 := min(source_height-1, y0+1)
+		fy := source_y_fixed&255
+		row0 := y0 if source_pitch >= 0 else source_height-y0-1
+		row1 := y1 if source_pitch >= 0 else source_height-y1-1
+		for x in 0..<width {
+			source_x_fixed := clamp(((2*x+1)*source_width*256)/(2*width)-128, 0, (source_width-1)*256)
+			x0 := source_x_fixed/256
+			x1 := min(source_width-1, x0+1)
+			fx := source_x_fixed&255
+			for channel in 0..<4 {
+				top := (int(source[row0*pitch+x0*4+channel])*(256-fx)+int(source[row0*pitch+x1*4+channel])*fx+128)/256
+				bottom := (int(source[row1*pitch+x0*4+channel])*(256-fx)+int(source[row1*pitch+x1*4+channel])*fx+128)/256
+				destination[(y*width+x)*4+channel] = u8((top*(256-fy)+bottom*fy+128)/256)
+			}
+		}
+	}
 }
 
 evict_oldest :: proc(manager: ^Manager) {
@@ -335,10 +460,19 @@ shape :: proc(
 	if len(text) == 0 do return true
 	run_start := 0
 	for run_start < len(text) {
-		face_id := resolve_face(manager, text[run_start], style)
+		emoji_run := emoji_presentation_at(text, run_start)
+		face_id := resolve_emoji_face(manager, text[run_start], style) if emoji_run else resolve_face(manager, text[run_start], style)
 		face := face_for_id(manager, face_id)
 		run_end := run_start+1
 		for run_end < len(text) {
+			if emoji_run {
+				if emoji_sequence_component(text[run_end]) || emoji_default_presentation(text[run_end]) ||
+				   text[run_end-1] == 0x200d {
+					run_end += 1
+					continue
+				}
+				break
+			}
 			if unicode.is_combining(text[run_end]) && FT_Get_Char_Index(face.face, c.ulong(text[run_end])) != 0 {
 				run_end += 1
 				continue
@@ -367,9 +501,14 @@ shape_segment :: proc(
 	hb_buffer_reset(manager.hb_buffer)
 	hb_buffer_add_utf32(manager.hb_buffer, raw_data(codepoints), c.int(len(codepoints)), 0, c.int(len(codepoints)))
 	hb_buffer_guess_segment_properties(manager.hb_buffer)
-	features := [2]HB_Feature{
+	features := [4]HB_Feature{
 		{tag = tag('l', 'i', 'g', 'a'), value = 1 if ligatures else 0, end = max(u32)},
 		{tag = tag('c', 'a', 'l', 't'), value = 1 if ligatures else 0, end = max(u32)},
+		// Emoji ZWJ and presentation sequences rely on required ligatures and
+		// canonical composition independently of the user's text-ligature
+		// preference.
+		{tag = tag('r', 'l', 'i', 'g'), value = 1, end = max(u32)},
+		{tag = tag('c', 'c', 'm', 'p'), value = 1, end = max(u32)},
 	}
 	hb_shape(face.hb_font, manager.hb_buffer, &features[0], len(features))
 	count: c.uint

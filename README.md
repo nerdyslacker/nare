@@ -44,7 +44,7 @@ sudo xbps-install -S base-devel libX11-devel libXrandr-devel fontconfig-devel fr
 
 Install Odin `dev-2026-10` separately and make sure `odin` is in `PATH`.
 
-The binary requires `libX11 libXrandr fontconfig freetype libharfbuzz libglvnd`. A usable font is required (`dejavu-fonts-ttf` is a small default), `xdg-utils` enables the default URL opener, and `git` optionally enables complete status-bar repository state detection.
+The binary requires `libX11 libXrandr fontconfig freetype libharfbuzz libglvnd`. A usable font is required (`dejavu-fonts-ttf` is a small default); install `noto-fonts-emoji` for color emoji. `xdg-utils` enables the default URL opener, and `git` optionally enables complete status-bar repository state detection.
 
 Build and run:
 

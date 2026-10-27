@@ -121,6 +121,14 @@ request :: proc(controller: ^Controller, command: Command, take_focus: bool = tr
 	if controller == nil || controller.window == nil do return
 	switch command {
 	case .Show, .Focus:
+		// "focused" means the pointer's monitor when a hidden quake window is
+		// opened. Once visible, focus/show requests must not make it follow the
+		// pointer to another output.
+		if controller.state == .Visible || controller.state == .Showing {
+			x11.show_top_level(controller.window, take_focus)
+			controller.focus_loss_pending = false
+			return
+		}
 		controller.geometry = monitor_geometry(controller.window, controller.options)
 		if slide_enabled(controller) {
 			from_y := controller.window.y
@@ -167,7 +175,7 @@ next_state :: proc(state: State, command: Command) -> State {
 }
 
 note_focus :: proc(controller: ^Controller, focused: bool) {
-	if controller == nil || !controller.options.hide_on_focus_loss || controller.state != .Visible do return
+	if controller == nil || controller.state != .Visible do return
 	if focused {
 		controller.focus_loss_pending = false
 	} else {
@@ -198,7 +206,7 @@ service :: proc(controller: ^Controller) -> bool {
 		unordered_remove(&controller.clients, index)
 	}
 	service_animation(controller)
-	if controller.state == .Visible && time.since(controller.last_geometry_check) >= GEOMETRY_CHECK_INTERVAL {
+	if controller.state == .Visible && controller.options.monitor != "focused" && time.since(controller.last_geometry_check) >= GEOMETRY_CHECK_INTERVAL {
 		controller.last_geometry_check = time.now()
 		geometry := monitor_geometry(controller.window, controller.options)
 		if geometry != controller.geometry {
@@ -210,7 +218,11 @@ service :: proc(controller: ^Controller) -> bool {
 		if x11.focus_within(controller.window) {
 			controller.focus_loss_pending = false
 		} else if !x11.pointer_button_down(controller.window) {
-			request(controller, .Hide)
+			if controller.options.hide_on_focus_loss do request(controller, .Hide)
+			else {
+				x11.lower_top_level(controller.window)
+				controller.focus_loss_pending = false
+			}
 		}
 	}
 	return true
@@ -277,18 +289,7 @@ selected_monitor :: proc(window: ^x11.Window, selector: string) -> Rect {
 	root_return, child: xlib.Window
 	local_x, local_y: i32
 	mask: xlib.KeyMask
-	_ = xlib.QueryPointer(window.display, root, &root_return, &child, &pointer_x, &pointer_y, &local_x, &local_y, &mask)
-	focused: xlib.Window
-	revert: xlib.FocusRevert
-	xlib.GetInputFocus(window.display, &focused, &revert)
-	attributes: xlib.XWindowAttributes
-	focus_x, focus_y: i32
-	translated_child: xlib.Window
-	if focused != 0 && xlib.GetWindowAttributes(window.display, focused, &attributes) != 0 &&
-	   xlib.TranslateCoordinates(window.display, focused, root, 0, 0, &focus_x, &focus_y, &translated_child) {
-		pointer_x = focus_x+i32(attributes.width/2)
-		pointer_y = focus_y+i32(attributes.height/2)
-	}
+	pointer_known := xlib.QueryPointer(window.display, root, &root_return, &child, &pointer_x, &pointer_y, &local_x, &local_y, &mask)
 	first: Rect
 	primary: Rect
 	for output_index in 0..<int(resources.noutput) {
@@ -307,7 +308,7 @@ selected_monitor :: proc(window: ^x11.Window, selector: string) -> Rect {
 			xlib.XRRFreeCrtcInfo(crtc); xlib.XRRFreeOutputInfo(info)
 			return rect
 		}
-		if selector == "focused" && int(pointer_x) >= rect.x && int(pointer_x) < rect.x+rect.width && int(pointer_y) >= rect.y && int(pointer_y) < rect.y+rect.height {
+		if selector == "focused" && pointer_known && int(pointer_x) >= rect.x && int(pointer_x) < rect.x+rect.width && int(pointer_y) >= rect.y && int(pointer_y) < rect.y+rect.height {
 			xlib.XRRFreeCrtcInfo(crtc); xlib.XRRFreeOutputInfo(info)
 			return rect
 		}

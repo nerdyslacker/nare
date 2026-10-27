@@ -101,7 +101,7 @@ Statusbar_Settings :: struct {
 	show_in_quake, border, module_blocks, auto_hide: bool,
 	background, foreground, accent: u32,
 	module_styles: [STATUS_MODULE_COUNT]Status_Module_Style,
-	resource_cpu_label, resource_ram_label, resource_storage_label: string,
+	resource_cpu_label, resource_ram_label, resource_storage_label, resource_network_label: string,
 	cwd_full_path: bool,
 	cwd_depth_marker: string,
 	clock_format: string,
@@ -317,6 +317,7 @@ settings_init :: proc(settings: ^Settings) {
 	settings.statusbar.resource_cpu_label = strings.clone("CPU")
 	settings.statusbar.resource_ram_label = strings.clone("RAM")
 	settings.statusbar.resource_storage_label = strings.clone("STORAGE")
+	settings.statusbar.resource_network_label = strings.clone("NET")
 	settings.statusbar.jobs = {
 		enabled = true, max_visible = 3, show_elapsed = true, show_completed = true,
 		show_failed = true, show_progress = true, completed_timeout_seconds = 10,
@@ -358,6 +359,7 @@ settings_destroy :: proc(settings: ^Settings) {
 	delete(settings.statusbar.resource_cpu_label)
 	delete(settings.statusbar.resource_ram_label)
 	delete(settings.statusbar.resource_storage_label)
+	delete(settings.statusbar.resource_network_label)
 	delete(settings.statusbar.cwd_depth_marker)
 	for &style in settings.statusbar.module_styles do delete(style.label)
 	delete(settings.tmux.explicit_ssh_host)
@@ -832,12 +834,13 @@ apply :: proc(settings: ^Settings, section, key, value: string) -> Error {
 		case "label":
 			parsed, ok := parse_string(value); if !ok || len(parsed) > 64 do return .Invalid_Value
 			replace_string(&style.label, parsed)
-		case "cpu-label", "ram-label", "storage-label":
+		case "cpu-label", "ram-label", "storage-label", "network-label":
 			if module != .Resource do return .Unknown_Key
 			parsed, ok := parse_string(value); if !ok || len(parsed) > 64 do return .Invalid_Value
 			if key == "cpu-label" do replace_string(&settings.statusbar.resource_cpu_label, parsed)
 			else if key == "ram-label" do replace_string(&settings.statusbar.resource_ram_label, parsed)
-			else do replace_string(&settings.statusbar.resource_storage_label, parsed)
+			else if key == "storage-label" do replace_string(&settings.statusbar.resource_storage_label, parsed)
+			else do replace_string(&settings.statusbar.resource_network_label, parsed)
 		case "foreground", "background":
 			parsed, ok := parse_color(value); if !ok do return .Invalid_Value
 			if key == "foreground" {

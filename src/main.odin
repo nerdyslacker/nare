@@ -563,6 +563,7 @@ run :: proc(
 				} else if .Alt in event.modifiers {
 					queue_input(&pending, pending_offset, {0x1b})
 				}
+				vt.terminal_input(terminal, data)
 				queue_input(&pending, pending_offset, data)
 			case .Focus:
 				if terminal.modes.focus_reporting {
@@ -634,6 +635,7 @@ run :: proc(
 				} else {
 					paste: [dynamic]byte
 					keyboard.encode_paste(x11.take_paste(window), terminal.modes.bracketed_paste, &paste)
+					vt.terminal_input(terminal, paste[:])
 					queue_input(&pending, pending_offset, paste[:])
 					delete(paste)
 				}

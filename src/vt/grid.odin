@@ -4,7 +4,10 @@ import "core:unicode"
 import "core:unicode/utf8"
 import graphics "../graphics"
 
-MAX_COMBINING_RUNES :: 4
+// Emoji ZWJ families and tag sequences require more storage than ordinary
+// combining accents. These codepoints remain attached to one terminal cell
+// and are shaped together by HarfBuzz.
+MAX_COMBINING_RUNES :: 16
 DEFAULT_SCROLLBACK_LINES :: 10000
 
 Color_Kind :: enum { Default, Indexed, RGB }
@@ -65,6 +68,8 @@ Logical_Line :: struct {
 	cells: [dynamic]Cell,
 	cursor_offset: int,
 	has_cursor: bool,
+	viewport_offset: int,
+	has_viewport: bool,
 }
 
 screen_init :: proc(
@@ -118,6 +123,34 @@ screen_clear :: proc(screen: ^Screen, attributes: Attributes) {
 }
 
 screen_resize :: proc(screen: ^Screen, columns, rows: int, attributes: Attributes) -> bool {
+	prompt_start, active_prompt := screen_active_prompt_start(screen)
+	if !active_prompt do return screen_resize_reflow(screen, columns, rows, attributes)
+	prompt_lines_above_cursor := screen.cursor.row-prompt_start
+	for row in prompt_start..=screen.cursor.row {
+		clear_row(screen, row, attributes)
+		marker := Shell_Marker.Prompt if row == prompt_start else Shell_Marker.Finished
+		cell_at(screen, row, 0).shell_markers += {marker}
+	}
+	if !screen_resize_reflow(screen, columns, rows, attributes) do return false
+	mapped_prompt_start := max(0, screen.cursor.row-prompt_lines_above_cursor)
+	for row in mapped_prompt_start..=screen.cursor.row do clear_row(screen, row, attributes)
+	cell_at(screen, mapped_prompt_start, 0).shell_markers += {.Prompt}
+	return true
+}
+
+screen_active_prompt_start :: proc(screen: ^Screen) -> (int, bool) {
+	if screen == nil || screen.rows <= 0 || screen.columns <= 0 do return 0, false
+	for row := clamp(screen.cursor.row, 0, screen.rows-1); row >= 0; row -= 1 {
+		for column := screen.columns-1; column >= 0; column -= 1 {
+			markers := cell_at(screen, row, column).shell_markers
+			if .Command in markers || .Output in markers do return 0, false
+			if .Prompt in markers do return row, true
+		}
+	}
+	return 0, false
+}
+
+screen_resize_reflow :: proc(screen: ^Screen, columns, rows: int, attributes: Attributes) -> bool {
 	if columns <= 0 || rows <= 0 do return false
 	if columns == screen.columns && rows == screen.rows do return true
 	lines := collect_logical_lines(screen)
@@ -129,13 +162,14 @@ screen_resize :: proc(screen: ^Screen, columns, rows: int, attributes: Attribute
 		delete(packed_rows)
 		delete(packed_wrapped)
 	}
-	cursor_row, cursor_column := pack_logical_lines(lines[:], columns, attributes, &packed_rows, &packed_wrapped)
+	cursor_row, cursor_column, viewport_row := pack_logical_lines(lines[:], columns, attributes, &packed_rows, &packed_wrapped)
 
 	new_cells := make([]Cell, columns * rows)
 	blank := blank_cell(attributes)
 	for &cell in new_cells do cell = blank
 	new_wrapped := make([]bool, rows)
-	visible_start := max(0, len(packed_rows)-rows)
+	minimum_start := max(0, cursor_row-rows+1)
+	visible_start := clamp(viewport_row, minimum_start, cursor_row)
 	visible_count := min(rows, len(packed_rows)-visible_start)
 	for row in 0..<visible_count {
 		copy(new_cells[row*columns:(row+1)*columns], packed_rows[visible_start+row])
@@ -176,6 +210,53 @@ screen_resize :: proc(screen: ^Screen, columns, rows: int, attributes: Attribute
 	return true
 }
 
+screen_resize_without_reflow :: proc(screen: ^Screen, columns, rows: int, attributes: Attributes) -> bool {
+	if columns <= 0 || rows <= 0 do return false
+	if columns == screen.columns && rows == screen.rows do return true
+	new_cells := make([]Cell, columns*rows)
+	blank := blank_cell(attributes)
+	for &cell in new_cells do cell = blank
+	new_wrapped := make([]bool, rows)
+	copy_rows := min(screen.rows, rows)
+	copy_columns := min(screen.columns, columns)
+	for row in 0..<copy_rows {
+		copy(
+			new_cells[row*columns:row*columns+copy_columns],
+			screen.cells[row*screen.columns:row*screen.columns+copy_columns],
+		)
+		new_wrapped[row] = screen.wrapped[row]
+		// Do not retain half of a wide glyph at the new right edge.
+		last := &new_cells[row*columns+columns-1]
+		if last.continuation {
+			last^ = blank
+			if columns > 1 do new_cells[row*columns+columns-2] = blank
+		} else if last.width == 2 {
+			last^ = blank
+		}
+	}
+	new_tabs := make([]bool, columns)
+	copy(new_tabs, screen.tab_stops[:min(columns, len(screen.tab_stops))])
+	for column := 8; column < columns; column += 8 {
+		if column >= len(screen.tab_stops) do new_tabs[column] = true
+	}
+	delete(screen.cells)
+	delete(screen.tab_stops)
+	delete(screen.wrapped)
+	screen.cells = new_cells
+	screen.tab_stops = new_tabs
+	screen.wrapped = new_wrapped
+	screen.columns = columns
+	screen.rows = rows
+	screen.cursor.row = clamp(screen.cursor.row, 0, rows-1)
+	screen.cursor.column = clamp(screen.cursor.column, 0, columns-1)
+	screen.saved_cursor.row = clamp(screen.saved_cursor.row, 0, rows-1)
+	screen.saved_cursor.column = clamp(screen.saved_cursor.column, 0, columns-1)
+	screen.scroll_top = 0
+	screen.scroll_bottom = rows-1
+	screen.wrap_pending = false
+	return true
+}
+
 collect_logical_lines :: proc(screen: ^Screen) -> [dynamic]Logical_Line {
 	lines: [dynamic]Logical_Line
 	current := Logical_Line{}
@@ -191,6 +272,10 @@ collect_logical_lines :: proc(screen: ^Screen) -> [dynamic]Logical_Line {
 		row := screen.scrollback[row_index] if is_history else screen.cells[row_index*screen.columns:(row_index+1)*screen.columns]
 		wrapped := screen.scrollback_wrapped[row_index] if is_history else screen.wrapped[row_index]
 		content_length := row_content_length(row)
+		if source_index == len(screen.scrollback) {
+			current.has_viewport = true
+			current.viewport_offset = len(current.cells)
+		}
 		if !is_history && row_index == screen.cursor.row {
 			current.has_cursor = true
 			current.cursor_offset = len(current.cells) + screen.cursor.column
@@ -224,14 +309,18 @@ pack_logical_lines :: proc(
 	attributes: Attributes,
 	packed_rows: ^[dynamic][]Cell,
 	packed_wrapped: ^[dynamic]bool,
-) -> (cursor_row, cursor_column: int) {
+) -> (cursor_row, cursor_column, viewport_row: int) {
 	cursor_found := false
+	viewport_found := false
 	for &line in lines {
 		row := make_blank_row(columns, attributes)
 		column := 0
 		for index := 0; index < len(line.cells); index += 1 {
 			cell := line.cells[index]
 			if cell.continuation {
+				if line.has_viewport && line.viewport_offset == index && !viewport_found {
+					viewport_row, viewport_found = len(packed_rows^), true
+				}
 				if line.has_cursor && line.cursor_offset == index && !cursor_found {
 					cursor_row, cursor_column, cursor_found = len(packed_rows^), max(0, column-1), true
 				}
@@ -244,6 +333,9 @@ pack_logical_lines :: proc(
 				append(packed_wrapped, true)
 				row = make_blank_row(columns, attributes)
 				column = 0
+			}
+			if line.has_viewport && line.viewport_offset == index && !viewport_found {
+				viewport_row, viewport_found = len(packed_rows^), true
 			}
 			if line.has_cursor && line.cursor_offset == index && !cursor_found {
 				cursor_row, cursor_column, cursor_found = len(packed_rows^), column, true
@@ -261,6 +353,9 @@ pack_logical_lines :: proc(
 		if line.has_cursor && !cursor_found {
 			cursor_row, cursor_column, cursor_found = len(packed_rows^), min(column, columns-1), true
 		}
+		if line.has_viewport && !viewport_found {
+			viewport_row, viewport_found = len(packed_rows^), true
+		}
 		append(packed_rows, row)
 		append(packed_wrapped, false)
 	}
@@ -268,7 +363,7 @@ pack_logical_lines :: proc(
 		cursor_row = max(0, len(packed_rows^)-1)
 		cursor_column = 0
 	}
-	return
+	return cursor_row, cursor_column, viewport_row
 }
 
 make_blank_row :: proc(columns: int, attributes: Attributes) -> []Cell {
@@ -414,16 +509,13 @@ blank_cell :: proc(attributes: Attributes) -> Cell {
 }
 
 screen_put :: proc(screen: ^Screen, codepoint: rune, attributes: Attributes, autowrap: bool, hyperlink_id: u32 = 0) {
-	if unicode.is_combining(codepoint) {
-		column := screen.cursor.column - 1
-		row := screen.cursor.row
-		if screen.wrap_pending do column = screen.cursor.column
-		if column >= 0 {
-			cell := cell_at(screen, row, column)
-			if cell.continuation && column > 0 do cell = cell_at(screen, row, column-1)
-			if int(cell.combining_count) < len(cell.combining) {
-				cell.combining[cell.combining_count] = codepoint
-				cell.combining_count += 1
+	previous, previous_column := screen_previous_cell(screen)
+	if unicode.is_combining(codepoint) || emoji_sequence_extension(previous, codepoint) {
+		if previous != nil && int(previous.combining_count) < len(previous.combining) {
+			previous.combining[previous.combining_count] = codepoint
+			previous.combining_count += 1
+			if emoji_sequence_is_wide(previous, codepoint) {
+				screen_widen_sequence_cell(screen, previous, previous_column, attributes)
 			}
 		}
 		return
@@ -473,6 +565,53 @@ screen_put :: proc(screen: ^Screen, codepoint: rune, attributes: Attributes, aut
 		screen.wrap_pending = true
 	} else {
 		screen.cursor.column += width
+	}
+}
+
+screen_previous_cell :: proc(screen: ^Screen) -> (cell: ^Cell, column: int) {
+	if screen == nil || screen.columns <= 0 || screen.rows <= 0 do return nil, -1
+	column = screen.cursor.column if screen.wrap_pending else screen.cursor.column-1
+	if column < 0 do return nil, -1
+	cell = cell_at(screen, screen.cursor.row, column)
+	if cell.continuation && column > 0 {
+		column -= 1
+		cell = cell_at(screen, screen.cursor.row, column)
+	}
+	return
+}
+
+emoji_sequence_extension :: proc(previous: ^Cell, codepoint: rune) -> bool {
+	if previous == nil do return false
+	if codepoint == 0x200d || codepoint == 0xfe0e || codepoint == 0xfe0f ||
+	   codepoint >= 0x1f3fb && codepoint <= 0x1f3ff ||
+	   codepoint >= 0xe0020 && codepoint <= 0xe007f {
+		return true
+	}
+	if previous.combining_count > 0 && previous.combining[previous.combining_count-1] == 0x200d do return true
+	return previous.codepoint >= 0x1f1e6 && previous.codepoint <= 0x1f1ff &&
+	       codepoint >= 0x1f1e6 && codepoint <= 0x1f1ff
+}
+
+emoji_sequence_is_wide :: proc(cell: ^Cell, codepoint: rune) -> bool {
+	if cell == nil || cell.width != 1 do return false
+	if codepoint == 0xfe0f do return true
+	return cell.codepoint >= 0x1f1e6 && cell.codepoint <= 0x1f1ff &&
+	       codepoint >= 0x1f1e6 && codepoint <= 0x1f1ff
+}
+
+screen_widen_sequence_cell :: proc(screen: ^Screen, cell: ^Cell, column: int, attributes: Attributes) {
+	if screen == nil || cell == nil || column < 0 || column+1 >= screen.columns do return
+	continuation := cell_at(screen, screen.cursor.row, column+1)
+	continuation^ = blank_cell(attributes)
+	continuation.width = 0
+	continuation.continuation = true
+	continuation.hyperlink_id = cell.hyperlink_id
+	cell.width = 2
+	if !screen.wrap_pending && screen.cursor.column == column+1 {
+		if screen.cursor.column+1 >= screen.columns {
+			screen.cursor.column = screen.columns-1
+			screen.wrap_pending = true
+		} else do screen.cursor.column += 1
 	}
 }
 

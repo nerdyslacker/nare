@@ -1,6 +1,8 @@
 package x11
 
 import "core:strings"
+import "core:strconv"
+import "core:sys/posix"
 import keyboard "../input"
 import xlib "vendor:x11/xlib"
 
@@ -41,6 +43,7 @@ Event :: struct {
 	modifiers:  keyboard.Modifiers,
 	mouse:      keyboard.Mouse_Event,
 	timestamp:  u64,
+	dpi_changed: bool,
 }
 
 create_child :: proc(parent: ^Window, x, y, width, height: int) -> (child: Window, ok: bool) {
@@ -109,6 +112,8 @@ Window :: struct {
 	display:   ^xlib.Display,
 	id:        xlib.Window,
 	gc:        xlib.GC,
+	input_method:  xlib.XIM,
+	input_context: xlib.XIC,
 	visual:    ^xlib.Visual,
 	depth:     int,
 	wm_delete: xlib.Atom,
@@ -116,6 +121,11 @@ Window :: struct {
 	y:         int,
 	width:     int,
 	height:    int,
+	// Last size acknowledged by ConfigureNotify. Programmatic resize requests
+	// update width/height immediately, so those fields cannot also be used to
+	// decide whether the server-reported size changed.
+	notified_width:  int,
+	notified_height: int,
 	dpi:       f32,
 	black:     uint,
 	white:     uint,
@@ -143,6 +153,8 @@ Window :: struct {
 }
 
 open :: proc(title: cstring = "nare", mapped: bool = true) -> (window: Window, err: Error) {
+	_ = posix.setlocale(.CTYPE, "")
+	_ = xlib.SetLocaleModifiers("")
 	display := xlib.OpenDisplay(nil)
 	if display == nil do return window, .Open_Display
 	window.display = display
@@ -165,6 +177,8 @@ open :: proc(title: cstring = "nare", mapped: bool = true) -> (window: Window, e
 
 	window.width = DEFAULT_WIDTH
 	window.height = DEFAULT_HEIGHT
+	window.notified_width = DEFAULT_WIDTH
+	window.notified_height = DEFAULT_HEIGHT
 	window.dpi = display_dpi(display, screen)
 	window.black = xlib.BlackPixel(display, screen)
 	window.white = xlib.WhitePixel(display, screen)
@@ -188,6 +202,23 @@ open :: proc(title: cstring = "nare", mapped: bool = true) -> (window: Window, e
 	window.cell_w = 8
 	window.cell_h = 16
 	xlib.SelectInput(display, window.id, base_event_mask())
+	window.input_method = xlib.OpenIM(display, nil, nil, nil)
+	if window.input_method == nil {
+		_ = xlib.SetLocaleModifiers("@im=none")
+		window.input_method = xlib.OpenIM(display, nil, nil, nil)
+	}
+	if window.input_method != nil {
+		window.input_context = xlib.CreateIC(
+			window.input_method,
+			xlib.XNInputStyle,
+			xlib.XIMStyle(xlib.XIMPreeditNothing | xlib.XIMStatusNothing),
+			xlib.XNClientWindow,
+			window.id,
+			xlib.XNFocusWindow,
+			window.id,
+			rawptr(nil),
+		)
+	}
 	window.wm_delete = xlib.InternAtom(display, "WM_DELETE_WINDOW", false)
 	if window.wm_delete == 0 || xlib.SetWMProtocols(display, window.id, &window.wm_delete, 1) == .Success {
 		close(&window)
@@ -218,10 +249,20 @@ open :: proc(title: cstring = "nare", mapped: bool = true) -> (window: Window, e
 }
 
 display_dpi :: proc(display: ^xlib.Display, screen: i32) -> f32 {
-	pixels := xlib.DisplayWidth(display, screen)
-	millimeters := xlib.DisplayWidthMM(display, screen)
-	if pixels <= 0 || millimeters <= 0 do return 96
-	return f32(pixels) * 25.4 / f32(millimeters)
+	if resources := xlib.ResourceManagerString(display); resources != nil {
+		text := string(resources)
+		start := 0
+		for start < len(text) {
+			end := strings.index_byte(text[start:], '\n')
+			if end < 0 do end = len(text)-start
+			line := strings.trim_space(text[start:start+end])
+			if separator := strings.index_byte(line, ':'); separator >= 0 && strings.trim_space(line[:separator]) == "Xft.dpi" {
+				if dpi, ok := strconv.parse_f32(strings.trim_space(line[separator+1:])); ok && dpi >= 50 && dpi <= 500 do return dpi
+			}
+			start += end+1
+		}
+	}
+	return 96
 }
 
 connection_fd :: proc(window: ^Window) -> int {
@@ -248,6 +289,7 @@ next_event :: proc(window: ^Window) -> (result: Event, available: bool) {
 	if xlib.Pending(window.display) == 0 do return result, false
 	event: xlib.XEvent
 	xlib.NextEvent(window.display, &event)
+	if xlib.FilterEvent(&event, 0) != false do return result, true
 	result.source = event.xany.window
 	#partial switch event.type {
 	case .ClientMessage:
@@ -276,23 +318,47 @@ next_event :: proc(window: ^Window) -> (result: Event, available: bool) {
 			event = latest
 		}
 		for xlib.CheckTypedWindowEvent(window.display, window.id, .Expose, &latest) != false {}
-		if int(event.xconfigure.width) != window.width || int(event.xconfigure.height) != window.height {
-			window.width = int(event.xconfigure.width)
-			window.height = int(event.xconfigure.height)
+		size_changed := note_configure(
+			window,
+			int(event.xconfigure.x),
+			int(event.xconfigure.y),
+			int(event.xconfigure.width),
+			int(event.xconfigure.height),
+		)
+		old_dpi := window.dpi
+		window.dpi = display_dpi(window.display, xlib.DefaultScreen(window.display))
+		result.dpi_changed = abs(window.dpi-old_dpi) >= 0.5
+		if size_changed || result.dpi_changed {
 			result.kind = .Resize
 			result.width = window.width
 			result.height = window.height
 		}
 	case .FocusIn:
 		window.focused = true
+		if window.input_context != nil do xlib.SetICFocus(window.input_context)
 		result.kind = .Focus
 		result.focused = true
 	case .FocusOut:
 		window.focused = false
+		if window.input_context != nil do xlib.UnsetICFocus(window.input_context)
 		result.kind = .Focus
 	case .KeyPress:
 		keysym: xlib.KeySym
-		count := xlib.LookupString(&event.xkey, &result.input[0], len(result.input), &keysym, nil)
+		count: i32
+		if window.input_context != nil {
+			status: xlib.LookupStringStatus
+			count = xlib.Xutf8LookupString(
+				window.input_context,
+				&event.xkey,
+				cstring(&result.input[0]),
+				i32(len(result.input)),
+				&keysym,
+				&status,
+			)
+			if status == .BufferOverflow do count = 0
+		} else {
+			count = xlib.LookupString(&event.xkey, &result.input[0], len(result.input), &keysym, nil)
+		}
 		result.key = key_from_keysym(keysym)
 		if .ShiftMask in event.xkey.state do result.modifiers += {.Shift}
 		if .Mod1Mask in event.xkey.state do result.modifiers += {.Alt}
@@ -345,6 +411,19 @@ next_event :: proc(window: ^Window) -> (result: Event, available: bool) {
 	case:
 	}
 	return result, true
+}
+
+note_configure :: proc(window: ^Window, x, y, width, height: int) -> bool {
+	actual_width := max(1, width)
+	actual_height := max(1, height)
+	size_changed := actual_width != window.notified_width || actual_height != window.notified_height
+	window.x = x
+	window.y = y
+	window.width = actual_width
+	window.height = actual_height
+	window.notified_width = actual_width
+	window.notified_height = actual_height
+	return size_changed
 }
 
 base_event_mask :: proc() -> xlib.EventMask {
@@ -671,6 +750,8 @@ close :: proc(window: ^Window) {
 	delete(window.paste_data)
 	for &transfer in window.outgoing_selections do delete(transfer.data)
 	delete(window.outgoing_selections)
+	if window.input_context != nil do destroy_input_context(window.input_context)
+	if window.input_method != nil do _ = close_input_method(window.input_method)
 	if window.gc != nil do xlib.FreeGC(window.display, window.gc)
 	if window.id != 0 do xlib.DestroyWindow(window.display, window.id)
 	xlib.CloseDisplay(window.display)

@@ -67,6 +67,23 @@ fi`)
     [[ -n $name ]] || name=${1:t}
     command nare job run "$name" -- "$@"
   }
+fi
+if [[ -z ${_NARE_SHELL_INTEGRATION-} ]]; then
+  typeset -g _NARE_SHELL_INTEGRATION=1
+  typeset -g _nare_command_started=0
+  autoload -Uz add-zsh-hook
+  function _nare_shell_precmd {
+    local command_status=$?
+    (( _nare_command_started )) && printf '\e]133;D;%d\e\\' "$command_status"
+    printf '\e]7;file://%s%s\e\\\e]133;A\e\\' "$HOST" "${PWD// /%20}"
+    _nare_command_started=0
+  }
+  function _nare_shell_preexec {
+    printf '\e]133;B\e\\\e]133;C\e\\'
+    _nare_command_started=1
+  }
+  add-zsh-hook precmd _nare_shell_precmd
+  add-zsh-hook preexec _nare_shell_preexec
 fi`)
 		return 0
 	case "fish":

@@ -113,6 +113,7 @@ Modes :: struct {
 	sixel_private_colors: bool,
 	mouse_tracking: int,
 	mouse_sgr: bool,
+	alternate_scroll: bool,
 	cursor_style: Cursor_Style,
 }
 
@@ -143,6 +144,10 @@ Terminal :: struct {
 	cwd_path: string,
 	cwd_local: bool,
 	cwd_changed: bool,
+	explicit_shell_integration: bool,
+	implicit_prompt_active: bool,
+	resize_prompt_erase_pending: bool,
+	resize_prompt_erase_row: int,
 	osc52_policy: OSC52_Policy,
 	osc52_actions: [dynamic]OSC52_Action,
 	osc52_queued_bytes: int,
@@ -172,6 +177,7 @@ terminal_init :: proc(
 	}
 	terminal.modes.autowrap = true
 	terminal.modes.cursor_visible = true
+	terminal.modes.alternate_scroll = true
 	terminal.cursor_phase_visible = true
 	terminal.cursor_beam_width = 2
 	terminal.cursor_underline_height = 2
@@ -220,10 +226,41 @@ terminal_feed :: proc(terminal: ^Terminal, data: []byte) {
 	parser_feed(&terminal.parser, data, terminal_event, rawptr(terminal))
 }
 
+// Inform the semantic prompt tracker about bytes sent to the child. OSC 7 is
+// commonly emitted before a prompt even when explicit OSC 133 integration is
+// unavailable. Once a command is submitted, that implicit prompt must no
+// longer be treated as live during resize.
+terminal_input :: proc(terminal: ^Terminal, data: []byte) {
+	if terminal == nil do return
+	terminal.resize_prompt_erase_pending = false
+	if terminal.explicit_shell_integration || !terminal.implicit_prompt_active do return
+	for value in data {
+		if value != '\r' && value != '\n' && value != 0x03 do continue
+		screen := terminal_screen(terminal)
+		cell_at(screen, screen.cursor.row, screen.cursor.column).shell_markers += {.Command}
+		terminal.implicit_prompt_active = false
+		return
+	}
+}
+
 terminal_resize :: proc(terminal: ^Terminal, columns, rows: int) -> bool {
 	main_ok := screen_resize(&terminal.main_screen, columns, rows, terminal.attributes)
-	alternate_ok := screen_resize(&terminal.alternate_screen, columns, rows, terminal.attributes)
+	alternate_ok := screen_resize_without_reflow(&terminal.alternate_screen, columns, rows, terminal.attributes)
 	return main_ok && alternate_ok
+}
+
+terminal_expect_resize_prompt_redraw :: proc(terminal: ^Terminal) {
+	if terminal == nil do return
+	terminal.resize_prompt_erase_pending = false
+	if terminal.using_alternate do return
+	prompt_row, active := screen_active_prompt_start(&terminal.main_screen)
+	if !active do return
+	terminal.resize_prompt_erase_pending = true
+	terminal.resize_prompt_erase_row = prompt_row
+}
+
+terminal_finish_resize_prompt_redraw :: proc(terminal: ^Terminal) {
+	if terminal != nil do terminal.resize_prompt_erase_pending = false
 }
 
 terminal_take_replies :: proc(terminal: ^Terminal) -> []byte {
@@ -621,7 +658,13 @@ handle_osc :: proc(terminal: ^Terminal, data: []byte) {
 	payload := data[separator+1:]
 	switch command {
 	case "0", "2": set_title_metadata(terminal, payload)
-	case "7": set_cwd_metadata(terminal, payload)
+	case "7":
+		set_cwd_metadata(terminal, payload)
+		if !terminal.explicit_shell_integration && !terminal.using_alternate {
+			screen := terminal_screen(terminal)
+			cell_at(screen, screen.cursor.row, screen.cursor.column).shell_markers += {.Prompt}
+			terminal.implicit_prompt_active = true
+		}
 	case "8": set_hyperlink(terminal, payload)
 	case "52": handle_osc52(terminal, payload)
 	case "133": handle_osc133(terminal, payload)
@@ -694,6 +737,8 @@ handle_osc133 :: proc(terminal: ^Terminal, payload: []byte) {
 	parameter_end := len(payload)
 	if separator := strings.index_byte(string(payload), ';'); separator >= 0 do parameter_end = separator
 	if parameter_end != 1 do return
+	terminal.explicit_shell_integration = true
+	terminal.implicit_prompt_active = false
 	marker: Shell_Marker
 	switch payload[0] {
 	case 'A': marker = .Prompt
@@ -1043,7 +1088,7 @@ handle_csi :: proc(terminal: ^Terminal, event: Event) {
 	case 'G', '`': screen.cursor.column = clamp(parameter(event, 0, 1)-1, 0, screen.columns-1)
 	case 'd': set_cursor(terminal, parameter(event, 0, 1), screen.cursor.column+1)
 	case 'H', 'f': set_cursor(terminal, parameter(event, 0, 1), parameter(event, 1, 1))
-	case 'J': erase_display(screen, parameter_raw(event, 0, 0), terminal.attributes)
+	case 'J': erase_display(terminal, screen, parameter_raw(event, 0, 0), terminal.attributes)
 	case 'K': erase_line(screen, parameter_raw(event, 0, 0), terminal.attributes)
 	case '@': insert_cells(screen, parameter(event, 0, 1), terminal.attributes)
 	case 'P': delete_cells(screen, parameter(event, 0, 1), terminal.attributes)
@@ -1099,15 +1144,30 @@ set_cursor :: proc(terminal: ^Terminal, row, column: int) {
 	screen.wrap_pending = false
 }
 
-erase_display :: proc(screen: ^Screen, mode: int, attributes: Attributes) {
+erase_display :: proc(terminal: ^Terminal, screen: ^Screen, mode: int, attributes: Attributes) {
 	switch mode {
 	case 0:
+		// Prompt renderers such as Powerlevel10k redraw after SIGWINCH by
+		// moving to the OSC 133 prompt boundary and erasing to the end of
+		// the display. Keep that semantic boundary attached to the cell so a
+		// later resize still knows that these rows are a live prompt rather
+		// than ordinary output to reflow. Explicit full-screen clears continue
+		// to discard all markers.
+		if terminal.resize_prompt_erase_pending && screen == &terminal.main_screen {
+			screen.cursor.row = clamp(terminal.resize_prompt_erase_row, 0, screen.rows-1)
+			screen.cursor.column = 0
+			screen.wrap_pending = false
+			terminal.resize_prompt_erase_pending = false
+		}
+		prompt_boundary := .Prompt in cell_at(screen, screen.cursor.row, screen.cursor.column).shell_markers
 		erase_cells(screen, screen.cursor.row, screen.cursor.column, screen.columns-1, attributes)
+		if prompt_boundary do cell_at(screen, screen.cursor.row, screen.cursor.column).shell_markers += {.Prompt}
 		for row in screen.cursor.row+1..<screen.rows do clear_row(screen, row, attributes)
 	case 1:
 		for row in 0..<screen.cursor.row do clear_row(screen, row, attributes)
 		erase_cells(screen, screen.cursor.row, 0, screen.cursor.column, attributes)
 	case 2:
+		terminal.resize_prompt_erase_pending = false
 		for row in 0..<screen.rows do clear_row(screen, row, attributes)
 		if screen.image_registry != nil {
 			graphics.clear_visible(screen.image_registry, screen.image_screen, 0, screen.rows-1)
@@ -1180,6 +1240,7 @@ set_modes :: proc(terminal: ^Terminal, event: Event, enabled: bool) {
 			case 1000, 1002, 1003: terminal.modes.mouse_tracking = mode if enabled else 0
 			case 1004: terminal.modes.focus_reporting = enabled
 			case 1006: terminal.modes.mouse_sgr = enabled
+			case 1007: terminal.modes.alternate_scroll = enabled
 			case 1047, 1049: switch_alternate(terminal, enabled, mode == 1049)
 			case 2004: terminal.modes.bracketed_paste = enabled
 			case 2026: terminal.modes.synchronized_updates = enabled
@@ -1326,7 +1387,7 @@ soft_reset :: proc(terminal: ^Terminal) {
 	terminal.attributes = {}
 	terminal.character_sets = {}
 	terminal.active_character_set = 0
-	terminal.modes = Modes{autowrap = true, cursor_visible = true, sixel_private_colors = true}
+	terminal.modes = Modes{autowrap = true, cursor_visible = true, sixel_private_colors = true, alternate_scroll = true}
 	screen := terminal_screen(terminal)
 	screen.scroll_top = 0
 	screen.scroll_bottom = screen.rows - 1
@@ -1343,7 +1404,7 @@ terminal_reset :: proc(terminal: ^Terminal) {
 	terminal.saved_active_character_set = 0
 	terminal.last_graphic = 0
 	terminal.last_graphic_valid = false
-	terminal.modes = Modes{autowrap = true, cursor_visible = true, sixel_private_colors = true}
+	terminal.modes = Modes{autowrap = true, cursor_visible = true, sixel_private_colors = true, alternate_scroll = true}
 	terminal.using_alternate = false
 	screen_clear(&terminal.main_screen, {})
 	screen_clear(&terminal.alternate_screen, {})

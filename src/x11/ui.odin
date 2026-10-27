@@ -28,6 +28,12 @@ show_top_level :: proc(window: ^Window, take_focus: bool = true) {
 	_ = xlib.Flush(window.display)
 }
 
+lower_top_level :: proc(window: ^Window) {
+	if window == nil || window.display == nil || window.id == 0 || !window.mapped do return
+	xlib.LowerWindow(window.display, window.id)
+	_ = xlib.Flush(window.display)
+}
+
 request_top_level_activation :: proc(window: ^Window) {
 	request_window_activation(window, window.id)
 }

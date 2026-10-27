@@ -859,7 +859,10 @@ workspace_layout :: proc(workspace: ^Workspace, resize_grid: bool = true) {
 			if commit_grid && (columns != old_columns || rows != old_rows) {
 				_ = vt.terminal_resize(&pane.terminal, columns, rows)
 				if pane.search_state.active do features.refresh(&pane.search_state, vt.terminal_screen(&pane.terminal))
-				if !tab_is_tmux(tab) do _ = pty.resize(&pane.process, pty_size(columns, rows, width, height))
+				if !tab_is_tmux(tab) {
+					if workspace.quake != nil do vt.terminal_expect_resize_prompt_redraw(&pane.terminal)
+					_ = pty.resize(&pane.process, pty_size(columns, rows, width, height))
+				}
 			}
 			workspace_redraw(workspace, pane, true)
 		}
@@ -1059,8 +1062,13 @@ workspace_event :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
 		if !workspace.close_confirmation do workspace_show_close_confirmation(workspace)
 		return true
 	case .Resize:
+		if event.dpi_changed do workspace_refresh_dpi(workspace)
 		workspace.tab_reveal_active = true
 		workspace.layout_pending = true
+		// Move/paint child surfaces immediately, but resize the terminal grid and
+		// PTY only after ConfigureNotify has settled. In particular, a quake
+		// window moving between unlike monitors must not send intermediate
+		// SIGWINCH sizes that make shells redraw the live prompt as new lines.
 		workspace.grid_resize_pending = true
 		workspace.last_resize = time.tick_now()
 	case .Redraw:
@@ -1122,6 +1130,7 @@ workspace_event :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
 		input := event.input
 		data := input[:event.input_size]
 		if event.key != .Text do data = keyboard.encode_key(event.key, event.modifiers, pane.terminal.modes.application_cursor, encoded[:])
+		vt.terminal_input(&pane.terminal, data)
 		owner := pane_tmux_owner(pane)
 		if owner != nil && tmux.session_active(&owner.tmux_session) {
 			if tmux.session_ready(&owner.tmux_session) {
@@ -1191,6 +1200,20 @@ workspace_event :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
 		}
 		if local_mouse && (mouse.button == 4 || mouse.button == 5) {
 			if mouse.action == .Press {
+				if pane.terminal.using_alternate && pane.terminal.modes.alternate_scroll && .Shift not_in mouse.modifiers {
+					encoded: [16]byte
+					key := keyboard.Key.Up if mouse.button == 4 else keyboard.Key.Down
+					data := keyboard.encode_key(key, {}, pane.terminal.modes.application_cursor, encoded[:])
+					owner := pane_tmux_owner(pane)
+					for _ in 0..<3 {
+						if owner != nil && tmux.session_ready(&owner.tmux_session) {
+							tmux.append_input_commands(&owner.tmux_session, &owner.pending, pane.tmux_pane_id, data)
+						} else if owner == pane && !tmux.session_active(&pane.tmux_session) {
+							queue_input(&pane.pending, pane.pending_offset, data)
+						}
+					}
+					return true
+				}
 				direction := 1 if mouse.button == 4 else -1
 				previous_offset := pane.scrollback_state.offset
 				features.scrollback_scroll(&pane.scrollback_state, vt.terminal_screen(&pane.terminal), direction)
@@ -1221,6 +1244,7 @@ workspace_event :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
 			} else {
 				paste: [dynamic]byte
 				keyboard.encode_paste(x11.take_paste(workspace.root), pane.terminal.modes.bracketed_paste, &paste)
+				vt.terminal_input(&pane.terminal, paste[:])
 				owner := pane_tmux_owner(pane)
 				if owner != nil && tmux.session_ready(&owner.tmux_session) do tmux.append_input_commands(&owner.tmux_session, &owner.pending, pane.tmux_pane_id, paste[:])
 				else if owner == pane && !tmux.session_active(&pane.tmux_session) do queue_input(&pane.pending, pane.pending_offset, paste[:])
@@ -1563,8 +1587,7 @@ workspace_shortcut :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
 	if event_matches(event, bindings.toggle_statusbar) {
 		workspace.statusbar.visible = !workspace.statusbar.visible
 		if !workspace.statusbar.visible {
-			workspace.jobs_visible = false
-			if workspace.jobs_surface.id != 0 do x11.show_child(&workspace.jobs_surface, false)
+			if workspace.statusbar.sample_thread != nil do _ = statusbar_harvest_sample(&workspace.statusbar)
 		}
 		workspace.statusbar.auto_hide_revealed = !workspace.settings.statusbar.auto_hide
 		workspace.statusbar.auto_hide_pending = false
@@ -1759,10 +1782,7 @@ workspace_reload_config :: proc(workspace: ^Workspace) -> bool {
 	workspace.statusbar.auto_hide_revealed = !workspace.settings.statusbar.auto_hide
 	workspace.statusbar.auto_hide_pending = false
 	workspace.statusbar.module_mask_ready = false
-	if !workspace.statusbar.visible {
-		workspace.jobs_visible = false
-		if workspace.jobs_surface.id != 0 do x11.show_child(&workspace.jobs_surface, false)
-	}
+	if !workspace.statusbar.visible && workspace.statusbar.sample_thread != nil do _ = statusbar_harvest_sample(&workspace.statusbar)
 	statusbar_render_cache_invalidate(&workspace.statusbar.render_cache)
 
 	if render_changed {
@@ -1836,6 +1856,36 @@ workspace_font_size :: proc(workspace: ^Workspace, size: int) {
 	}
 	workspace_font_cache_release(workspace.font_cache, old_entry)
 	workspace_layout(workspace)
+}
+
+workspace_refresh_dpi :: proc(workspace: ^Workspace) -> bool {
+	if workspace == nil || workspace.font_entry == nil do return false
+	dpi_key := clamp(int(workspace.root.dpi+0.5), 1, 1000)
+	if workspace.font_entry.dpi == dpi_key do return false
+	new_entry := workspace_font_cache_acquire(workspace.font_cache, workspace.settings, workspace.font_size, workspace.root.dpi)
+	if new_entry == nil do return false
+	old_entry := workspace.font_entry
+	workspace.font_entry = new_entry
+	statusbar_render_cache_invalidate(&workspace.statusbar.render_cache)
+	for tab in workspace.tabs do for pane in tab.panes {
+		pane.surface.dpi = workspace.root.dpi
+		drawing.destroy(&pane.renderer, &pane.surface)
+		if drawing.init(
+			&pane.renderer, &pane.surface, workspace.renderer, workspace.ligatures,
+			workspace.settings.font, workspace.font_size, workspace.settings.font_bold,
+			workspace.settings.bold_font, workspace.settings.italic_font, workspace.settings.bold_italic_font,
+			workspace.settings.cell_width_percent, workspace.settings.cell_height_percent,
+			&new_entry.manager,
+		) == .None {
+			vt.terminal_set_cell_size(&pane.terminal, pane.surface.cell_w, pane.surface.cell_h)
+		}
+	}
+	workspace.search_surface.dpi = workspace.root.dpi
+	workspace.close_surface.dpi = workspace.root.dpi
+	workspace.statusbar_surface.dpi = workspace.root.dpi
+	workspace.jobs_surface.dpi = workspace.root.dpi
+	workspace_font_cache_release(workspace.font_cache, old_entry)
+	return true
 }
 
 workspace_apply_cursor :: proc(workspace: ^Workspace, pane: ^Pane) {
@@ -2085,6 +2135,7 @@ workspace_drain :: proc(workspace: ^Workspace, pane: ^Pane) -> bool {
 		case .Data:
 			dirty = workspace_feed_pty(workspace, pane, buffer[:count]) || dirty
 		case .Would_Block, .End, .Failed:
+			vt.terminal_finish_resize_prompt_redraw(&pane.terminal)
 			if !tmux.session_active(&pane.tmux_session) do queue_terminal_replies(&pane.pending, pane.pending_offset, &pane.terminal)
 			if dirty {
 				features.scrollback_refresh(&pane.scrollback_state, vt.terminal_screen(&pane.terminal))

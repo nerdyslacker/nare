@@ -53,6 +53,9 @@ Statusbar_Sample_Job :: struct {
 	command_pid: int,
 	cpu_total, cpu_idle: u64,
 	cpu_ready: bool,
+	network_rx, network_tx: u64,
+	network_ready: bool,
+	network_sampled_at: time.Tick,
 }
 
 Statusbar_State :: struct {
@@ -67,11 +70,15 @@ Statusbar_State :: struct {
 	clock, battery, resource, local_host, cwd, cwd_source, git, command, jobs_text: string,
 	last_clock, last_cwd, last_git, last_command, last_battery, last_resource, last_jobs, last_job_prune: time.Time,
 	last_job_revision: u64,
+	popup_job_revision: u64,
 	expanded_job_count: int,
 	cwd_pane, git_pane, command_pane: ^Pane,
 	cwd_local: bool,
 	cpu_total, cpu_idle: u64,
 	cpu_ready: bool,
+	network_rx, network_tx: u64,
+	network_ready: bool,
+	network_sampled_at: time.Tick,
 	sample_job: ^Statusbar_Sample_Job,
 	sample_thread: ^thread.Thread,
 }
@@ -124,7 +131,8 @@ statusbar_expanded_job_count :: proc(workspace: ^Workspace) -> int {
 	visible := statusbar_visible_jobs(workspace)
 	if len(visible) == 0 do return 0
 	row_height := statusbar_row_height(workspace)
-	reserved := workspace_tab_bar_height(workspace)+workspace.settings.window.padding*2+row_height+12
+	bar_height := row_height if statusbar_visible(workspace) else 0
+	reserved := workspace_tab_bar_height(workspace)+workspace.settings.window.padding*2+bar_height+12
 	available_rows := max(0, (workspace.root.height-reserved)/max(1, row_height))
 	return min(len(visible), min(workspace.settings.statusbar.jobs.max_visible, available_rows))
 }
@@ -188,9 +196,17 @@ statusbar_module_mask :: proc(settings: ^config.Statusbar_Settings) -> u32 {
 statusbar_tick :: proc(workspace: ^Workspace, force: bool = false) {
 	statusbar_jobs_maintenance(workspace)
 	_ = statusbar_sync_expanded_jobs(workspace)
-	if !statusbar_visible(workspace) do return
-	settings := &workspace.settings.statusbar
 	state := &workspace.statusbar
+	popup_changed := state.popup_job_revision != workspace.jobs.revision
+	state.popup_job_revision = workspace.jobs.revision
+	if workspace.jobs_visible && popup_changed do workspace_draw_jobs_list(workspace)
+	if !statusbar_visible(workspace) {
+		// A sample already in flight is harvested once, but no disabled module is
+		// polled and no new worker is started.
+		if state.sample_thread != nil do _ = statusbar_harvest_sample(state)
+		return
+	}
+	settings := &workspace.settings.statusbar
 	if !state.module_mask_ready {
 		state.module_mask = statusbar_module_mask(settings)
 		state.module_mask_ready = true
@@ -393,7 +409,7 @@ statusbar_job_text :: proc(job: ^jobs.Job, settings: ^config.Statusbar_Jobs_Sett
 }
 
 workspace_toggle_jobs_list :: proc(workspace: ^Workspace) {
-	if workspace == nil || !workspace.settings.statusbar.jobs.enabled || !workspace.statusbar.visible do return
+	if workspace == nil || !workspace.settings.statusbar.jobs.enabled do return
 	if !workspace.jobs_visible && len(statusbar_visible_jobs(workspace)) == 0 do return
 	was_visible := workspace.jobs_visible
 	workspace.jobs_visible = !was_visible
@@ -460,7 +476,7 @@ workspace_focus_job_owner :: proc(workspace: ^Workspace, job: ^jobs.Job) {
 }
 
 workspace_draw_jobs_list :: proc(workspace: ^Workspace) {
-	if workspace == nil || workspace.jobs_surface.id == 0 || !workspace.jobs_visible || !statusbar_visible(workspace) do return
+	if workspace == nil || workspace.jobs_surface.id == 0 || !workspace.jobs_visible do return
 	visible := statusbar_visible_jobs(workspace)
 	pane := workspace_active_pane(workspace)
 	if pane == nil do return
@@ -486,8 +502,13 @@ workspace_draw_jobs_list :: proc(workspace: ^Workspace) {
 	width := min(max(280, workspace.root.width*3/4), max(1, workspace.root.width-24))
 	height := max(row_height*2, row_height*(shown+1))
 	x := max(0, (workspace.root.width-width)/2)
-	y := workspace.statusbar_surface.y-height-6
-	if settings.position == .Top do y = workspace.statusbar_surface.y+workspace.statusbar_surface.height+6
+	y := workspace.root.height-height-12
+	if statusbar_visible(workspace) {
+		y = workspace.statusbar_surface.y-height-6
+		if settings.position == .Top do y = workspace.statusbar_surface.y+workspace.statusbar_surface.height+6
+	} else if settings.position == .Top {
+		y = workspace_tab_bar_height(workspace)+12
+	}
 	y = clamp(y, 0, max(0, workspace.root.height-height))
 	x11.place_child(&workspace.jobs_surface, x, y, width, height)
 	x11.raise_child(&workspace.jobs_surface)
@@ -555,10 +576,13 @@ statusbar_collect_resources :: proc(job: ^Statusbar_Sample_Job) -> string {
 	cpu_percent, cpu_ok := statusbar_cpu_percent(job)
 	ram_percent, ram_ok := statusbar_ram_percent()
 	storage_percent, storage_ok := statusbar_storage_percent()
+	receive_rate, transmit_rate, network_ok := statusbar_network_rate(job)
+	network := ""
+	if network_ok do network = fmt.tprintf(" NETWORK %s/%s", statusbar_byte_rate(receive_rate), statusbar_byte_rate(transmit_rate))
 	if cpu_ok && ram_ok && storage_ok {
-		return fmt.tprintf("CPU %d%% RAM %d%% STORAGE %d%%", cpu_percent, ram_percent, storage_percent)
+		return fmt.tprintf("CPU %d%% RAM %d%% STORAGE %d%%%s", cpu_percent, ram_percent, storage_percent, network)
 	} else if ram_ok && storage_ok {
-		return fmt.tprintf("RAM %d%% STORAGE %d%%", ram_percent, storage_percent)
+		return fmt.tprintf("RAM %d%% STORAGE %d%%%s", ram_percent, storage_percent, network)
 	}
 	return ""
 }
@@ -576,6 +600,10 @@ statusbar_start_sample :: proc(state: ^Statusbar_State, battery, resource, git, 
 	job.cpu_total = state.cpu_total
 	job.cpu_idle = state.cpu_idle
 	job.cpu_ready = state.cpu_ready
+	job.network_rx = state.network_rx
+	job.network_tx = state.network_tx
+	job.network_ready = state.network_ready
+	job.network_sampled_at = state.network_sampled_at
 	worker := thread.create_and_start_with_data(rawptr(job), statusbar_sample_worker, nil, .Low, false, "nare-status")
 	if worker == nil {
 		free(job)
@@ -614,6 +642,10 @@ statusbar_harvest_sample :: proc(state: ^Statusbar_State) -> bool {
 		state.cpu_total = job.cpu_total
 		state.cpu_idle = job.cpu_idle
 		state.cpu_ready = job.cpu_ready
+		state.network_rx = job.network_rx
+		state.network_tx = job.network_tx
+		state.network_ready = job.network_ready
+		state.network_sampled_at = job.network_sampled_at
 		changed = statusbar_replace(&state.resource, string(job.resource[:job.resource_length])) || changed
 	}
 	if job.git_requested do changed = statusbar_replace(&state.git, statusbar_sanitize(string(job.git[:job.git_length]))) || changed
@@ -1041,6 +1073,80 @@ statusbar_storage_percent :: proc() -> (int, bool) {
 	return int((total-available)*100/total), true
 }
 
+statusbar_network_totals :: proc() -> (receive, transmit: u64, ok: bool) {
+	data, err := os.read_entire_file("/proc/net/dev", context.temp_allocator)
+	if err != nil do return
+	remaining := string(data)
+	interfaces := 0
+	for remaining != "" {
+		line := remaining
+		if newline := strings.index_byte(remaining, '\n'); newline >= 0 {
+			line, remaining = remaining[:newline], remaining[newline+1:]
+		} else do remaining = ""
+		colon := strings.index_byte(line, ':')
+		if colon < 0 do continue
+		name := strings.trim_space(line[:colon])
+		if name == "" || name == "lo" do continue
+		cursor := colon+1
+		field := 0
+		rx, tx := u64(0), u64(0)
+		valid := true
+		for field < 16 {
+			for cursor < len(line) && (line[cursor] == ' ' || line[cursor] == '\t') do cursor += 1
+			start := cursor
+			for cursor < len(line) && line[cursor] >= '0' && line[cursor] <= '9' do cursor += 1
+			if start == cursor {
+				valid = false
+				break
+			}
+			value, parsed := strconv.parse_u64(line[start:cursor])
+			if !parsed {
+				valid = false
+				break
+			}
+			if field == 0 do rx = value
+			if field == 8 do tx = value
+			field += 1
+		}
+		if valid && field >= 9 {
+			receive += rx
+			transmit += tx
+			interfaces += 1
+		}
+	}
+	ok = interfaces > 0
+	return
+}
+
+statusbar_network_rate :: proc(job: ^Statusbar_Sample_Job) -> (receive, transmit: u64, ok: bool) {
+	rx, tx, totals_ok := statusbar_network_totals()
+	if !totals_ok do return
+	now := time.tick_now()
+	if job.network_ready {
+		elapsed_ms := u64(max(time.tick_since(job.network_sampled_at)/time.Millisecond, 1))
+		if rx >= job.network_rx do receive = (rx-job.network_rx)*1000/elapsed_ms
+		if tx >= job.network_tx do transmit = (tx-job.network_tx)*1000/elapsed_ms
+		ok = true
+	}
+	job.network_rx = rx
+	job.network_tx = tx
+	job.network_ready = true
+	job.network_sampled_at = now
+	return
+}
+
+statusbar_byte_rate :: proc(value: u64) -> string {
+	units := [?]string{"B", "K", "M", "G"}
+	unit := u64(1)
+	unit_index := 0
+	for unit_index+1 < len(units) && value >= unit*1024 {
+		unit *= 1024
+		unit_index += 1
+	}
+	if unit_index == 0 do return fmt.tprintf("%d%s", value, units[unit_index])
+	return fmt.tprintf("%d.%d%s", value/unit, value%unit*10/unit, units[unit_index])
+}
+
 statusbar_replace :: proc(target: ^string, value: string) -> bool {
 	if target^ == value do return false
 	config.replace_string(target, value)
@@ -1238,15 +1344,27 @@ statusbar_resource_text :: proc(value: string, settings: ^config.Statusbar_Setti
 	if value == "" || settings == nil do return value
 	ram_at := statusbar_find_text(value, " RAM ")
 	storage_at := statusbar_find_text(value, " STORAGE ")
+	network_at := statusbar_find_text(value, " NETWORK ")
+	storage_end := network_at if network_at > storage_at else len(value)
+	network := ""
+	if network_at >= 0 {
+		rates := value[network_at+9:]
+		if separator := statusbar_find_text(rates, "/"); separator >= 0 {
+			network_value := fmt.tprintf("↓%s ↑%s", rates[:separator], rates[separator+1:])
+			network = statusbar_join_label(settings.resource_network_label, network_value)
+		}
+	}
 	if strings.has_prefix(value, "CPU ") && ram_at > 4 && storage_at > ram_at+5 {
 		cpu := statusbar_join_label(settings.resource_cpu_label, value[4:ram_at])
 		ram := statusbar_join_label(settings.resource_ram_label, value[ram_at+5:storage_at])
-		storage := statusbar_join_label(settings.resource_storage_label, value[storage_at+9:])
+		storage := statusbar_join_label(settings.resource_storage_label, value[storage_at+9:storage_end])
+		if network != "" do return fmt.tprintf("%s %s %s %s", network, cpu, ram, storage)
 		return fmt.tprintf("%s %s %s", cpu, ram, storage)
 	}
 	if strings.has_prefix(value, "RAM ") && storage_at > 4 {
 		ram := statusbar_join_label(settings.resource_ram_label, value[4:storage_at])
-		storage := statusbar_join_label(settings.resource_storage_label, value[storage_at+9:])
+		storage := statusbar_join_label(settings.resource_storage_label, value[storage_at+9:storage_end])
+		if network != "" do return fmt.tprintf("%s %s %s", network, ram, storage)
 		return fmt.tprintf("%s %s", ram, storage)
 	}
 	return value
