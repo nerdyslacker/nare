@@ -36,6 +36,7 @@ Jobs_Scope :: enum { Window }
 Status_Module_Style :: struct {
 	foreground, background: u32,
 	foreground_set, background_set: bool,
+	label: string,
 }
 
 Window_Settings :: struct {
@@ -100,6 +101,7 @@ Statusbar_Settings :: struct {
 	show_in_quake, border, module_blocks, auto_hide: bool,
 	background, foreground, accent: u32,
 	module_styles: [STATUS_MODULE_COUNT]Status_Module_Style,
+	resource_cpu_label, resource_ram_label, resource_storage_label: string,
 	clock_format: string,
 	jobs: Statusbar_Jobs_Settings,
 	auto_hide_delay_ms: int,
@@ -304,6 +306,13 @@ settings_init :: proc(settings: ^Settings) {
 		git_update_ms = 2000, command_update_ms = 1000,
 		battery_update_ms = 5000, resource_update_ms = 2000,
 	}
+	settings.statusbar.module_styles[int(Status_Module.Git)].label = strings.clone("git:")
+	settings.statusbar.module_styles[int(Status_Module.Battery)].label = strings.clone("BAT")
+	settings.statusbar.module_styles[int(Status_Module.Clock)].label = strings.clone("")
+	settings.statusbar.module_styles[int(Status_Module.Jobs)].label = strings.clone("")
+	settings.statusbar.resource_cpu_label = strings.clone("CPU")
+	settings.statusbar.resource_ram_label = strings.clone("RAM")
+	settings.statusbar.resource_storage_label = strings.clone("STORAGE")
 	settings.statusbar.jobs = {
 		enabled = true, max_visible = 3, show_elapsed = true, show_completed = true,
 		show_failed = true, show_progress = true, completed_timeout_seconds = 10,
@@ -342,6 +351,10 @@ settings_destroy :: proc(settings: ^Settings) {
 	delete(settings.statusbar.right)
 	delete(settings.statusbar.separator)
 	delete(settings.statusbar.clock_format)
+	delete(settings.statusbar.resource_cpu_label)
+	delete(settings.statusbar.resource_ram_label)
+	delete(settings.statusbar.resource_storage_label)
+	for &style in settings.statusbar.module_styles do delete(style.label)
 	delete(settings.tmux.explicit_ssh_host)
 	destroy_bindings(&settings.bindings)
 	for &profile in settings.tmux_profiles do destroy_tmux_profile(&profile)
@@ -763,6 +776,9 @@ apply :: proc(settings: ^Settings, section, key, value: string) -> Error {
 	} else if section == "statusbar.jobs" {
 		style := &settings.statusbar.module_styles[int(Status_Module.Jobs)]
 		switch key {
+		case "label":
+			parsed, ok := parse_string(value); if !ok || len(parsed) > 64 do return .Invalid_Value
+			replace_string(&style.label, parsed)
 		case "enabled":
 			parsed, ok := parse_bool(value); if !ok do return .Invalid_Value
 			settings.statusbar.jobs.enabled = parsed
@@ -800,6 +816,15 @@ apply :: proc(settings: ^Settings, section, key, value: string) -> Error {
 		module, _ := status_module_from_name(section[len("statusbar."):])
 		style := &settings.statusbar.module_styles[int(module)]
 		switch key {
+		case "label":
+			parsed, ok := parse_string(value); if !ok || len(parsed) > 64 do return .Invalid_Value
+			replace_string(&style.label, parsed)
+		case "cpu-label", "ram-label", "storage-label":
+			if module != .Resource do return .Unknown_Key
+			parsed, ok := parse_string(value); if !ok || len(parsed) > 64 do return .Invalid_Value
+			if key == "cpu-label" do replace_string(&settings.statusbar.resource_cpu_label, parsed)
+			else if key == "ram-label" do replace_string(&settings.statusbar.resource_ram_label, parsed)
+			else do replace_string(&settings.statusbar.resource_storage_label, parsed)
 		case "foreground", "background":
 			parsed, ok := parse_color(value); if !ok do return .Invalid_Value
 			if key == "foreground" {

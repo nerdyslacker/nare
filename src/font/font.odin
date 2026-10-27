@@ -54,6 +54,7 @@ Manager :: struct {
 	clock: u64,
 	point_size: int,
 	dpi: f32,
+	face_height: int,
 	cell_width, cell_height: int,
 	ascent, descent: int,
 	family: string,
@@ -113,6 +114,7 @@ init :: proc(
 		manager.cell_width = max(1, int((regular.face.glyph.advance.x+32)/64))
 	}
 	base_height := manager.cell_height
+	manager.face_height = base_height
 	manager.cell_width = max(1, (manager.cell_width*clamp(cell_width_percent, 50, 300)+50)/100)
 	manager.cell_height = max(1, (manager.cell_height*clamp(cell_height_percent, 50, 300)+50)/100)
 	manager.ascent += (manager.cell_height-base_height)/2
@@ -229,8 +231,30 @@ load_fallback :: proc(manager: ^Manager, codepoint: rune) -> bool {
 	defer delete(query)
 	face, ok := load_face(manager, query)
 	if !ok do return false
+	if !fit_fallback_face(manager, &face) {
+		destroy_face(&face)
+		return false
+	}
 	append(&manager.fallbacks, Fallback_Face{font = face})
 	return true
+}
+
+fit_fallback_face :: proc(manager: ^Manager, face: ^Font_Face) -> bool {
+	if face == nil || face.face == nil || manager.face_height <= 0 do return false
+	current_height := max(1, int((face.face.size.metrics.height+63)/64))
+	if abs(current_height-manager.face_height) <= 1 do return true
+	char_height := manager.point_size*64
+	for _ in 0..<3 {
+		char_height = max(64, (char_height*manager.face_height+current_height/2)/current_height)
+		face_dpi := c.uint(clamp(int(manager.dpi+0.5), 1, 1000))
+		if FT_Set_Char_Size(face.face, 0, c.long(char_height), face_dpi, face_dpi) != 0 do return false
+		current_height = max(1, int((face.face.size.metrics.height+63)/64))
+		if abs(current_height-manager.face_height) <= 1 do break
+	}
+	// HarfBuzz snapshots the FreeType scale when its font is created.
+	if face.hb_font != nil do hb_font_destroy(face.hb_font)
+	face.hb_font = hb_ft_font_create_referenced(face.face)
+	return face.hb_font != nil
 }
 
 face_glyph :: proc(manager: ^Manager, face_id: int, index: u32) -> ^Glyph {

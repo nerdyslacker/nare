@@ -43,11 +43,33 @@ TAB_HIT_RIGHT :: -3
 tab_text_width :: proc(font: ^fonts.Manager, text: string, bold: bool) -> int {
 	width := 0
 	style := fonts.Style.Bold if bold else .Regular
+	previous_symbol := false
 	for codepoint in text {
+		is_symbol := ui_symbol_codepoint(codepoint)
+		if previous_symbol && !is_symbol do width += ui_symbol_gap(font)
 		glyph := fonts.glyph_for_codepoint(font, codepoint, style)
 		width += glyph.advance if glyph != nil else font.cell_width
+		previous_symbol = is_symbol
 	}
 	return width
+}
+
+ui_symbol_gap :: proc(font: ^fonts.Manager) -> int {
+	// Roughly a quarter-cell keeps icons distinct without inserting the full
+	// monospace space that made labels look detached.
+	return max(2, (font.cell_width+3)/4)
+}
+
+ui_symbol_codepoint :: proc(codepoint: rune) -> bool {
+	return codepoint >= 0xe000 && codepoint <= 0xe00a ||
+	       codepoint >= 0xe0a0 && codepoint <= 0xe0d7 ||
+	       codepoint >= 0xe200 && codepoint <= 0xe2a9 ||
+	       codepoint >= 0xe300 && codepoint <= 0xe3e3 ||
+	       codepoint >= 0xe5fa && codepoint <= 0xe6b7 ||
+	       codepoint >= 0xe700 && codepoint <= 0xe8ef ||
+	       codepoint >= 0xea60 && codepoint <= 0xec1e ||
+	       codepoint >= 0xed00 && codepoint <= 0xf533 ||
+	       codepoint >= 0xf0001 && codepoint <= 0xf1af0
 }
 
 draw_workspace_tab_bar :: proc(
@@ -480,13 +502,17 @@ ui_fit_text :: proc(font: ^fonts.Manager, text: string, available: int) -> strin
 	if ellipsis_width > available do return ""
 	output := make([dynamic]byte, 0, len(text), context.temp_allocator)
 	width := 0
+	previous_symbol := false
 	for codepoint in text {
+		is_symbol := ui_symbol_codepoint(codepoint)
+		gap := ui_symbol_gap(font) if previous_symbol && !is_symbol else 0
 		glyph := fonts.glyph_for_codepoint(font, codepoint, .Regular)
 		advance := glyph.advance if glyph != nil else font.cell_width
-		if width+advance+ellipsis_width > available do break
+		if width+gap+advance+ellipsis_width > available do break
 		encoded, count := utf8.encode_rune(codepoint)
 		append(&output, ..encoded[:count])
-		width += advance
+		width += gap+advance
+		previous_symbol = is_symbol
 	}
 	append(&output, ..transmute([]byte)ellipsis)
 	return string(output[:])
@@ -568,9 +594,16 @@ fill_tab_rect :: proc(pixels: []u32, window: ^x11.Window, x, y, width, height: i
 draw_tab_text :: proc(pixels: []u32, window: ^x11.Window, font: ^fonts.Manager, text: string, x, baseline: int, color: u32, bold: bool, clip_left, clip_right: int) {
 	style := fonts.Style.Bold if bold else .Regular
 	pen := x
+	previous_symbol := false
 	for codepoint in text {
+		is_symbol := ui_symbol_codepoint(codepoint)
+		if previous_symbol && !is_symbol do pen += ui_symbol_gap(font)
 		glyph := fonts.glyph_for_codepoint(font, codepoint, style)
-		if glyph == nil { pen += font.cell_width; continue }
+		if glyph == nil {
+			pen += font.cell_width
+			previous_symbol = is_symbol
+			continue
+		}
 		left := pen+glyph.left
 		top := baseline-glyph.top
 		for row in 0..<glyph.height {
@@ -588,6 +621,7 @@ draw_tab_text :: proc(pixels: []u32, window: ^x11.Window, font: ^fonts.Manager, 
 			}
 		}
 		pen += glyph.advance
+		previous_symbol = is_symbol
 		if pen >= clip_right do break
 	}
 }

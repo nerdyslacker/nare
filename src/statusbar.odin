@@ -1026,10 +1026,27 @@ statusbar_group_modules :: proc(workspace: ^Workspace, modules: []config.Status_
 			visible := statusbar_visible_jobs(workspace)
 			if len(visible) > 1 {
 				counts := statusbar_job_counts(visible)
-				if counts.running > 0 do append(&result, {text = fmt.tprintf("RUN %d", counts.running), foreground = foreground, background = background, jobs = true})
-				if counts.succeeded > 0 do append(&result, {text = fmt.tprintf("OK %d", counts.succeeded), foreground = foreground, background = settings.jobs.success_background, jobs = true})
-				if counts.failed > 0 do append(&result, {text = fmt.tprintf("ERR %d", counts.failed), foreground = foreground, background = settings.jobs.failure_background, jobs = true})
-				if counts.cancelled > 0 do append(&result, {text = fmt.tprintf("CANCEL %d", counts.cancelled), foreground = foreground, background = background, jobs = true})
+				first := true
+				if counts.running > 0 {
+					text := fmt.tprintf("RUN %d", counts.running)
+					if first {text = statusbar_join_label(style.label, text); first = false}
+					append(&result, {text = text, foreground = foreground, background = background, jobs = true})
+				}
+				if counts.succeeded > 0 {
+					text := fmt.tprintf("OK %d", counts.succeeded)
+					if first {text = statusbar_join_label(style.label, text); first = false}
+					append(&result, {text = text, foreground = foreground, background = settings.jobs.success_background, jobs = true})
+				}
+				if counts.failed > 0 {
+					text := fmt.tprintf("ERR %d", counts.failed)
+					if first {text = statusbar_join_label(style.label, text); first = false}
+					append(&result, {text = text, foreground = foreground, background = settings.jobs.failure_background, jobs = true})
+				}
+				if counts.cancelled > 0 {
+					text := fmt.tprintf("CANCEL %d", counts.cancelled)
+					if first {text = statusbar_join_label(style.label, text); first = false}
+					append(&result, {text = text, foreground = foreground, background = background, jobs = true})
+				}
 			} else if len(visible) == 1 {
 				job := visible[0]
 				job_background := background
@@ -1076,45 +1093,116 @@ statusbar_module_text :: proc(workspace: ^Workspace, module: config.Status_Modul
 	if tab == nil || pane == nil do return ""
 	owner := pane_tmux_owner(pane)
 	remote := owner != nil && owner.remote_host != ""
+	label := workspace.settings.statusbar.module_styles[int(module)].label
 	switch module {
 	case .Mode:
-		if tab_is_tmux(tab) do return "tmux+ssh" if remote else "tmux"
-		return "ssh" if remote else "local"
+		value := "tmux+ssh" if tab_is_tmux(tab) && remote else "tmux" if tab_is_tmux(tab) else "ssh" if remote else "local"
+		return statusbar_join_label(label, value)
 	case .Session:
-		if tab_is_tmux(tab) && len(tab.tmux_owner.tmux_session.title) > 0 do return statusbar_sanitize(string(tab.tmux_owner.tmux_session.title[:]))
-		if tab.custom_title != "" do return statusbar_sanitize(tab.custom_title)
-		if pane.display_title != "" do return statusbar_sanitize(pane.display_title)
-		if pane.terminal.title != "" do return statusbar_sanitize(pane.terminal.title)
-		return statusbar_sanitize(workspace.title)
+		value := workspace.title
+		if tab_is_tmux(tab) && len(tab.tmux_owner.tmux_session.title) > 0 do value = string(tab.tmux_owner.tmux_session.title[:])
+		else if tab.custom_title != "" do value = tab.custom_title
+		else if pane.display_title != "" do value = pane.display_title
+		else if pane.terminal.title != "" do value = pane.terminal.title
+		return statusbar_join_label(label, statusbar_sanitize(value))
 	case .Host:
-		if remote do return statusbar_sanitize(owner.remote_host)
-		return statusbar_local_hostname(&workspace.statusbar)
+		value := statusbar_sanitize(owner.remote_host) if remote else statusbar_local_hostname(&workspace.statusbar)
+		return statusbar_join_label(label, value)
 	case .Cwd:
 		if workspace.statusbar.cwd_pane != pane || pane.terminal.cwd_changed do statusbar_update_cwd(workspace)
-		return workspace.statusbar.cwd
+		return statusbar_join_label(label, workspace.statusbar.cwd)
 	case .Git:
 		if workspace.statusbar.git_pane != pane do return ""
-		return workspace.statusbar.git
+		value := workspace.statusbar.git
+		if strings.has_prefix(value, "git:") do value = value[len("git:"):]
+		return statusbar_join_label(label, value)
 	case .Command:
 		if tab_is_tmux(tab) {
-			if info := workspace_tmux_pane_info(tab.tmux_owner, pane.tmux_pane_id); info != nil do return statusbar_sanitize(string(info.current_command[:]))
+			if info := workspace_tmux_pane_info(tab.tmux_owner, pane.tmux_pane_id); info != nil do return statusbar_join_label(label, statusbar_sanitize(string(info.current_command[:])))
 			return ""
 		}
 		if workspace.statusbar.command_pane != pane do return ""
-		return workspace.statusbar.command
+		return statusbar_join_label(label, workspace.statusbar.command)
 	case .Size:
 		screen := vt.terminal_screen(&pane.terminal)
-		return fmt.tprintf("%dx%d", screen.columns, screen.rows)
-	case .Tabs: return fmt.tprintf("%d/%d", workspace.active+1, len(workspace.tabs))
-	case .Clock: return workspace.statusbar.clock
-	case .Battery: return workspace.statusbar.battery
-	case .Resource: return workspace.statusbar.resource
+		return statusbar_join_label(label, fmt.tprintf("%dx%d", screen.columns, screen.rows))
+	case .Tabs: return statusbar_join_label(label, fmt.tprintf("%d/%d", workspace.active+1, len(workspace.tabs)))
+	case .Clock: return statusbar_join_label(label, workspace.statusbar.clock)
+	case .Battery:
+		value := workspace.statusbar.battery
+		if strings.has_prefix(value, "BAT ") do value = value[len("BAT "):]
+		return statusbar_join_label(label, value)
+	case .Resource:
+		value := statusbar_resource_text(workspace.statusbar.resource, &workspace.settings.statusbar)
+		return statusbar_join_label(label, value)
 	case .Zoom:
-		if workspace.initial_font_size <= 0 do return "100%"
-		return fmt.tprintf("%d%%", (workspace.font_size*100+workspace.initial_font_size/2)/workspace.initial_font_size)
-	case .Jobs: return workspace.statusbar.jobs_text
+		value := "100%"
+		if workspace.initial_font_size > 0 do value = fmt.tprintf("%d%%", (workspace.font_size*100+workspace.initial_font_size/2)/workspace.initial_font_size)
+		return statusbar_join_label(label, value)
+	case .Jobs: return statusbar_join_label(label, workspace.statusbar.jobs_text)
 	}
 	return ""
+}
+
+statusbar_join_label :: proc(label, value: string) -> string {
+	if value == "" do return ""
+	clean_label := statusbar_sanitize(label)
+	if clean_label == "" do return value
+	// A regular space occupies a full terminal cell in a monospace font. Nerd
+	// Font symbols already include their own side bearings, so adding that cell
+	// makes the icon look detached and perceptually smaller than its value.
+	if statusbar_symbol_label(clean_label) do return fmt.tprintf("%s%s", clean_label, value)
+	last := clean_label[len(clean_label)-1]
+	if last == ' ' || last == '\t' || last == ':' || last == '/' || last == '#' || last == '@' do return fmt.tprintf("%s%s", clean_label, value)
+	return fmt.tprintf("%s %s", clean_label, value)
+}
+
+statusbar_symbol_label :: proc(label: string) -> bool {
+	if label == "" do return false
+	remaining := label
+	found := false
+	for remaining != "" {
+		codepoint, width := utf8.decode_rune_in_string(remaining)
+		if width <= 0 || codepoint == utf8.RUNE_ERROR && width == 1 do return false
+		remaining = remaining[width:]
+		is_symbol := codepoint >= 0xe000 && codepoint <= 0xe00a ||
+		             codepoint >= 0xe0a0 && codepoint <= 0xe0d7 ||
+		             codepoint >= 0xe200 && codepoint <= 0xe2a9 ||
+		             codepoint >= 0xe300 && codepoint <= 0xe3e3 ||
+		             codepoint >= 0xe5fa && codepoint <= 0xe6b7 ||
+		             codepoint >= 0xe700 && codepoint <= 0xe8ef ||
+		             codepoint >= 0xea60 && codepoint <= 0xec1e ||
+		             codepoint >= 0xed00 && codepoint <= 0xf533 ||
+		             codepoint >= 0xf0001 && codepoint <= 0xf1af0
+		if !is_symbol do return false
+		found = true
+	}
+	return found
+}
+
+statusbar_find_text :: proc(value, needle: string) -> int {
+	if len(needle) == 0 do return 0
+	if len(needle) > len(value) do return -1
+	for index in 0..=len(value)-len(needle) do if value[index:index+len(needle)] == needle do return index
+	return -1
+}
+
+statusbar_resource_text :: proc(value: string, settings: ^config.Statusbar_Settings) -> string {
+	if value == "" || settings == nil do return value
+	ram_at := statusbar_find_text(value, " RAM ")
+	storage_at := statusbar_find_text(value, " STORAGE ")
+	if strings.has_prefix(value, "CPU ") && ram_at > 4 && storage_at > ram_at+5 {
+		cpu := statusbar_join_label(settings.resource_cpu_label, value[4:ram_at])
+		ram := statusbar_join_label(settings.resource_ram_label, value[ram_at+5:storage_at])
+		storage := statusbar_join_label(settings.resource_storage_label, value[storage_at+9:])
+		return fmt.tprintf("%s %s %s", cpu, ram, storage)
+	}
+	if strings.has_prefix(value, "RAM ") && storage_at > 4 {
+		ram := statusbar_join_label(settings.resource_ram_label, value[4:storage_at])
+		storage := statusbar_join_label(settings.resource_storage_label, value[storage_at+9:])
+		return fmt.tprintf("%s %s", ram, storage)
+	}
+	return value
 }
 
 statusbar_local_hostname :: proc(state: ^Statusbar_State) -> string {
