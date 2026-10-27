@@ -16,7 +16,8 @@ Box_Lines :: struct {
 is_cell_graphic :: proc(codepoint: rune) -> bool {
 	return codepoint >= 0x23ba && codepoint <= 0x23bd ||
 	       codepoint >= 0x2500 && codepoint <= 0x259f ||
-	       codepoint >= 0x2800 && codepoint <= 0x28ff
+	       codepoint >= 0x2800 && codepoint <= 0x28ff ||
+	       codepoint == 0xe0b4 || codepoint == 0xe0b6
 }
 
 append_cell_graphic :: proc(
@@ -26,6 +27,10 @@ append_cell_graphic :: proc(
 	color: u32,
 ) -> bool {
 	if width <= 0 || height <= 0 do return false
+	if codepoint == 0xe0b4 || codepoint == 0xe0b6 {
+		append_powerline_round_cap(output, x, y, width, height, codepoint == 0xe0b4, color)
+		return true
+	}
 	if codepoint >= 0x23ba && codepoint <= 0x23bd {
 		positions := [4]int{1, 3, 7, 9}
 		thickness := line_thickness(min(width, height), .Light)
@@ -338,6 +343,41 @@ append_diagonal :: proc(
 		if pixel_x == last_x && pixel_y == last_y do continue
 		append_rectangle(output, x+pixel_x, y+pixel_y, 1, 1, color)
 		last_x, last_y = pixel_x, pixel_y
+	}
+}
+
+append_powerline_round_cap :: proc(
+	output: ^[dynamic]Command,
+	x, y, width, height: int,
+	round_right: bool,
+	color: u32,
+) {
+	SAMPLE_GRID :: 8
+	sample_total :: SAMPLE_GRID*SAMPLE_GRID
+	center_y := f64(height)/2
+	radius_x := f64(width)
+	radius_y := f64(height)/2
+	for pixel_y in 0..<height {
+		for pixel_x in 0..<width {
+			covered := 0
+			for sample_y in 0..<SAMPLE_GRID {
+				py := f64(pixel_y)+(f64(sample_y)+0.5)/SAMPLE_GRID
+				normal_y := (py-center_y)/radius_y
+				extent := radius_x*math.sqrt(max(0.0, 1-normal_y*normal_y))
+				for sample_x in 0..<SAMPLE_GRID {
+					px := f64(pixel_x)+(f64(sample_x)+0.5)/SAMPLE_GRID
+					inside := px <= extent if round_right else px >= f64(width)-extent
+					if inside do covered += 1
+				}
+			}
+			if covered == 0 do continue
+			opacity := u8(covered*255/sample_total)
+			if opacity == 255 {
+				append_rectangle(output, x+pixel_x, y+pixel_y, 1, 1, color)
+			} else {
+				append_translucent_rectangle(output, x+pixel_x, y+pixel_y, 1, 1, color, opacity)
+			}
+		}
 	}
 }
 
