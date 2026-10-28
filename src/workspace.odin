@@ -1180,6 +1180,11 @@ workspace_event :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
 		input := event.input
 		data := input[:event.input_size]
 		if event.key != .Text do data = keyboard.encode_key(event.key, event.modifiers, pane.terminal.modes.application_cursor, encoded[:])
+		if len(data) > 0 && pane.scrollback_state.active {
+			features.scrollback_close(&pane.scrollback_state)
+			selection.clear(&pane.selection_state)
+			workspace_redraw(workspace, pane, true)
+		}
 		vt.terminal_input(&pane.terminal, data)
 		owner := pane_tmux_owner(pane)
 		if owner != nil && tmux.session_active(&owner.tmux_session) {
@@ -1294,6 +1299,11 @@ workspace_event :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
 			} else {
 				paste: [dynamic]byte
 				keyboard.encode_paste(x11.take_paste(workspace.root), pane.terminal.modes.bracketed_paste, &paste)
+				if len(paste) > 0 && pane.scrollback_state.active {
+					features.scrollback_close(&pane.scrollback_state)
+					selection.clear(&pane.selection_state)
+					workspace_redraw(workspace, pane, true)
+				}
 				vt.terminal_input(&pane.terminal, paste[:])
 				owner := pane_tmux_owner(pane)
 				if owner != nil && tmux.session_ready(&owner.tmux_session) do tmux.append_input_commands(&owner.tmux_session, &owner.pending, pane.tmux_pane_id, paste[:])
