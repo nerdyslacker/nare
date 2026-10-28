@@ -9,6 +9,8 @@ import graphics "../graphics"
 import vt "../vt"
 
 MAX_CONFIG_BYTES :: 64 * 1024
+MAX_CONFIG_TOTAL_BYTES :: 256 * 1024
+MAX_CONFIG_INCLUDE_DEPTH :: 16
 MIN_FONT_SIZE :: 6
 MAX_FONT_SIZE :: 96
 MAX_SCROLLBACK_LINES :: 1_000_000
@@ -187,6 +189,7 @@ Error :: enum {
 	Unknown_Section,
 	Unknown_Key,
 	Invalid_Value,
+	Include_Cycle,
 }
 
 Result :: struct {
@@ -402,22 +405,64 @@ default_path :: proc() -> string {
 }
 
 load :: proc(settings: ^Settings, path: string, missing_ok: bool = false) -> Result {
+	resolved, path_error := os.get_absolute_path(path, context.allocator)
+	if path_error != nil do return {error = .File}
+	defer delete(resolved)
+	stack: [dynamic]string
+	defer delete(stack)
+	total_bytes := i64(0)
+	last_line := 0
+	result := load_file(settings, resolved, missing_ok, &stack, &total_bytes, 0, &last_line)
+	if result.error != .None do return result
+	return validate(settings, last_line)
+}
+
+load_file :: proc(
+	settings: ^Settings,
+	path: string,
+	missing_ok: bool,
+	stack: ^[dynamic]string,
+	total_bytes: ^i64,
+	depth: int,
+	last_line: ^int,
+) -> Result {
+	if depth > MAX_CONFIG_INCLUDE_DEPTH do return {error = .Include_Cycle}
+	for active in stack^ do if active == path do return {error = .Include_Cycle}
 	info, stat_error := os.stat(path, context.temp_allocator)
 	if stat_error != nil {
 		if missing_ok && stat_error == .Not_Exist do return {}
 		return {error = .File}
 	}
 	if info.size < 0 || info.size > MAX_CONFIG_BYTES do return {error = .Too_Large}
+	total_bytes^ += info.size
+	if total_bytes^ > MAX_CONFIG_TOTAL_BYTES do return {error = .Too_Large}
 	data, read_error := os.read_entire_file(path, context.allocator)
 	if read_error != nil do return {error = .File}
 	defer delete(data)
-	return parse(settings, string(data))
+	append(stack, path)
+	defer resize(stack, len(stack^)-1)
+	return parse_contents(settings, string(data), path, stack, total_bytes, depth, last_line)
 }
 
 parse :: proc(settings: ^Settings, contents: string) -> Result {
+	last_line := 0
+	result := parse_contents(settings, contents, "", nil, nil, 0, &last_line)
+	if result.error != .None do return result
+	return validate(settings, last_line)
+}
+
+parse_contents :: proc(
+	settings: ^Settings,
+	contents, source_path: string,
+	stack: ^[dynamic]string,
+	total_bytes: ^i64,
+	depth: int,
+	last_line: ^int,
+) -> Result {
 	remaining := contents
 	section := "main"
 	line_number := 0
+	defer if last_line != nil do last_line^ = line_number
 	for {
 		line, ok := strings.split_lines_iterator(&remaining)
 		if !ok do break
@@ -448,6 +493,18 @@ parse :: proc(settings: ^Settings, contents: string) -> Result {
 		key := strings.trim_space(line[:separator])
 		value := strings.trim_space(line[separator+1:])
 		if key == "" do return {error = .Syntax, line = line_number}
+		if key == "include" {
+			if source_path == "" || stack == nil || total_bytes == nil do return {error = .Invalid_Value, line = line_number}
+			include_path, path_ok := resolve_include_path(source_path, value)
+			if !path_ok do return {error = .Invalid_Value, line = line_number}
+			result := load_file(settings, include_path, false, stack, total_bytes, depth+1, last_line)
+			delete(include_path)
+			if result.error != .None {
+				if result.line == 0 do result.line = line_number
+				return result
+			}
+			continue
+		}
 		if result := apply(settings, section, key, value); result != .None {
 			return {error = result, line = line_number}
 		}
@@ -457,6 +514,10 @@ parse :: proc(settings: ^Settings, contents: string) -> Result {
 			for &binding in settings.tab_rule_bindings do if binding.rule == key[len("tab."):] {binding.source_line = line_number; break}
 		}
 	}
+	return {}
+}
+
+validate :: proc(settings: ^Settings, line_number: int) -> Result {
 	for binding in settings.tmux_profile_bindings {
 		if tmux_profile(settings, binding.profile) == nil do return {error = .Invalid_Value, line = line_number}
 	}
@@ -469,6 +530,31 @@ parse :: proc(settings: ^Settings, contents: string) -> Result {
 		if tab_rule(settings, binding.rule) == nil || shortcut_conflicts(settings, binding.chord, binding.rule) do return {error = .Invalid_Value, line = binding.source_line}
 	}
 	return {}
+}
+
+resolve_include_path :: proc(source_path, value: string) -> (string, bool) {
+	parsed, ok := parse_string(value)
+	if !ok || strings.index_byte(parsed, 0) >= 0 do return "", false
+	candidate := parsed
+	owned := ""
+	if parsed == "~" || strings.has_prefix(parsed, "~/") {
+		home := os.get_env("HOME", context.temp_allocator)
+		if home == "" do return "", false
+		owned = strings.concatenate({home, parsed[1:]})
+		candidate = owned
+	} else if strings.has_prefix(parsed, "~") {
+		return "", false
+	} else if !os.is_absolute_path(parsed) {
+		directory, _ := os.split_path(source_path)
+		joined, join_error := os.join_path({directory, parsed}, context.allocator)
+		if join_error != nil do return "", false
+		owned = joined
+		candidate = owned
+	}
+	absolute, absolute_error := os.get_absolute_path(candidate, context.allocator)
+	if owned != "" do delete(owned)
+	if absolute_error != nil do return "", false
+	return absolute, true
 }
 
 apply :: proc(settings: ^Settings, section, key, value: string) -> Error {
@@ -1351,6 +1437,7 @@ error_string :: proc(error: Error) -> string {
 	case .Unknown_Section: return "unknown config section"
 	case .Unknown_Key: return "unknown config key"
 	case .Invalid_Value: return "invalid config value"
+	case .Include_Cycle: return "recursive config include"
 	}
 	return "unknown config error"
 }

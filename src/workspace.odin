@@ -1065,8 +1065,9 @@ workspace_draw_close_confirmation :: proc(workspace: ^Workspace) {
 	draw_workspace_close_dialog(
 		&workspace.close_surface, font,
 		workspace.settings.ui_colors.tab_bar_background,
-		workspace.settings.ui_colors.active_tab_foreground,
+		workspace.settings.theme.foreground,
 		statusbar_active_accent(workspace),
+		workspace.settings.ui_colors.active_tab_foreground,
 		workspace.settings.ui_colors.inactive_tab_background,
 	)
 }

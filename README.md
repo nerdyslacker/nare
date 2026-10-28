@@ -57,6 +57,15 @@ make
 
 Configuration is loaded from `$XDG_CONFIG_HOME/nare/nare.conf`, or `~/.config/nare/nare.conf`. Copy [nare.conf](nare.conf) as a starting point; command-line options override it.
 
+Split configuration with repeatable `include=` directives. Relative paths are resolved from the file containing the directive, nested includes are supported, and later values override earlier ones:
+
+```ini
+include=bindings.conf
+include=themes/catppuccin-mocha.conf
+```
+
+`include=` is independent of sections and may appear anywhere. Included files use the normal section syntax, for example `[bindings]` in `bindings.conf` or `[colors]` in a theme file. Absolute and `~/...` paths are also accepted. Include a theme before local `[colors]` to use it as a base with local overrides, or after `[colors]` to let the theme override them. Complete Catppuccin Mocha and Latte themes are bundled under `themes/`.
+
 `nare-lite` keeps an independent profile under `$XDG_CONFIG_HOME/nare-lite/nare.conf`, or `~/.config/nare-lite/nare.conf`.
 
 Normal-window startup dimensions use `[window] width` and `height`. Set `remember-size=yes` to restore the last manually resized, non-maximized window; saved dimensions use the matching `nare` or `nare-lite` directory under `$XDG_STATE_HOME`, or `~/.local/state`.

@@ -190,7 +190,7 @@ draw_workspace_search_bar :: proc(
 draw_workspace_close_dialog :: proc(
 	window: ^x11.Window,
 	font: ^fonts.Manager,
-	background, foreground, accent, secondary: u32,
+	background, foreground, accent, accent_foreground, secondary: u32,
 ) {
 	if window.width <= 0 || window.height <= 0 do return
 	byte_count := window.width*window.height*size_of(u32)
@@ -225,7 +225,7 @@ draw_workspace_close_dialog :: proc(
 	cancel_label := "Cancel [Esc]"
 	close_text_x := close_x+max(4, (button_width-tab_text_width(font, close_label, false))/2)
 	cancel_text_x := cancel_x+max(4, (button_width-tab_text_width(font, cancel_label, false))/2)
-	draw_tab_text(pixels, window, font, close_label, close_text_x, button_y+font.ascent+2, foreground, false, close_x+4, close_x+button_width-4)
+	draw_tab_text(pixels, window, font, close_label, close_text_x, button_y+font.ascent+2, accent_foreground, false, close_x+4, close_x+button_width-4)
 	draw_tab_text(pixels, window, font, cancel_label, cancel_text_x, button_y+font.ascent+2, foreground, false, cancel_x+4, cancel_x+button_width-4)
 	xlib.PutImage(window.display, xlib.Drawable(window.id), window.gc, image, 0, 0, 0, 0, u32(window.width), u32(window.height))
 	_ = xlib.Flush(window.display)
