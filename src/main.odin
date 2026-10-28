@@ -901,7 +901,7 @@ redraw :: proc(
 	} else if shell_state != nil && shell_state.active {
 		drawing.draw(renderer, window, terminal, force, nil, features.shell_view_screen(shell_state))
 	} else if scrollback_state != nil && scrollback_state.active {
-		drawing.draw(renderer, window, terminal, force, nil, features.scrollback_view_screen(scrollback_state), scrollbar)
+		drawing.draw(renderer, window, terminal, force, selection_state, features.scrollback_view_screen(scrollback_state), scrollbar)
 	} else {
 		drawing.draw(renderer, window, terminal, force, selection_state, nil, scrollbar)
 	}
@@ -917,8 +917,16 @@ paste_shortcut :: proc(event: x11.Event) -> bool {
 	return event.input_size == 1 && (event.input[0] == 0x16 || event.input[0] == 'v' || event.input[0] == 'V')
 }
 
-copy_selection :: proc(window: ^x11.Window, terminal: ^vt.Terminal, state: ^selection.State, kind: x11.Selection_Kind) {
-	text := selection.text(state, vt.terminal_screen(terminal))
+copy_selection :: proc(
+	window: ^x11.Window,
+	terminal: ^vt.Terminal,
+	state: ^selection.State,
+	kind: x11.Selection_Kind,
+	screen_override: ^vt.Screen = nil,
+) {
+	screen := screen_override
+	if screen == nil do screen = vt.terminal_screen(terminal)
+	text := selection.text(state, screen)
 	defer delete(text)
 	if text != "" do _ = x11.own_selection(window, kind, transmute([]byte)text)
 }

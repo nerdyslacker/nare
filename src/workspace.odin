@@ -1173,7 +1173,7 @@ workspace_event :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
 			workspace_redraw(workspace, pane, true)
 			return true
 		}
-		if copy_shortcut(event) { copy_selection(workspace.root, &pane.terminal, &pane.selection_state, .Clipboard); return true }
+		if copy_shortcut(event) { workspace_copy_selection(workspace, pane, .Clipboard); return true }
 		if paste_shortcut(event) { x11.request_selection(workspace.root, .Clipboard); return true }
 		encoded: [16]byte
 		input := event.input
@@ -1244,7 +1244,7 @@ workspace_event :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
 			return true
 		}
 		if local_mouse && mouse.action == .Press && mouse.button == 3 {
-			copy_selection(workspace.root, &pane.terminal, &pane.selection_state, .Clipboard)
+			workspace_copy_selection(workspace, pane, .Clipboard)
 			return true
 		}
 		if local_mouse && (mouse.button == 4 || mouse.button == 5) {
@@ -1275,7 +1275,7 @@ workspace_event :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
 		}
 		if local_mouse {
 			workspace_handle_selection_mouse(workspace, pane, mouse)
-			if mouse.action == .Release && workspace.settings.window.copy_on_select do copy_selection(workspace.root, &pane.terminal, &pane.selection_state, .Clipboard)
+			if mouse.action == .Release && workspace.settings.window.copy_on_select do workspace_copy_selection(workspace, pane, .Clipboard)
 		} else {
 			encoded: [32]byte
 			data := keyboard.encode_mouse(mouse, pane.terminal.modes.mouse_tracking, pane.terminal.modes.mouse_sgr, encoded[:])
@@ -1445,7 +1445,7 @@ workspace_rename_input :: proc(workspace: ^Workspace, event: x11.Event) {
 
 workspace_handle_selection_mouse :: proc(workspace: ^Workspace, pane: ^Pane, event: keyboard.Mouse_Event) {
 	if event.button != 1 do return
-	screen := vt.terminal_screen(&pane.terminal)
+	screen := workspace_selection_screen(pane)
 	previous := pane.selection_state
 	position := vt.screen_position(screen, event.row-1, event.column-1)
 	switch event.action {
@@ -1453,10 +1453,21 @@ workspace_handle_selection_mouse :: proc(workspace: ^Workspace, pane: ^Pane, eve
 	case .Motion: selection.update(&pane.selection_state, screen, position)
 	case .Release:
 		selection.finish(&pane.selection_state, screen, position)
-		copy_selection(workspace.root, &pane.terminal, &pane.selection_state, .Primary)
+		workspace_copy_selection(workspace, pane, .Primary)
 	}
 	if event.action == .Motion && pane.selection_state == previous do return
 	workspace_redraw(workspace, pane, false)
+}
+
+workspace_selection_screen :: proc(pane: ^Pane) -> ^vt.Screen {
+	if pane == nil do return nil
+	if view := features.scrollback_view_screen(&pane.scrollback_state); view != nil do return view
+	return vt.terminal_screen(&pane.terminal)
+}
+
+workspace_copy_selection :: proc(workspace: ^Workspace, pane: ^Pane, kind: x11.Selection_Kind) {
+	if workspace == nil || pane == nil do return
+	copy_selection(workspace.root, &pane.terminal, &pane.selection_state, kind, workspace_selection_screen(pane))
 }
 
 workspace_handle_search_input :: proc(workspace: ^Workspace, pane: ^Pane, event: x11.Event) {
@@ -1720,7 +1731,7 @@ workspace_shortcut :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
 		if event_matches(event, bindings.focus_up) {tmux.request_focus(&owner.tmux_session, &owner.pending, 'U', pane.tmux_pane_id); return true}
 		if event_matches(event, bindings.focus_down) {tmux.request_focus(&owner.tmux_session, &owner.pending, 'D', pane.tmux_pane_id); return true}
 		if event_matches(event, bindings.swap_pane) {tmux.request_swap_pane(&owner.tmux_session, &owner.pending, pane.tmux_pane_id); return true}
-		if event_matches(event, bindings.copy) { copy_selection(workspace.root, &tab.panes[tab.active].terminal, &tab.panes[tab.active].selection_state, .Clipboard); return true }
+		if event_matches(event, bindings.copy) { workspace_copy_selection(workspace, tab.panes[tab.active], .Clipboard); return true }
 		if event_matches(event, bindings.paste) {x11.request_selection(workspace.root, .Clipboard); return true}
 		if event_matches(event, bindings.font_increase) { workspace_font_size(workspace, workspace.font_size+1); return true }
 		if event_matches(event, bindings.font_decrease) { workspace_font_size(workspace, workspace.font_size-1); return true }
@@ -1751,7 +1762,7 @@ workspace_shortcut :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
 		}
 		return true
 	}
-	if event_matches(event, bindings.copy) { copy_selection(workspace.root, &tab.panes[tab.active].terminal, &tab.panes[tab.active].selection_state, .Clipboard); return true }
+	if event_matches(event, bindings.copy) { workspace_copy_selection(workspace, tab.panes[tab.active], .Clipboard); return true }
 	if event_matches(event, bindings.paste) { x11.request_selection(workspace.root, .Clipboard); return true }
 	if event_matches(event, bindings.font_increase) { workspace_font_size(workspace, workspace.font_size+1); return true }
 	if event_matches(event, bindings.font_decrease) { workspace_font_size(workspace, workspace.font_size-1); return true }

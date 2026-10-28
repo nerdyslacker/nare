@@ -45,9 +45,7 @@ build_row_commands :: proc(
 		delete(shaped)
 	}
 	y := row * window.cell_h
-	for column in 0..<screen.columns {
-		append_rectangle(output, column*window.cell_w, y, window.cell_w, window.cell_h, active_theme.background)
-	}
+	append_rectangle(output, 0, y, window.width, window.cell_h, active_theme.background)
 	append_image_commands(output, window, screen, row, .Below_Background)
 	for column in 0..<screen.columns {
 		cell := vt.cell_at(screen, row, column)
