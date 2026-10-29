@@ -4,6 +4,7 @@ MAX_IMAGE_DIMENSION :: 16_384
 MAX_IMAGE_PIXELS :: 16 * 1024 * 1024
 MAX_IMAGE_BYTES :: 64 * 1024 * 1024
 MAX_CACHE_BYTES :: 256 * 1024 * 1024
+DEFAULT_CACHE_BYTES :: 64 * 1024 * 1024
 MAX_ACTIVE_IMAGES :: 65_536
 MAX_ACTIVE_PLACEMENTS :: 262_144
 MAX_PLACEMENT_CELLS :: 65_535
@@ -123,7 +124,7 @@ Registry :: struct {
 	generation: u64,
 }
 
-registry_init :: proc(registry: ^Registry, budget_bytes: int = MAX_CACHE_BYTES) -> Error {
+registry_init :: proc(registry: ^Registry, budget_bytes: int = DEFAULT_CACHE_BYTES) -> Error {
 	if budget_bytes < 0 || budget_bytes > MAX_CACHE_BYTES do return .Invalid_Limit
 	limits := limits_default()
 	limits.cache_bytes = budget_bytes
@@ -135,10 +136,10 @@ registry_init :: proc(registry: ^Registry, budget_bytes: int = MAX_CACHE_BYTES) 
 
 limits_default :: proc() -> Limits {
 	return {
-		cache_bytes = MAX_CACHE_BYTES,
-		kitty_cache_bytes = MAX_CACHE_BYTES,
-		sixel_cache_bytes = MAX_CACHE_BYTES,
-		iterm2_cache_bytes = MAX_CACHE_BYTES,
+		cache_bytes = DEFAULT_CACHE_BYTES,
+		kitty_cache_bytes = DEFAULT_CACHE_BYTES,
+		sixel_cache_bytes = DEFAULT_CACHE_BYTES,
+		iterm2_cache_bytes = DEFAULT_CACHE_BYTES,
 		max_images = 4096,
 		max_placements = 65_536,
 		max_image_dimension = MAX_IMAGE_DIMENSION,

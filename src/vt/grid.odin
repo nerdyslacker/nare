@@ -60,6 +60,7 @@ Screen :: struct {
 	wrapped: []bool,
 	scrollback: [dynamic][]Cell,
 	scrollback_wrapped: [dynamic]bool,
+	scrollback_start: int,
 	scrollback_limit: int,
 	image_registry: ^graphics.Registry,
 	image_screen: graphics.Screen,
@@ -187,6 +188,7 @@ screen_resize_reflow :: proc(screen: ^Screen, columns, rows: int, attributes: At
 	for row in screen.scrollback do delete(row)
 	clear(&screen.scrollback)
 	clear(&screen.scrollback_wrapped)
+	screen.scrollback_start = 0
 	history_start := max(0, visible_start-screen.scrollback_limit)
 	for index in history_start..<visible_start {
 		row := make([]Cell, columns)
@@ -277,8 +279,8 @@ collect_logical_lines :: proc(screen: ^Screen) -> [dynamic]Logical_Line {
 	for source_index in 0..<source_count {
 		is_history := source_index < len(screen.scrollback)
 		row_index := source_index if is_history else source_index-len(screen.scrollback)
-		row := screen.scrollback[row_index] if is_history else screen.cells[row_index*screen.columns:(row_index+1)*screen.columns]
-		wrapped := screen.scrollback_wrapped[row_index] if is_history else screen.wrapped[row_index]
+		row := screen_scrollback_row(screen, row_index) if is_history else screen.cells[row_index*screen.columns:(row_index+1)*screen.columns]
+		wrapped := screen_scrollback_wrapped(screen, row_index) if is_history else screen.wrapped[row_index]
 		content_length := row_content_length(row)
 		if source_index == len(screen.scrollback) {
 			current.has_viewport = true
@@ -390,20 +392,54 @@ cell_at :: proc(screen: ^Screen, row, column: int) -> ^Cell {
 	return &screen.cells[row * screen.columns + column]
 }
 
+screen_scrollback_index :: proc(screen: ^Screen, row: int) -> int {
+	return (screen.scrollback_start+row)%len(screen.scrollback)
+}
+
+screen_scrollback_row :: proc(screen: ^Screen, row: int) -> []Cell {
+	return screen.scrollback[screen_scrollback_index(screen, row)]
+}
+
+screen_scrollback_wrapped :: proc(screen: ^Screen, row: int) -> bool {
+	return screen.scrollback_wrapped[screen_scrollback_index(screen, row)]
+}
+
+screen_prepare_scrollback :: proc(screen: ^Screen) {
+	keep_count := min(len(screen.scrollback), screen.scrollback_limit)
+	if len(screen.scrollback) == keep_count && (screen.scrollback_start == 0 || keep_count == screen.scrollback_limit) do return
+	remove_count := len(screen.scrollback)-keep_count
+	rows := make([dynamic][]Cell, 0, keep_count)
+	wrapped := make([dynamic]bool, 0, keep_count)
+	for row in 0..<len(screen.scrollback) {
+		cells := screen_scrollback_row(screen, row)
+		if row < remove_count {
+			delete(cells)
+		} else {
+			append(&rows, cells)
+			append(&wrapped, screen_scrollback_wrapped(screen, row))
+		}
+	}
+	delete(screen.scrollback)
+	delete(screen.scrollback_wrapped)
+	screen.scrollback = rows
+	screen.scrollback_wrapped = wrapped
+	screen.scrollback_start = 0
+}
+
 screen_source_row_count :: proc(screen: ^Screen) -> int {
 	return len(screen.scrollback) + screen.rows
 }
 
 screen_source_row :: proc(screen: ^Screen, row: int) -> []Cell {
 	if row < 0 || row >= screen_source_row_count(screen) do return nil
-	if row < len(screen.scrollback) do return screen.scrollback[row]
+	if row < len(screen.scrollback) do return screen_scrollback_row(screen, row)
 	visible_row := row-len(screen.scrollback)
 	return screen.cells[visible_row*screen.columns:(visible_row+1)*screen.columns]
 }
 
 screen_source_wrapped :: proc(screen: ^Screen, row: int) -> bool {
 	if row < 0 || row >= screen_source_row_count(screen) do return false
-	if row < len(screen.scrollback) do return screen.scrollback_wrapped[row]
+	if row < len(screen.scrollback) do return screen_scrollback_wrapped(screen, row)
 	return screen.wrapped[row-len(screen.scrollback)]
 }
 
@@ -647,15 +683,21 @@ scroll_up :: proc(screen: ^Screen, count: int, attributes: Attributes) {
 		if screen.live_prompt_active && screen.live_prompt_row >= screen.scroll_top && screen.live_prompt_row <= screen.scroll_bottom {
 			screen.live_prompt_row = max(screen.scroll_top, screen.live_prompt_row-1)
 		}
-		if screen.scroll_top == 0 && screen.scroll_bottom == screen.rows-1 && screen.scrollback_limit > 0 {
-			row := make([]Cell, screen.columns)
-			copy(row, screen.cells[:screen.columns])
-			append(&screen.scrollback, row)
-			append(&screen.scrollback_wrapped, screen.wrapped[0])
-			if len(screen.scrollback) > screen.scrollback_limit {
-				delete(screen.scrollback[0])
-				ordered_remove(&screen.scrollback, 0)
-				ordered_remove(&screen.scrollback_wrapped, 0)
+		if screen.scroll_top == 0 && screen.scroll_bottom == screen.rows-1 {
+			screen_prepare_scrollback(screen)
+			if screen.scrollback_limit > 0 {
+				row := make([]Cell, screen.columns)
+				copy(row, screen.cells[:screen.columns])
+				if len(screen.scrollback) < screen.scrollback_limit {
+					append(&screen.scrollback, row)
+					append(&screen.scrollback_wrapped, screen.wrapped[0])
+				} else {
+					index := screen.scrollback_start
+					delete(screen.scrollback[index])
+					screen.scrollback[index] = row
+					screen.scrollback_wrapped[index] = screen.wrapped[0]
+					screen.scrollback_start = (index+1)%len(screen.scrollback)
+				}
 			}
 		}
 		for row in screen.scroll_top..<screen.scroll_bottom {

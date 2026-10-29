@@ -119,7 +119,7 @@ close :: proc(controller: ^Controller) {
 	for fd in controller.clients do _ = posix.close(fd)
 	delete(controller.clients)
 	ipc.listener_close(&controller.listener)
-	controller^ = {listener = {fd = -1}}
+	controller^ = {listener = {fd = -1, lock_fd = -1}}
 }
 
 poll_fd :: proc(controller: ^Controller) -> posix.FD {

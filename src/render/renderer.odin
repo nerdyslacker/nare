@@ -67,6 +67,7 @@ init :: proc(
 	cell_width_percent: int = 100,
 	cell_height_percent: int = 100,
 	shared_font: ^fonts.Manager = nil,
+	image_texture_budget: int = MAX_IMAGE_TEXTURE_BYTES,
 ) -> Error {
 	if shared_font != nil {
 		renderer.font = shared_font
@@ -83,7 +84,7 @@ init :: proc(
 	renderer.active = .CPU
 	gpu_ready := false
 	if kind != .CPU {
-		gpu_ready = gpu_init(&renderer.gpu, window)
+		gpu_ready = gpu_init(&renderer.gpu, window, image_texture_budget)
 	}
 	selected, available := select_kind(kind, gpu_ready)
 	if !available {

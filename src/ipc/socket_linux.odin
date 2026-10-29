@@ -28,6 +28,7 @@ Socket_Error :: enum {
 
 Listener :: struct {
 	fd: posix.FD,
+	lock_fd: posix.FD,
 	path: string,
 }
 
@@ -113,14 +114,34 @@ set_socket_nonblocking :: proc(fd: posix.FD) -> bool {
 	return posix.fcntl(fd, .SETFL, flags) >= 0
 }
 
+listener_lock :: proc(path: string) -> (posix.FD, Socket_Error) {
+	lock_path := fmt.aprintf("%s.lock", path)
+	defer delete(lock_path)
+	lock_path_c := strings.clone_to_cstring(lock_path)
+	defer delete(lock_path_c)
+	fd := posix.open(lock_path_c, {.RDWR, .CREAT, .CLOEXEC, .NOFOLLOW}, {.IRUSR, .IWUSR})
+	if fd < 0 do return -1, .Create
+	if posix.lockf(fd, .TLOCK, 0) != .OK {
+		err := posix.errno()
+		_ = posix.close(fd)
+		if err == .EACCES || err == .EAGAIN do return -1, .In_Use
+		return -1, .Create
+	}
+	return fd, .None
+}
+
 listener_open :: proc(path: string) -> (Listener, Socket_Error) {
 	address, path_ok := socket_address(path)
-	if !path_ok do return {fd = -1}, .Invalid_Path
+	if !path_ok do return {fd = -1, lock_fd = -1}, .Invalid_Path
+	lock_fd, lock_error := listener_lock(path)
+	if lock_error != .None do return {fd = -1, lock_fd = -1}, lock_error
+	keep_lock := false
+	defer if !keep_lock do _ = posix.close(lock_fd)
 	fd := posix.socket(.UNIX, .STREAM)
-	if fd < 0 do return {fd = -1}, .Create
+	if fd < 0 do return {fd = -1, lock_fd = -1}, .Create
 	if !set_close_on_exec(fd) || !set_socket_nonblocking(fd) {
 		_ = posix.close(fd)
-		return {fd = -1}, .Create
+		return {fd = -1, lock_fd = -1}, .Create
 	}
 	mask := posix.mode_t{.IRGRP, .IWGRP, .IXGRP, .IROTH, .IWOTH, .IXOTH}
 	old_mask := posix.umask(mask)
@@ -130,23 +151,23 @@ listener_open :: proc(path: string) -> (Listener, Socket_Error) {
 		bind_errno := posix.errno()
 		if bind_errno != .EADDRINUSE {
 			_ = posix.close(fd)
-			return {fd = -1}, .Bind
+			return {fd = -1, lock_fd = -1}, .Bind
 		}
 		probe := posix.socket(.UNIX, .STREAM)
 		if probe < 0 {
 			_ = posix.close(fd)
-			return {fd = -1}, .Create
+			return {fd = -1, lock_fd = -1}, .Create
 		}
 		connect_result := posix.connect(probe, (^posix.sockaddr)(&address), posix.socklen_t(size_of(address)))
 		connect_errno := posix.errno()
 		_ = posix.close(probe)
 		if connect_result == .OK {
 			_ = posix.close(fd)
-			return {fd = -1}, .In_Use
+			return {fd = -1, lock_fd = -1}, .In_Use
 		}
 		if connect_errno != .ECONNREFUSED {
 			_ = posix.close(fd)
-			return {fd = -1}, .Bind
+			return {fd = -1, lock_fd = -1}, .Bind
 		}
 		path_c := strings.clone_to_cstring(path)
 		status: posix.stat_t
@@ -154,12 +175,12 @@ listener_open :: proc(path: string) -> (Listener, Socket_Error) {
 		if stat_result != .OK || !posix.S_ISSOCK(status.st_mode) || status.st_uid != posix.geteuid() {
 			delete(path_c)
 			_ = posix.close(fd)
-			return {fd = -1}, .Unsafe_Existing_Path
+			return {fd = -1, lock_fd = -1}, .Unsafe_Existing_Path
 		}
 		if posix.unlink(path_c) != .OK {
 			delete(path_c)
 			_ = posix.close(fd)
-			return {fd = -1}, .Stale_Cleanup
+			return {fd = -1, lock_fd = -1}, .Stale_Cleanup
 		}
 		delete(path_c)
 		old_mask = posix.umask(mask)
@@ -167,7 +188,7 @@ listener_open :: proc(path: string) -> (Listener, Socket_Error) {
 		_ = posix.umask(old_mask)
 		if bind_result != .OK {
 			_ = posix.close(fd)
-			return {fd = -1}, .Bind
+			return {fd = -1, lock_fd = -1}, .Bind
 		}
 	}
 	path_c := strings.clone_to_cstring(path)
@@ -178,21 +199,22 @@ listener_open :: proc(path: string) -> (Listener, Socket_Error) {
 		_ = posix.unlink(path_c)
 		delete(path_c)
 		_ = posix.close(fd)
-		return {fd = -1}, .Permissions
+		return {fd = -1, lock_fd = -1}, .Permissions
 	}
 	if posix.listen(fd, 16) != .OK {
 		path_c = strings.clone_to_cstring(path)
 		_ = posix.unlink(path_c)
 		delete(path_c)
 		_ = posix.close(fd)
-		return {fd = -1}, .Listen
+		return {fd = -1, lock_fd = -1}, .Listen
 	}
-	return {fd = fd, path = strings.clone(path)}, .None
+	keep_lock = true
+	return {fd = fd, lock_fd = lock_fd, path = strings.clone(path)}, .None
 }
 
 listener_open_runtime :: proc(runtime_directory: string) -> (Listener, Socket_Error) {
 	path, path_error := runtime_socket_path(runtime_directory)
-	if path_error != .None do return {fd = -1}, path_error
+	if path_error != .None do return {fd = -1, lock_fd = -1}, path_error
 	defer delete(path)
 	return listener_open(path)
 }
@@ -205,7 +227,8 @@ listener_close :: proc(listener: ^Listener) {
 		delete(path)
 		delete(listener.path)
 	}
-	listener^ = {fd = -1}
+	if listener.lock_fd >= 0 do _ = posix.close(listener.lock_fd)
+	listener^ = {fd = -1, lock_fd = -1}
 }
 
 connect_socket :: proc(path: string) -> (posix.FD, Socket_Error) {

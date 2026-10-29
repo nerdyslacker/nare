@@ -551,6 +551,7 @@ workspace_new_pane_command :: proc(workspace: ^Workspace, command: []cstring, cw
 		workspace.settings.bold_font, workspace.settings.italic_font, workspace.settings.bold_italic_font,
 		workspace.settings.cell_width_percent, workspace.settings.cell_height_percent,
 		&workspace.font_entry.manager,
+		workspace.settings.graphics_limits.cache_bytes,
 	) != .None {
 		x11.destroy_child(&pane.surface); free(pane); return nil
 	}
@@ -622,6 +623,7 @@ workspace_new_tmux_view :: proc(workspace: ^Workspace, owner: ^Pane, pane_id: in
 		workspace.settings.bold_font, workspace.settings.italic_font, workspace.settings.bold_italic_font,
 		workspace.settings.cell_width_percent, workspace.settings.cell_height_percent,
 		&workspace.font_entry.manager,
+		workspace.settings.graphics_limits.cache_bytes,
 	) != .None {
 		x11.destroy_child(&pane.surface)
 		free(pane)
@@ -1870,6 +1872,7 @@ workspace_reload_config :: proc(workspace: ^Workspace) -> bool {
 				workspace.settings.bold_font, workspace.settings.italic_font, workspace.settings.bold_italic_font,
 				workspace.settings.cell_width_percent, workspace.settings.cell_height_percent,
 				&workspace.font_entry.manager,
+				workspace.settings.graphics_limits.cache_bytes,
 			)
 		}
 		workspace_font_cache_release(workspace.font_cache, old_entry)
@@ -1926,6 +1929,7 @@ workspace_font_size :: proc(workspace: ^Workspace, size: int) {
 			workspace.settings.bold_font, workspace.settings.italic_font, workspace.settings.bold_italic_font,
 			workspace.settings.cell_width_percent, workspace.settings.cell_height_percent,
 			&new_entry.manager,
+			workspace.settings.graphics_limits.cache_bytes,
 		)
 		if font_error != .None do continue
 	}
@@ -1951,6 +1955,7 @@ workspace_refresh_dpi :: proc(workspace: ^Workspace) -> bool {
 			workspace.settings.bold_font, workspace.settings.italic_font, workspace.settings.bold_italic_font,
 			workspace.settings.cell_width_percent, workspace.settings.cell_height_percent,
 			&new_entry.manager,
+			workspace.settings.graphics_limits.cache_bytes,
 		) == .None {
 			vt.terminal_set_cell_size(&pane.terminal, pane.surface.cell_w, pane.surface.cell_h)
 		}

@@ -27,7 +27,7 @@
 - Automatic tmux `-CC` detection with native window tabs and split-pane views, local/SSH profiles, bounded reconnect, external-state reconciliation, and detach/restoration.
 - Bounded, resize-reflowing scrollback with incremental search, smooth wheel navigation, and a draggable scrollbar.
 - X11 PRIMARY and CLIPBOARD selection, bracketed paste, large INCR transfers, OSC 8 links, and keyboard URL hints.
-- Kitty Graphics, Sixel, and iTerm2 inline images with scaling, transparency, clipping, scrolling, and CPU/GPU composition.
+- Kitty Graphics direct transfers, Sixel, and iTerm2 inline images with scaling, transparency, clipping, scrolling, and CPU/GPU composition. Kitty file and shared-memory transfers are rejected because terminal output is untrusted.
 - OSC 0/2/7/8/52/133 and XTGETTCAP support, including prompt navigation and command-output copy or piping.
 - Runtime configuration, bounded image and transfer resources, and bundled terminfo.
 - Optional local server/client mode with isolated windows, bounded authenticated IPC, and waiting or detached client launches.

@@ -146,7 +146,7 @@ image_texture_eviction_index :: proc(entries: []Image_Texture) -> int {
 	return oldest_index
 }
 
-gpu_init :: proc(gpu: ^GPU, window: ^x11.Window) -> bool {
+gpu_init :: proc(gpu: ^GPU, window: ^x11.Window, image_texture_budget: int) -> bool {
 	when !GPU_ENABLED {
 		return false
 	} else {
@@ -183,7 +183,7 @@ gpu_init :: proc(gpu: ^GPU, window: ^x11.Window) -> bool {
 		TexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, ATLAS_WIDTH, ATLAS_HEIGHT, 0, GL_RGBA, GL_UNSIGNED_BYTE, nil)
 		gpu.double_buffered = double_buffered != 0
 		gpu.drawable = xlib.XID(window.id)
-		gpu.image_texture_budget = MAX_IMAGE_TEXTURE_BYTES
+		gpu.image_texture_budget = clamp(image_texture_budget, 0, MAX_IMAGE_TEXTURE_BYTES)
 		if !gpu_resize(gpu, window) {
 			gpu_destroy(gpu, window)
 			return false

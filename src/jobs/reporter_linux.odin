@@ -56,7 +56,7 @@ report_error_string :: proc(err: Report_Error) -> string {
 
 reporter_open :: proc(server: ^Reporter_Server, registry: ^Registry, window: u64) -> bool {
 	if server == nil || registry == nil || window == 0 do return false
-	server^ = {listener = {fd = -1}}
+	server^ = {listener = {fd = -1, lock_fd = -1}}
 	runtime := os.get_env("XDG_RUNTIME_DIR", context.temp_allocator)
 	directory, directory_error := ipc.private_runtime_subdirectory(runtime, "nare")
 	if directory_error != .None do return false
@@ -91,7 +91,7 @@ reporter_close :: proc(server: ^Reporter_Server) {
 	if server.enabled && server.listener.fd >= 0 do ipc.listener_close(&server.listener)
 	delete(server.token)
 	delete(server.path)
-	server^ = {listener = {fd = -1}}
+	server^ = {listener = {fd = -1, lock_fd = -1}}
 }
 
 reporter_accept :: proc(server: ^Reporter_Server) {

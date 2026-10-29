@@ -495,7 +495,6 @@ kitty_error_text :: proc(err: graphics.Kitty_Error) -> string {
 	switch err {
 	case .Unsupported: return "ENOTSUP"
 	case .Image_Limit: return "E2BIG"
-	case .File_IO: return "EBADF:Failed to read image file"
 	case .Malformed, .Invalid_Data: return "EINVAL"
 	case .None: return ""
 	}
@@ -1199,6 +1198,7 @@ erase_display :: proc(terminal: ^Terminal, screen: ^Screen, mode: int, attribute
 		for row in screen.scrollback do delete(row)
 		clear(&screen.scrollback)
 		clear(&screen.scrollback_wrapped)
+		screen.scrollback_start = 0
 	case:
 	}
 }

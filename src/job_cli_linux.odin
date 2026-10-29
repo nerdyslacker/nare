@@ -428,7 +428,10 @@ job_detach_terminal_streams :: proc() -> bool {
 	defer posix.close(devnull)
 	for descriptor in 0..=2 {
 		fd := posix.FD(descriptor)
-		if posix.isatty(fd) && posix.dup2(devnull, fd) < 0 do return false
+		status: posix.stat_t
+		detach: bool = descriptor == 0 || bool(posix.isatty(fd))
+		if !detach && posix.fstat(fd, &status) == .OK do detach = posix.S_ISFIFO(status.st_mode) || posix.S_ISSOCK(status.st_mode)
+		if detach && posix.dup2(devnull, fd) < 0 do return false
 	}
 	return true
 }
