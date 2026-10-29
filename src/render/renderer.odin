@@ -52,6 +52,7 @@ Renderer :: struct {
 	gpu: GPU,
 	active: Kind,
 	ligatures: bool,
+	suspended: bool,
 }
 
 init :: proc(
@@ -124,7 +125,36 @@ destroy :: proc(renderer: ^Renderer, window: ^x11.Window = nil) {
 	renderer^ = {}
 }
 
+suspend :: proc(renderer: ^Renderer, window: ^x11.Window) {
+	if renderer == nil || window == nil || renderer.suspended do return
+	if renderer.active == .GPU {
+		_ = gpu_release_image_textures(&renderer.gpu, window)
+		delete(renderer.gpu.commands)
+		renderer.gpu.commands = nil
+		command_scratch_destroy(&renderer.gpu.command_scratch)
+	}
+	cpu_destroy(&renderer.cpu)
+	renderer.suspended = true
+}
+
+resume :: proc(renderer: ^Renderer, window: ^x11.Window) -> bool {
+	if renderer == nil || window == nil do return false
+	if !renderer.suspended do return true
+	if renderer.active == .GPU && renderer.gpu.ctx != nil {
+		if cpu_damage_resize(&renderer.cpu, window.width, window.height) {
+			renderer.suspended = false
+			return true
+		}
+		gpu_destroy(&renderer.gpu, window)
+	}
+	if !cpu_resize(&renderer.cpu, window) do return false
+	renderer.active = .CPU
+	renderer.suspended = false
+	return true
+}
+
 resize :: proc(renderer: ^Renderer, window: ^x11.Window) -> bool {
+	if renderer.suspended do return false
 	if renderer.active == .GPU {
 		if !cpu_damage_resize(&renderer.cpu, window.width, window.height) do return false
 		if gpu_resize(&renderer.gpu, window) do return true
@@ -137,6 +167,7 @@ resize :: proc(renderer: ^Renderer, window: ^x11.Window) -> bool {
 }
 
 present_cached :: proc(renderer: ^Renderer, window: ^x11.Window) {
+	if renderer.suspended do return
 	if renderer.active == .GPU {
 		_ = gpu_present_cached(&renderer.gpu, window)
 		return
@@ -153,7 +184,7 @@ draw :: proc(
 	screen_override: ^vt.Screen = nil,
 	scrollbar: Scrollbar = {},
 ) {
-	if terminal.modes.synchronized_updates do return
+	if renderer.suspended || terminal.modes.synchronized_updates do return
 	if renderer.active == .CPU {
 		cpu_draw(&renderer.cpu, renderer.font, window, terminal, renderer.ligatures, force, selection_state, screen_override, scrollbar)
 		return

@@ -435,8 +435,10 @@ clear_screen :: proc(registry: ^Registry, screen: Screen) {
 registry_clear :: proc(registry: ^Registry) {
 	had_placements := len(registry.placements) > 0
 	for &resource in registry.resources do delete(resource.pixels)
-	clear(&registry.resources)
-	clear(&registry.placements)
+	delete(registry.resources)
+	delete(registry.placements)
+	registry.resources = nil
+	registry.placements = nil
 	registry.decoded_bytes = 0
 	registry.protocol_bytes = {}
 	if had_placements do registry.generation += 1
@@ -635,6 +637,10 @@ remove_placement_at :: proc(registry: ^Registry, index: int) {
 	resource := find_image(registry, image_id)
 	if resource != nil do resource.placement_count = max(0, resource.placement_count-1)
 	ordered_remove(&registry.placements, index)
+	if len(registry.placements) == 0 {
+		delete(registry.placements)
+		registry.placements = nil
+	}
 	registry.generation += 1
 }
 
@@ -647,9 +653,17 @@ delete_resource_at :: proc(registry: ^Registry, index: int) {
 			had_placements = true
 		}
 	}
+	if len(registry.placements) == 0 {
+		delete(registry.placements)
+		registry.placements = nil
+	}
 	registry.decoded_bytes -= len(registry.resources[index].pixels)
 	registry.protocol_bytes[int(registry.resources[index].protocol)] -= len(registry.resources[index].pixels)
 	delete(registry.resources[index].pixels)
 	ordered_remove(&registry.resources, index)
+	if len(registry.resources) == 0 {
+		delete(registry.resources)
+		registry.resources = nil
+	}
 	if had_placements do registry.generation += 1
 }

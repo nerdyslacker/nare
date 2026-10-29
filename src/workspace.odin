@@ -903,6 +903,7 @@ workspace_layout :: proc(workspace: ^Workspace, resize_grid: bool = true) {
 		for pane, pane_index in tab.panes {
 			visible := active_tab && (tab_is_tmux(tab) || !tab.stacked || pane_index == tab.active)
 			if !visible {
+				drawing.suspend(&pane.renderer, &pane.surface)
 				x11.show_child(&pane.surface, false)
 				pane.visible = false
 				continue
@@ -927,7 +928,13 @@ workspace_layout :: proc(workspace: ^Workspace, resize_grid: bool = true) {
 			old_rows := vt.terminal_screen(&pane.terminal).rows
 			border := workspace.settings.ui_colors.active_border if pane_index == tab.active else workspace.settings.ui_colors.inactive_border
 			x11.set_surface_colors(&pane.surface, workspace.settings.theme.background, border, 1 if count > 1 && (tab_is_tmux(tab) || !tab.stacked) else 0, clear = false)
-			x11.place_child(&pane.surface, x, y, width, height)
+			if pane.renderer.suspended {
+				x11.place_child(&pane.surface, x, y, width, height, false)
+				if !drawing.resume(&pane.renderer, &pane.surface) do continue
+				x11.show_child(&pane.surface, true)
+			} else {
+				x11.place_child(&pane.surface, x, y, width, height)
+			}
 			pane.visible = true
 			renderer_changed := pane.renderer.cpu.width != width || pane.renderer.cpu.height != height
 			if commit_grid && renderer_changed {

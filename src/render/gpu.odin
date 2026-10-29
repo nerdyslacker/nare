@@ -191,6 +191,25 @@ gpu_init :: proc(gpu: ^GPU, window: ^x11.Window) -> bool {
 	}
 }
 
+gpu_release_image_textures :: proc(gpu: ^GPU, window: ^x11.Window) -> bool {
+	when !GPU_ENABLED {
+		return true
+	} else {
+		if gpu.ctx == nil || len(gpu.image_textures) == 0 do return true
+		if MakeCurrent(window.display, xlib.XID(window.id), gpu.ctx) == false do return false
+		for texture in gpu.image_textures {
+			texture_id := texture.texture
+			DeleteTextures(1, &texture_id)
+		}
+		gpu.image_stats.releases += u64(len(gpu.image_textures))
+		delete(gpu.image_textures)
+		gpu.image_textures = nil
+		gpu.image_texture_bytes = 0
+		_ = MakeCurrent(window.display, xlib.XID(0), nil)
+		return true
+	}
+}
+
 gpu_destroy :: proc(gpu: ^GPU, window: ^x11.Window) {
 	when GPU_ENABLED {
 		if gpu.ctx != nil {
@@ -505,6 +524,10 @@ when GPU_ENABLED {
 		DeleteTextures(1, &entry.texture)
 		gpu.image_texture_bytes -= entry.byte_count
 		ordered_remove(&gpu.image_textures, index)
+		if len(gpu.image_textures) == 0 {
+			delete(gpu.image_textures)
+			gpu.image_textures = nil
+		}
 	}
 
 	gpu_draw_commands :: proc(gpu: ^GPU, registry: ^graphics.Registry) {
