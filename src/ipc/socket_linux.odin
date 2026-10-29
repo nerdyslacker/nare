@@ -115,10 +115,8 @@ set_socket_nonblocking :: proc(fd: posix.FD) -> bool {
 }
 
 listener_lock :: proc(path: string) -> (posix.FD, Socket_Error) {
-	lock_path := fmt.aprintf("%s.lock", path)
-	defer delete(lock_path)
-	lock_path_c := strings.clone_to_cstring(lock_path)
-	defer delete(lock_path_c)
+	lock_path := fmt.tprintf("%s.lock", path)
+	lock_path_c := strings.clone_to_cstring(lock_path, context.temp_allocator)
 	fd := posix.open(lock_path_c, {.RDWR, .CREAT, .CLOEXEC, .NOFOLLOW}, {.IRUSR, .IWUSR})
 	if fd < 0 do return -1, .Create
 	if posix.lockf(fd, .TLOCK, 0) != .OK {
@@ -225,6 +223,11 @@ listener_close :: proc(listener: ^Listener) {
 		path := strings.clone_to_cstring(listener.path)
 		_ = posix.unlink(path)
 		delete(path)
+		if listener.lock_fd >= 0 {
+			lock_path := fmt.tprintf("%s.lock", listener.path)
+			lock_path_c := strings.clone_to_cstring(lock_path, context.temp_allocator)
+			_ = posix.unlink(lock_path_c)
+		}
 		delete(listener.path)
 	}
 	if listener.lock_fd >= 0 do _ = posix.close(listener.lock_fd)

@@ -39,7 +39,6 @@ GPU :: struct {
 	commands: [dynamic]Command,
 	image_textures: [dynamic]Image_Texture,
 	image_texture_bytes: int,
-	image_texture_budget: int,
 	image_texture_clock: u64,
 	image_stats: GPU_Image_Stats,
 }
@@ -146,7 +145,7 @@ image_texture_eviction_index :: proc(entries: []Image_Texture) -> int {
 	return oldest_index
 }
 
-gpu_init :: proc(gpu: ^GPU, window: ^x11.Window, image_texture_budget: int) -> bool {
+gpu_init :: proc(gpu: ^GPU, window: ^x11.Window) -> bool {
 	when !GPU_ENABLED {
 		return false
 	} else {
@@ -183,7 +182,6 @@ gpu_init :: proc(gpu: ^GPU, window: ^x11.Window, image_texture_budget: int) -> b
 		TexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, ATLAS_WIDTH, ATLAS_HEIGHT, 0, GL_RGBA, GL_UNSIGNED_BYTE, nil)
 		gpu.double_buffered = double_buffered != 0
 		gpu.drawable = xlib.XID(window.id)
-		gpu.image_texture_budget = clamp(image_texture_budget, 0, MAX_IMAGE_TEXTURE_BYTES)
 		if !gpu_resize(gpu, window) {
 			gpu_destroy(gpu, window)
 			return false
@@ -428,17 +426,18 @@ when GPU_ENABLED {
 				gpu_touch_image_texture(gpu, entry)
 				continue
 			}
-			if !gpu_upload_image(gpu, resource) do return false
+			if !gpu_upload_image(gpu, resource, registry.limits.cache_bytes) do return false
 		}
 		return true
 	}
 
-	gpu_upload_image :: proc(gpu: ^GPU, resource: ^graphics.Resource) -> bool {
+	gpu_upload_image :: proc(gpu: ^GPU, resource: ^graphics.Resource, budget: int) -> bool {
 		channels := graphics.bytes_per_pixel(resource.format)
 		if channels <= 0 || resource.stride%channels != 0 do return false
+		texture_budget := clamp(budget, 0, MAX_IMAGE_TEXTURE_BYTES)
 		byte_count := resource.width*resource.height*channels
-		if byte_count > gpu.image_texture_budget do return false
-		for gpu.image_texture_bytes > gpu.image_texture_budget-byte_count {
+		if byte_count > texture_budget do return false
+		for gpu.image_texture_bytes > texture_budget-byte_count {
 			oldest := image_texture_eviction_index(gpu.image_textures[:])
 			if oldest < 0 do return false
 			gpu_remove_image_texture(gpu, oldest)
