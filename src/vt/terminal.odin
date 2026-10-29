@@ -165,10 +165,11 @@ terminal_init :: proc(
 	scrollback_limit: int = DEFAULT_SCROLLBACK_LINES,
 	osc52_policy: OSC52_Policy = .Disabled,
 	graphics_limits: ^graphics.Limits = nil,
+	scrollback_byte_limit: int = DEFAULT_SCROLLBACK_BYTES,
 ) -> bool {
 	registry_error := graphics.registry_init_with_limits(&terminal.images, graphics_limits^) if graphics_limits != nil else graphics.registry_init(&terminal.images)
 	if registry_error != .None do return false
-	if !screen_init(&terminal.main_screen, columns, rows, scrollback_limit, &terminal.images, .Main) {
+	if !screen_init(&terminal.main_screen, columns, rows, scrollback_limit, &terminal.images, .Main, scrollback_byte_limit) {
 		graphics.registry_destroy(&terminal.images)
 		return false
 	}

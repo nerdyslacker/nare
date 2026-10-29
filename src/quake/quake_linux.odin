@@ -294,8 +294,18 @@ apply_animation_clip :: proc(controller: ^Controller, window_y: int) {
 }
 
 poll_timeout_ms :: proc(controller: ^Controller, fallback: int = 50) -> int {
-	if controller != nil && (controller.state == .Showing || controller.state == .Hiding) do return min(fallback, 16)
-	return fallback
+	if controller == nil do return fallback
+	timeout := fallback
+	if controller.state == .Showing || controller.state == .Hiding {
+		timeout = 16 if timeout < 0 else min(timeout, 16)
+	}
+	if controller.focus_loss_pending {
+		remaining := FOCUS_LOSS_DELAY-time.since(controller.focus_loss_at)
+		focus_timeout := 0
+		if remaining > 0 do focus_timeout = max(1, int((remaining+time.Millisecond-time.Nanosecond)/time.Millisecond))
+		timeout = focus_timeout if timeout < 0 else min(timeout, focus_timeout)
+	}
+	return timeout
 }
 
 calculate_geometry :: proc(area: Rect, width_percent, height_percent: int, alignment: Horizontal_Align, x_offset, y_offset: int) -> Rect {

@@ -24,6 +24,19 @@ Command :: struct {
 	z: i32,
 }
 
+Command_Scratch :: struct {
+	text: [dynamic]rune,
+	clusters: [dynamic]int,
+	shaped: [dynamic]fonts.Shaped_Glyph,
+}
+
+command_scratch_destroy :: proc(scratch: ^Command_Scratch) {
+	delete(scratch.text)
+	delete(scratch.clusters)
+	delete(scratch.shaped)
+	scratch^ = {}
+}
+
 build_row_commands :: proc(
 	output: ^[dynamic]Command,
 	font: ^fonts.Manager,
@@ -34,15 +47,20 @@ build_row_commands :: proc(
 	ligatures: bool,
 	selection_state: ^selection.State = nil,
 	scrollbar: Scrollbar = {},
+	scratch_buffer: ^Command_Scratch = nil,
 ) {
 	clear(output)
-	text: [dynamic]rune
-	clusters: [dynamic]int
-	shaped: [dynamic]fonts.Shaped_Glyph
+	local_scratch: Command_Scratch
+	scratch := scratch_buffer
+	if scratch == nil do scratch = &local_scratch
+	text := scratch.text
+	clusters := scratch.clusters
+	shaped := scratch.shaped
 	defer {
-		delete(text)
-		delete(clusters)
-		delete(shaped)
+		scratch.text = text
+		scratch.clusters = clusters
+		scratch.shaped = shaped
+		if scratch_buffer == nil do command_scratch_destroy(scratch)
 	}
 	y := row * window.cell_h
 	append_rectangle(output, 0, y, window.width, window.cell_h, active_theme.background)

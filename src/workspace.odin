@@ -289,10 +289,39 @@ Workspace_Poll_Target :: struct {
 	job_client: ^Job_Reporter_Client,
 }
 
-PRIVILEGE_CHECK_INTERVAL :: 250*time.Millisecond
+PRIVILEGE_CHECK_INTERVAL :: time.Second
 TMUX_RECONCILE_INTERVAL :: 2*time.Second
 TMUX_MAX_RECONNECT_ATTEMPTS :: 8
 RESIZE_SETTLE_INTERVAL :: 250*time.Millisecond
+
+poll_timeout_limit :: proc(timeout, limit: int) -> int {
+	if limit < 0 do return timeout
+	if timeout < 0 do return limit
+	return min(timeout, limit)
+}
+
+poll_timeout_after :: proc(timeout: int, remaining: time.Duration) -> int {
+	if remaining <= 0 do return 0
+	return poll_timeout_limit(timeout, max(1, int((remaining+time.Millisecond-time.Nanosecond)/time.Millisecond)))
+}
+
+workspace_poll_timeout_ms :: proc(workspace: ^Workspace) -> int {
+	if workspace == nil do return -1
+	timeout := poll_timeout_after(-1, PRIVILEGE_CHECK_INTERVAL-time.since(workspace.last_privilege_check))
+	if workspace.grid_resize_pending {
+		timeout = poll_timeout_after(timeout, RESIZE_SETTLE_INTERVAL-time.tick_since(workspace.last_resize))
+	}
+	if workspace.settings.cursor.blink {
+		interval := time.Duration(workspace.settings.cursor.blink_interval_ms)*time.Millisecond
+		timeout = poll_timeout_after(timeout, interval-time.since(workspace.last_cursor_toggle))
+	}
+	if workspace.statusbar.sample_thread != nil do timeout = poll_timeout_limit(timeout, int(STATUSBAR_SERVICE_INTERVAL/time.Millisecond))
+	for tab in workspace.tabs do for pane in tab.panes {
+		timeout = poll_timeout_limit(timeout, vt.terminal_kitty_timeout_ms(&pane.terminal))
+	}
+	if workspace.quake != nil do timeout = quake.poll_timeout_ms(workspace.quake, timeout)
+	return timeout
+}
 
 workspace_run :: proc(root: ^x11.Window, command: []cstring, settings: ^config.Settings, quake_controller: ^quake.Controller = nil) -> int {
 	workspace: Workspace
@@ -311,8 +340,7 @@ workspace_run :: proc(root: ^x11.Window, command: []cstring, settings: ^config.S
 		clear(&fds)
 		clear(&targets)
 		workspace_append_poll(&workspace, &fds, &targets)
-		poll_timeout := 50
-		if workspace.quake != nil do poll_timeout = quake.poll_timeout_ms(workspace.quake, poll_timeout)
+		poll_timeout := workspace_poll_timeout_ms(&workspace)
 		if posix.poll(raw_data(fds), u64(len(fds)), i32(poll_timeout)) < 0 {
 			if posix.errno() == .EINTR do continue
 			return 1
@@ -502,6 +530,7 @@ workspace_dispatch_poll :: proc(target: Workspace_Poll_Target, events: posix.Pol
 }
 
 workspace_finish_cycle :: proc(workspace: ^Workspace) {
+	for tab in workspace.tabs do for pane in tab.panes do _ = vt.terminal_expire_kitty_transfer(&pane.terminal)
 	workspace_reconcile_job_owners(workspace)
 	workspace_cursor_tick(workspace)
 	workspace_refresh_privileged_tabs(workspace, false)
@@ -572,7 +601,7 @@ workspace_new_pane_command :: proc(workspace: ^Workspace, command: []cstring, cw
 		for argument in command[:len(command)-1] do append_command_argument(&pane.reconnect_command, string(argument))
 		append(&pane.reconnect_command, nil)
 	}
-	if !vt.terminal_init(&pane.terminal, columns, rows, workspace.settings.scrollback_lines, workspace.settings.osc52_policy, &workspace.settings.graphics_limits) {
+	if !vt.terminal_init(&pane.terminal, columns, rows, workspace.settings.scrollback_lines, workspace.settings.osc52_policy, &workspace.settings.graphics_limits, workspace.settings.scrollback_bytes) {
 		pty.shutdown(&pane.process); drawing.destroy(&pane.renderer, &pane.surface); x11.destroy_child(&pane.surface); free(pane); return nil
 	}
 	vt.terminal_set_cell_size(&pane.terminal, pane.surface.cell_w, pane.surface.cell_h)
@@ -628,7 +657,7 @@ workspace_new_tmux_view :: proc(workspace: ^Workspace, owner: ^Pane, pane_id: in
 		return nil
 	}
 	columns, rows := x11.grid_size(&pane.surface)
-	if !vt.terminal_init(&pane.terminal, columns, rows, workspace.settings.scrollback_lines, workspace.settings.osc52_policy, &workspace.settings.graphics_limits) {
+	if !vt.terminal_init(&pane.terminal, columns, rows, workspace.settings.scrollback_lines, workspace.settings.osc52_policy, &workspace.settings.graphics_limits, workspace.settings.scrollback_bytes) {
 		drawing.destroy(&pane.renderer, &pane.surface)
 		x11.destroy_child(&pane.surface)
 		free(pane)
@@ -1876,6 +1905,7 @@ workspace_reload_config :: proc(workspace: ^Workspace) -> bool {
 	}
 	for tab in workspace.tabs do for pane in tab.panes {
 		pane.terminal.main_screen.scrollback_limit = workspace.settings.scrollback_lines
+		pane.terminal.main_screen.scrollback_byte_limit = workspace.settings.scrollback_bytes
 		pane.terminal.osc52_policy = workspace.settings.osc52_policy
 		workspace_apply_cursor(workspace, pane)
 	}
@@ -2715,7 +2745,7 @@ workspace_tmux_activate :: proc(workspace: ^Workspace, pane: ^Pane) -> bool {
 	pane.local_root_foreground = pane.root_foreground
 	pane.root_foreground = false
 	columns, rows := x11.grid_size(&pane.surface)
-	if !vt.terminal_init(&pane.terminal, columns, rows, workspace.settings.scrollback_lines, workspace.settings.osc52_policy, &workspace.settings.graphics_limits) {
+	if !vt.terminal_init(&pane.terminal, columns, rows, workspace.settings.scrollback_lines, workspace.settings.osc52_policy, &workspace.settings.graphics_limits, workspace.settings.scrollback_bytes) {
 		pane.terminal = pane.local_terminal
 		vt.terminal_rebind(&pane.terminal)
 		pane.local_terminal = {}
@@ -2749,7 +2779,7 @@ workspace_tmux_deactivate :: proc(workspace: ^Workspace, pane: ^Pane) {
 workspace_tmux_reset_display :: proc(workspace: ^Workspace, pane: ^Pane) -> bool {
 	columns, rows := x11.grid_size(&pane.surface)
 	replacement: vt.Terminal
-	if !vt.terminal_init(&replacement, columns, rows, workspace.settings.scrollback_lines, workspace.settings.osc52_policy, &workspace.settings.graphics_limits) do return false
+	if !vt.terminal_init(&replacement, columns, rows, workspace.settings.scrollback_lines, workspace.settings.osc52_policy, &workspace.settings.graphics_limits, workspace.settings.scrollback_bytes) do return false
 	vt.terminal_destroy(&pane.terminal)
 	pane.terminal = replacement
 	vt.terminal_rebind(&pane.terminal)

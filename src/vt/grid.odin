@@ -9,6 +9,7 @@ import graphics "../graphics"
 // and are shaped together by HarfBuzz.
 MAX_COMBINING_RUNES :: 16
 DEFAULT_SCROLLBACK_LINES :: 10000
+DEFAULT_SCROLLBACK_BYTES :: 64 * 1024 * 1024
 
 Color_Kind :: enum { Default, Indexed, RGB }
 Color :: struct { kind: Color_Kind, value: u32 }
@@ -62,6 +63,7 @@ Screen :: struct {
 	scrollback_wrapped: [dynamic]bool,
 	scrollback_start: int,
 	scrollback_limit: int,
+	scrollback_byte_limit: int,
 	image_registry: ^graphics.Registry,
 	image_screen: graphics.Screen,
 	image_row_offset: int,
@@ -81,6 +83,7 @@ screen_init :: proc(
 	scrollback_limit: int = 0,
 	image_registry: ^graphics.Registry = nil,
 	image_screen: graphics.Screen = .Main,
+	scrollback_byte_limit: int = DEFAULT_SCROLLBACK_BYTES,
 ) -> bool {
 	if columns <= 0 || rows <= 0 do return false
 	screen.columns = columns
@@ -91,6 +94,7 @@ screen_init :: proc(
 	screen.scroll_top = 0
 	screen.scroll_bottom = rows - 1
 	screen.scrollback_limit = max(0, scrollback_limit)
+	screen.scrollback_byte_limit = max(0, scrollback_byte_limit)
 	screen.image_registry = image_registry
 	screen.image_screen = image_screen
 	for column := 8; column < columns; column += 8 do screen.tab_stops[column] = true
@@ -111,6 +115,11 @@ screen_destroy :: proc(screen: ^Screen) {
 
 screen_has_image_placements :: proc(screen: ^Screen) -> bool {
 	return screen.image_registry != nil && graphics.screen_has_placements(screen.image_registry, screen.image_screen)
+}
+
+screen_scrollback_limit :: proc(screen: ^Screen, columns := 0) -> int {
+	width := screen.columns if columns <= 0 else columns
+	return min(screen.scrollback_limit, screen.scrollback_byte_limit / size_of(Cell) / width)
 }
 
 screen_clear :: proc(screen: ^Screen, attributes: Attributes) {
@@ -189,7 +198,7 @@ screen_resize_reflow :: proc(screen: ^Screen, columns, rows: int, attributes: At
 	clear(&screen.scrollback)
 	clear(&screen.scrollback_wrapped)
 	screen.scrollback_start = 0
-	history_start := max(0, visible_start-screen.scrollback_limit)
+	history_start := max(0, visible_start-screen_scrollback_limit(screen, columns))
 	for index in history_start..<visible_start {
 		row := make([]Cell, columns)
 		copy(row, packed_rows[index])
@@ -405,8 +414,9 @@ screen_scrollback_wrapped :: proc(screen: ^Screen, row: int) -> bool {
 }
 
 screen_prepare_scrollback :: proc(screen: ^Screen) {
-	keep_count := min(len(screen.scrollback), screen.scrollback_limit)
-	if len(screen.scrollback) == keep_count && (screen.scrollback_start == 0 || keep_count == screen.scrollback_limit) do return
+	limit := screen_scrollback_limit(screen)
+	keep_count := min(len(screen.scrollback), limit)
+	if len(screen.scrollback) == keep_count && (screen.scrollback_start == 0 || keep_count == limit) do return
 	remove_count := len(screen.scrollback)-keep_count
 	rows := make([dynamic][]Cell, 0, keep_count)
 	wrapped := make([dynamic]bool, 0, keep_count)
@@ -685,10 +695,11 @@ scroll_up :: proc(screen: ^Screen, count: int, attributes: Attributes) {
 		}
 		if screen.scroll_top == 0 && screen.scroll_bottom == screen.rows-1 {
 			screen_prepare_scrollback(screen)
-			if screen.scrollback_limit > 0 {
+			limit := screen_scrollback_limit(screen)
+			if limit > 0 {
 				row := make([]Cell, screen.columns)
 				copy(row, screen.cells[:screen.columns])
-				if len(screen.scrollback) < screen.scrollback_limit {
+				if len(screen.scrollback) < limit {
 					append(&screen.scrollback, row)
 					append(&screen.scrollback_wrapped, screen.wrapped[0])
 				} else {
@@ -714,7 +725,7 @@ scroll_up :: proc(screen: ^Screen, count: int, attributes: Attributes) {
 				screen.scroll_bottom,
 				len(screen.scrollback),
 				full_viewport,
-				full_viewport && screen.image_screen == .Main && screen.scrollback_limit > 0,
+				full_viewport && screen.image_screen == .Main && screen_scrollback_limit(screen) > 0,
 			)
 		}
 	}

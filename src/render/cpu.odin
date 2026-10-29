@@ -18,6 +18,7 @@ CPU :: struct {
 	previous: []vt.Cell,
 	dirty_rows: []bool,
 	commands: [dynamic]Command,
+	command_scratch: Command_Scratch,
 	previous_cursor: vt.Cursor,
 	previous_cursor_visible: bool,
 	previous_alternate: bool,
@@ -79,6 +80,7 @@ cpu_destroy :: proc(cpu: ^CPU) {
 	delete(cpu.previous)
 	delete(cpu.dirty_rows)
 	delete(cpu.commands)
+	command_scratch_destroy(&cpu.command_scratch)
 	cpu^ = {}
 }
 
@@ -264,7 +266,7 @@ render_row :: proc(
 	scrollbar: Scrollbar,
 ) {
 	if row*window.cell_h >= cpu.height do return
-	build_row_commands(&cpu.commands, font, window, terminal, screen, row, ligatures, selection_state, scrollbar)
+	build_row_commands(&cpu.commands, font, window, terminal, screen, row, ligatures, selection_state, scrollbar, &cpu.command_scratch)
 	for command in cpu.commands {
 		switch command.kind {
 		case .Rectangle:

@@ -37,6 +37,7 @@ GPU :: struct {
 	drawable: xlib.XID,
 	atlas: Atlas,
 	commands: [dynamic]Command,
+	command_scratch: Command_Scratch,
 	image_textures: [dynamic]Image_Texture,
 	image_texture_bytes: int,
 	image_texture_clock: u64,
@@ -208,6 +209,7 @@ gpu_destroy :: proc(gpu: ^GPU, window: ^x11.Window) {
 	}
 	atlas_destroy(&gpu.atlas)
 	delete(gpu.commands)
+	command_scratch_destroy(&gpu.command_scratch)
 	delete(gpu.image_textures)
 	gpu^ = {}
 }
@@ -270,7 +272,7 @@ gpu_draw :: proc(
 			if y >= gpu.height do continue
 			height := min(window.cell_h, gpu.height-y)
 			Scissor(0, i32(gpu.height-y-height), i32(gpu.width), i32(height))
-			build_row_commands(&gpu.commands, font, window, terminal, screen, row, ligatures, selection_state, scrollbar)
+			build_row_commands(&gpu.commands, font, window, terminal, screen, row, ligatures, selection_state, scrollbar, &gpu.command_scratch)
 			if !gpu_prepare_atlas(gpu, font) {
 				BindFramebuffer(GL_FRAMEBUFFER, 0)
 				return false

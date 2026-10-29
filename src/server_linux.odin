@@ -330,7 +330,9 @@ server_run :: proc(settings: ^config.Settings, socket_path: string = "") -> int 
 				append(&targets, {kind = .Workspace, workspace = workspace_targets[index]})
 			}
 		}
-		if posix.poll(raw_data(fds), u64(len(fds)), 50) < 0 {
+		poll_timeout := -1
+		for window in server.windows do poll_timeout = poll_timeout_limit(poll_timeout, workspace_poll_timeout_ms(&window.workspace))
+		if posix.poll(raw_data(fds), u64(len(fds)), i32(poll_timeout)) < 0 {
 			if posix.errno() == .EINTR do continue
 			return 1
 		}

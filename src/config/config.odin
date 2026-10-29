@@ -216,6 +216,7 @@ Settings :: struct {
 	working_directory: string,
 	launch_rule: string,
 	scrollback_lines: int,
+	scrollback_bytes: int,
 	scrollbar_enabled: bool,
 	osc52_policy: vt.OSC52_Policy,
 	graphics_limits: graphics.Limits,
@@ -253,6 +254,7 @@ settings_init :: proc(settings: ^Settings) {
 	settings.term = strings.clone("xterm-256color")
 	settings.working_directory = strings.clone("")
 	settings.scrollback_lines = 10000
+	settings.scrollback_bytes = vt.DEFAULT_SCROLLBACK_BYTES
 	settings.scrollbar_enabled = true
 	settings.osc52_policy = .Disabled
 	settings.graphics_limits = graphics.limits_default()
@@ -611,6 +613,10 @@ apply :: proc(settings: ^Settings, section, key, value: string) -> Error {
 			parsed, ok := strconv.parse_int(value)
 			if !ok || parsed < 0 || parsed > MAX_SCROLLBACK_LINES do return .Invalid_Value
 			settings.scrollback_lines = parsed
+		case "max-size-mib":
+			parsed, ok := parse_mebibytes(value, 1)
+			if !ok do return .Invalid_Value
+			settings.scrollback_bytes = parsed
 		case "scrollbar":
 			parsed, ok := parse_bool(value)
 			if !ok do return .Invalid_Value
