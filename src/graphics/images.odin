@@ -10,19 +10,19 @@ MAX_ACTIVE_PLACEMENTS :: 262_144
 MAX_PLACEMENT_CELLS :: 65_535
 MAX_PLACEMENT_PIXELS :: MAX_PLACEMENT_CELLS*MAX_IMAGE_DIMENSION
 
-Pixel_Format :: enum {
+Pixel_Format :: enum u8 {
 	RGB8,
 	RGBA8,
 }
 
-Protocol :: enum {
+Protocol :: enum u8 {
 	None,
 	Kitty,
 	Sixel,
 	ITerm2,
 }
 
-Screen :: enum {
+Screen :: enum u8 {
 	Main,
 	Alternate,
 }

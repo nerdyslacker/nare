@@ -11,7 +11,7 @@ MAX_COMBINING_RUNES :: 16
 DEFAULT_SCROLLBACK_LINES :: 10000
 DEFAULT_SCROLLBACK_BYTES :: 64 * 1024 * 1024
 
-Color_Kind :: enum { Default, Indexed, RGB }
+Color_Kind :: enum u8 { Default, Indexed, RGB }
 Color :: struct { kind: Color_Kind, value: u32 }
 
 Shell_Marker :: enum { Prompt, Command, Output, Finished }
@@ -34,14 +34,14 @@ Attributes :: struct {
 Cell :: struct {
 	codepoint: rune,
 	combining: [MAX_COMBINING_RUNES]rune,
+	hyperlink_id: u32,
+	shell_exit_status: i32,
+	attributes: Attributes,
 	combining_count: u8,
 	width: u8,
 	continuation: bool,
-	hyperlink_id: u32,
 	shell_markers: Shell_Markers,
-	shell_exit_status: i32,
 	shell_exit_status_set: bool,
-	attributes: Attributes,
 }
 
 Cursor :: struct { row, column: int }
