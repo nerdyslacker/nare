@@ -14,6 +14,7 @@ MAX_CONFIG_INCLUDE_DEPTH :: 16
 MIN_FONT_SIZE :: 6
 MAX_FONT_SIZE :: 96
 MAX_SCROLLBACK_LINES :: 1_000_000
+DEFAULT_SCROLLBACK_TOTAL_BYTES :: 256 * 1024 * 1024
 MAX_TERM_BYTES :: 64
 MAX_STARTUP_COMMAND_BYTES :: 4096
 MAX_TMUX_PROFILES :: 32
@@ -217,6 +218,7 @@ Settings :: struct {
 	launch_rule: string,
 	scrollback_lines: int,
 	scrollback_bytes: int,
+	scrollback_total_bytes: int,
 	scrollbar_enabled: bool,
 	osc52_policy: vt.OSC52_Policy,
 	graphics_limits: graphics.Limits,
@@ -255,6 +257,7 @@ settings_init :: proc(settings: ^Settings) {
 	settings.working_directory = strings.clone("")
 	settings.scrollback_lines = 10000
 	settings.scrollback_bytes = vt.DEFAULT_SCROLLBACK_BYTES
+	settings.scrollback_total_bytes = DEFAULT_SCROLLBACK_TOTAL_BYTES
 	settings.scrollbar_enabled = true
 	settings.osc52_policy = .Disabled
 	settings.graphics_limits = graphics.limits_default()
@@ -617,6 +620,10 @@ apply :: proc(settings: ^Settings, section, key, value: string) -> Error {
 			parsed, ok := parse_mebibytes(value, 1)
 			if !ok do return .Invalid_Value
 			settings.scrollback_bytes = parsed
+		case "total-size-mib":
+			parsed, ok := parse_mebibytes(value, 1)
+			if !ok do return .Invalid_Value
+			settings.scrollback_total_bytes = parsed
 		case "scrollbar":
 			parsed, ok := parse_bool(value)
 			if !ok do return .Invalid_Value

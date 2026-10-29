@@ -531,11 +531,50 @@ workspace_dispatch_poll :: proc(target: Workspace_Poll_Target, events: posix.Pol
 
 workspace_finish_cycle :: proc(workspace: ^Workspace) {
 	for tab in workspace.tabs do for pane in tab.panes do _ = vt.terminal_expire_kitty_transfer(&pane.terminal)
+	workspace_enforce_scrollback_budget(workspace)
 	workspace_reconcile_job_owners(workspace)
 	workspace_cursor_tick(workspace)
 	workspace_refresh_privileged_tabs(workspace, false)
 	statusbar_auto_hide_tick(workspace)
 	statusbar_tick(workspace)
+}
+
+workspace_enforce_scrollback_budget :: proc(workspace: ^Workspace) {
+	if workspace == nil || workspace.settings == nil do return
+	total, pane_count := 0, 0
+	for tab in workspace.tabs do for pane in tab.panes {
+		screens := [2]^vt.Screen{&pane.terminal.main_screen, nil}
+		if pane.has_local_terminal do screens[1] = &pane.local_terminal.main_screen
+		for screen in screens {
+			if screen == nil do continue
+			total += vt.screen_scrollback_bytes(screen)
+			if len(screen.scrollback) > 0 do pane_count += 1
+		}
+	}
+	over := total-workspace.settings.scrollback_total_bytes
+	if over <= 0 do return
+
+	for tab in workspace.tabs do for pane in tab.panes {
+		screens := [2]^vt.Screen{&pane.terminal.main_screen, nil}
+		if pane.has_local_terminal do screens[1] = &pane.local_terminal.main_screen
+		for screen in screens {
+			if screen == nil || len(screen.scrollback) == 0 do continue
+			share := (over+pane_count-1)/pane_count
+			row_bytes := screen.columns*size_of(vt.Cell)
+			remove_rows := min(len(screen.scrollback), (share+row_bytes-1)/row_bytes)
+			before := vt.screen_scrollback_bytes(screen)
+			if vt.screen_trim_scrollback(screen, len(screen.scrollback)-remove_rows) {
+				over = max(0, over-(before-vt.screen_scrollback_bytes(screen)))
+				if screen == &pane.terminal.main_screen {
+					features.scrollback_refresh(&pane.scrollback_state, screen)
+					if pane.search_state.active do features.refresh(&pane.search_state, screen)
+					if pane.shell_state.active do features.shell_refresh(&pane.shell_state, screen)
+				}
+			}
+			pane_count -= 1
+			if over == 0 do return
+		}
+	}
 }
 
 workspace_reconcile_job_owners :: proc(workspace: ^Workspace) {
@@ -1913,9 +1952,23 @@ workspace_reload_config :: proc(workspace: ^Workspace) -> bool {
 	for tab in workspace.tabs do for pane in tab.panes {
 		pane.terminal.main_screen.scrollback_limit = workspace.settings.scrollback_lines
 		pane.terminal.main_screen.scrollback_byte_limit = workspace.settings.scrollback_bytes
+		history_rows := len(pane.terminal.main_screen.scrollback)
+		vt.screen_prepare_scrollback(&pane.terminal.main_screen)
+		if len(pane.terminal.main_screen.scrollback) != history_rows {
+			features.scrollback_refresh(&pane.scrollback_state, &pane.terminal.main_screen)
+			if pane.search_state.active do features.refresh(&pane.search_state, &pane.terminal.main_screen)
+			if pane.shell_state.active do features.shell_refresh(&pane.shell_state, &pane.terminal.main_screen)
+		}
 		pane.terminal.osc52_policy = workspace.settings.osc52_policy
+		if pane.has_local_terminal {
+			pane.local_terminal.main_screen.scrollback_limit = workspace.settings.scrollback_lines
+			pane.local_terminal.main_screen.scrollback_byte_limit = workspace.settings.scrollback_bytes
+			vt.screen_prepare_scrollback(&pane.local_terminal.main_screen)
+			pane.local_terminal.osc52_policy = workspace.settings.osc52_policy
+		}
 		workspace_apply_cursor(workspace, pane)
 	}
+	workspace_enforce_scrollback_budget(workspace)
 	statusbar_tick(workspace, true)
 	workspace_layout(workspace)
 	return true

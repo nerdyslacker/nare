@@ -451,6 +451,16 @@ screen_has_placements :: proc(registry: ^Registry, screen: Screen) -> bool {
 	return false
 }
 
+trim_history :: proc(registry: ^Registry, screen: Screen, history_rows: int) {
+	oldest_row := -max(0, history_rows)
+	for index := len(registry.placements)-1; index >= 0; index -= 1 {
+		placement := registry.placements[index]
+		if placement.screen == screen && placement.row+placement.rows <= oldest_row {
+			remove_placement_at(registry, index)
+		}
+	}
+}
+
 scroll_up :: proc(
 	registry: ^Registry,
 	screen: Screen,

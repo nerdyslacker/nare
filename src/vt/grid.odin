@@ -122,6 +122,11 @@ screen_scrollback_limit :: proc(screen: ^Screen, columns := 0) -> int {
 	return min(screen.scrollback_limit, screen.scrollback_byte_limit / size_of(Cell) / width)
 }
 
+screen_scrollback_bytes :: proc(screen: ^Screen) -> int {
+	if screen == nil do return 0
+	return len(screen.scrollback)*screen.columns*size_of(Cell)
+}
+
 screen_clear :: proc(screen: ^Screen, attributes: Attributes) {
 	if screen.image_registry != nil do graphics.clear_screen(screen.image_registry, screen.image_screen)
 	blank := blank_cell(attributes)
@@ -417,6 +422,16 @@ screen_prepare_scrollback :: proc(screen: ^Screen) {
 	limit := screen_scrollback_limit(screen)
 	keep_count := min(len(screen.scrollback), limit)
 	if len(screen.scrollback) == keep_count && (screen.scrollback_start == 0 || keep_count == limit) do return
+	screen_retain_scrollback(screen, keep_count)
+}
+
+screen_trim_scrollback :: proc(screen: ^Screen, keep_count: int) -> bool {
+	if screen == nil || keep_count >= len(screen.scrollback) do return false
+	screen_retain_scrollback(screen, max(0, keep_count))
+	return true
+}
+
+screen_retain_scrollback :: proc(screen: ^Screen, keep_count: int) {
 	remove_count := len(screen.scrollback)-keep_count
 	rows := make([dynamic][]Cell, 0, keep_count)
 	wrapped := make([dynamic]bool, 0, keep_count)
@@ -434,6 +449,7 @@ screen_prepare_scrollback :: proc(screen: ^Screen) {
 	screen.scrollback = rows
 	screen.scrollback_wrapped = wrapped
 	screen.scrollback_start = 0
+	if screen.image_registry != nil do graphics.trim_history(screen.image_registry, screen.image_screen, keep_count)
 }
 
 screen_source_row_count :: proc(screen: ^Screen) -> int {
