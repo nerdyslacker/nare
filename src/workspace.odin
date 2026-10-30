@@ -8,6 +8,7 @@ import "core:time"
 import config "config"
 import features "features"
 import fonts "font"
+import graphics "graphics"
 import keyboard "input"
 import jobs "jobs"
 import pty "pty"
@@ -185,6 +186,8 @@ Workspace :: struct {
 	font_cache: ^Workspace_Font_Cache,
 	local_font_cache: Workspace_Font_Cache,
 	font_entry: ^Workspace_Font_Cache_Entry,
+	graphics_cache: ^graphics.Shared_Cache,
+	local_graphics_cache: graphics.Shared_Cache,
 	renderer: drawing.Kind,
 	ligatures: bool,
 	title: string,
@@ -361,6 +364,7 @@ workspace_init :: proc(
 	font_cache: ^Workspace_Font_Cache = nil,
 	overrides: Workspace_Overrides = {},
 	quake_controller: ^quake.Controller = nil,
+	graphics_cache: ^graphics.Shared_Cache = nil,
 ) -> bool {
 	font_size := overrides.font_size if overrides.override_font_size else settings.font_size
 	renderer := overrides.renderer if overrides.override_renderer else settings.renderer
@@ -376,12 +380,23 @@ workspace_init :: proc(
 	workspace.statusbar.auto_hide_revealed = !settings.statusbar.auto_hide
 	workspace.job_reporter.listener.fd = -1
 	_ = jobs.reporter_open(&workspace.job_reporter, &workspace.jobs, u64(root.id))
+	selected_graphics_cache := graphics_cache
+	if selected_graphics_cache == nil {
+		if !graphics.shared_cache_init(&workspace.local_graphics_cache) {
+			jobs.reporter_close(&workspace.job_reporter)
+			delete(workspace.title)
+			return false
+		}
+		selected_graphics_cache = &workspace.local_graphics_cache
+	}
+	workspace.graphics_cache = selected_graphics_cache
 	selected_font_cache := font_cache
 	if selected_font_cache == nil do selected_font_cache = &workspace.local_font_cache
 	workspace.font_cache = selected_font_cache
 	workspace.font_entry = workspace_font_cache_acquire(selected_font_cache, settings, workspace.font_size, root.dpi)
 	if workspace.font_entry == nil {
 		jobs.reporter_close(&workspace.job_reporter)
+		if workspace.graphics_cache == &workspace.local_graphics_cache do graphics.shared_cache_destroy(&workspace.local_graphics_cache)
 		delete(workspace.title)
 		return false
 	}
@@ -396,6 +411,7 @@ workspace_init :: proc(
 		workspace_font_cache_release(workspace.font_cache, workspace.font_entry)
 		workspace.font_entry = nil
 		if workspace.font_cache == &workspace.local_font_cache do workspace_font_cache_destroy(&workspace.local_font_cache)
+		if workspace.graphics_cache == &workspace.local_graphics_cache do graphics.shared_cache_destroy(&workspace.local_graphics_cache)
 		delete(workspace.title)
 		return false
 	}
@@ -641,7 +657,7 @@ workspace_new_pane_command :: proc(workspace: ^Workspace, command: []cstring, cw
 		for argument in command[:len(command)-1] do append_command_argument(&pane.reconnect_command, string(argument))
 		append(&pane.reconnect_command, nil)
 	}
-	if !vt.terminal_init(&pane.terminal, columns, rows, workspace.settings.scrollback_lines, workspace.settings.osc52_policy, &workspace.settings.graphics_limits, workspace.settings.scrollback_bytes) {
+	if !vt.terminal_init(&pane.terminal, columns, rows, workspace.settings.scrollback_lines, workspace.settings.osc52_policy, &workspace.settings.graphics_limits, workspace.settings.scrollback_bytes, workspace.graphics_cache) {
 		pty.shutdown(&pane.process); drawing.destroy(&pane.renderer, &pane.surface); x11.destroy_child(&pane.surface); free(pane); return nil
 	}
 	vt.terminal_set_cell_size(&pane.terminal, pane.surface.cell_w, pane.surface.cell_h)
@@ -697,7 +713,7 @@ workspace_new_tmux_view :: proc(workspace: ^Workspace, owner: ^Pane, pane_id: in
 		return nil
 	}
 	columns, rows := x11.grid_size(&pane.surface)
-	if !vt.terminal_init(&pane.terminal, columns, rows, workspace.settings.scrollback_lines, workspace.settings.osc52_policy, &workspace.settings.graphics_limits, workspace.settings.scrollback_bytes) {
+	if !vt.terminal_init(&pane.terminal, columns, rows, workspace.settings.scrollback_lines, workspace.settings.osc52_policy, &workspace.settings.graphics_limits, workspace.settings.scrollback_bytes, workspace.graphics_cache) {
 		drawing.destroy(&pane.renderer, &pane.surface)
 		x11.destroy_child(&pane.surface)
 		free(pane)
@@ -792,6 +808,8 @@ workspace_destroy :: proc(workspace: ^Workspace) {
 	workspace.font_entry = nil
 	if workspace.font_cache == &workspace.local_font_cache do workspace_font_cache_destroy(&workspace.local_font_cache)
 	workspace.font_cache = nil
+	if workspace.graphics_cache == &workspace.local_graphics_cache do graphics.shared_cache_destroy(&workspace.local_graphics_cache)
+	workspace.graphics_cache = nil
 }
 
 workspace_new_tab :: proc(workspace: ^Workspace) -> bool {
@@ -2806,7 +2824,7 @@ workspace_tmux_activate :: proc(workspace: ^Workspace, pane: ^Pane) -> bool {
 	pane.local_root_foreground = pane.root_foreground
 	pane.root_foreground = false
 	columns, rows := x11.grid_size(&pane.surface)
-	if !vt.terminal_init(&pane.terminal, columns, rows, workspace.settings.scrollback_lines, workspace.settings.osc52_policy, &workspace.settings.graphics_limits, workspace.settings.scrollback_bytes) {
+	if !vt.terminal_init(&pane.terminal, columns, rows, workspace.settings.scrollback_lines, workspace.settings.osc52_policy, &workspace.settings.graphics_limits, workspace.settings.scrollback_bytes, workspace.graphics_cache) {
 		pane.terminal = pane.local_terminal
 		vt.terminal_rebind(&pane.terminal)
 		pane.local_terminal = {}
@@ -2840,7 +2858,7 @@ workspace_tmux_deactivate :: proc(workspace: ^Workspace, pane: ^Pane) {
 workspace_tmux_reset_display :: proc(workspace: ^Workspace, pane: ^Pane) -> bool {
 	columns, rows := x11.grid_size(&pane.surface)
 	replacement: vt.Terminal
-	if !vt.terminal_init(&replacement, columns, rows, workspace.settings.scrollback_lines, workspace.settings.osc52_policy, &workspace.settings.graphics_limits, workspace.settings.scrollback_bytes) do return false
+	if !vt.terminal_init(&replacement, columns, rows, workspace.settings.scrollback_lines, workspace.settings.osc52_policy, &workspace.settings.graphics_limits, workspace.settings.scrollback_bytes, workspace.graphics_cache) do return false
 	vt.terminal_destroy(&pane.terminal)
 	pane.terminal = replacement
 	vt.terminal_rebind(&pane.terminal)

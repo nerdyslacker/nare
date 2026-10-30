@@ -9,6 +9,7 @@ import "core:os"
 import "core:strings"
 import "core:sys/posix"
 import config "config"
+import graphics "graphics"
 import ipc "ipc"
 import drawing "render"
 import x11 "x11"
@@ -45,6 +46,7 @@ Server :: struct {
 	clients: [dynamic]^Server_Client,
 	windows: [dynamic]^Server_Window,
 	font_cache: Workspace_Font_Cache,
+	graphics_cache: graphics.Shared_Cache,
 	next_session_id: u64,
 }
 
@@ -102,6 +104,7 @@ server_destroy :: proc(server: ^Server) {
 	delete(server.windows)
 	delete(server.clients)
 	workspace_font_cache_destroy(&server.font_cache)
+	graphics.shared_cache_destroy(&server.graphics_cache)
 	ipc.listener_close(&server.listener)
 	server^ = {}
 }
@@ -167,7 +170,7 @@ server_launch_window :: proc(server: ^Server, client: ^Server_Client, frame: ^ip
 	x11.set_opacity(&window.root, server.settings.window.background_opacity)
 	x11.set_decorations(&window.root, server.settings.window.decorations)
 	x11.map_and_settle(&window.root)
-	if !workspace_init(&window.workspace, &window.root, window.command[:], server.settings, request.working_directory, &server.font_cache, overrides) {
+	if !workspace_init(&window.workspace, &window.root, window.command[:], server.settings, request.working_directory, &server.font_cache, overrides, graphics_cache = &server.graphics_cache) {
 		x11.close(&window.root)
 		command_destroy(&window.command)
 		free(window)
@@ -290,6 +293,7 @@ server_run :: proc(settings: ^config.Settings, socket_path: string = "") -> int 
 		return 1
 	}
 	server := Server{listener = listener, settings = settings}
+	_ = graphics.shared_cache_init(&server.graphics_cache)
 	defer server_destroy(&server)
 	intrinsics.volatile_store(&server_stop_requested, 0)
 	previous_interrupt := posix.signal(.SIGINT, server_stop_handler)

@@ -5,6 +5,7 @@ MAX_IMAGE_PIXELS :: 16 * 1024 * 1024
 MAX_IMAGE_BYTES :: 64 * 1024 * 1024
 MAX_CACHE_BYTES :: 256 * 1024 * 1024
 DEFAULT_CACHE_BYTES :: 64 * 1024 * 1024
+DEFAULT_SHARED_CACHE_BYTES :: 256 * 1024 * 1024
 MAX_ACTIVE_IMAGES :: 65_536
 MAX_ACTIVE_PLACEMENTS :: 262_144
 MAX_PLACEMENT_CELLS :: 65_535
@@ -117,11 +118,76 @@ Registry :: struct {
 	placements: [dynamic]Placement,
 	decoded_bytes: int,
 	protocol_bytes: [4]int,
+	shared_cache: ^Shared_Cache,
+	shared_index: int,
 	limits: Limits,
 	next_resource_id: u64,
 	next_placement_id: u64,
 	clock: u64,
 	generation: u64,
+}
+
+Shared_Cache :: struct {
+	registries: [dynamic]^Registry,
+	decoded_bytes: int,
+	limit: int,
+	clock: u64,
+}
+
+shared_cache_init :: proc(cache: ^Shared_Cache, limit: int = DEFAULT_SHARED_CACHE_BYTES) -> bool {
+	if cache == nil || limit <= 0 do return false
+	cache.limit = limit
+	return true
+}
+
+shared_cache_destroy :: proc(cache: ^Shared_Cache) {
+	if cache == nil do return
+	for registry in cache.registries {
+		registry.shared_cache = nil
+		registry.shared_index = -1
+	}
+	delete(cache.registries)
+	cache^ = {}
+}
+
+registry_attach_shared_cache :: proc(registry: ^Registry, cache: ^Shared_Cache) {
+	if registry == nil || cache == nil || registry.shared_cache == cache do return
+	if registry.shared_cache != nil do registry_detach_shared_cache(registry)
+	registry.shared_cache = cache
+	registry.shared_index = len(cache.registries)
+	append(&cache.registries, registry)
+	cache.decoded_bytes += registry.decoded_bytes
+	for &resource in registry.resources do resource.last_used = shared_cache_tick(cache)
+}
+
+registry_rebind :: proc(registry: ^Registry) {
+	if registry == nil || registry.shared_cache == nil do return
+	cache := registry.shared_cache
+	if registry.shared_index >= 0 && registry.shared_index < len(cache.registries) {
+		cache.registries[registry.shared_index] = registry
+	}
+}
+
+registry_detach_shared_cache :: proc(registry: ^Registry) {
+	if registry == nil || registry.shared_cache == nil do return
+	cache := registry.shared_cache
+	cache.decoded_bytes = max(0, cache.decoded_bytes-registry.decoded_bytes)
+	index := registry.shared_index
+	if index >= 0 && index < len(cache.registries) {
+		last := len(cache.registries)-1
+		if index != last {
+			cache.registries[index] = cache.registries[last]
+			cache.registries[index].shared_index = index
+		}
+		resize(&cache.registries, last)
+	}
+	registry.shared_cache = nil
+	registry.shared_index = -1
+}
+
+shared_cache_tick :: proc(cache: ^Shared_Cache) -> u64 {
+	cache.clock += 1
+	return cache.clock
 }
 
 registry_init :: proc(registry: ^Registry, budget_bytes: int = DEFAULT_CACHE_BYTES) -> Error {
@@ -164,6 +230,7 @@ registry_init_with_limits :: proc(registry: ^Registry, limits: Limits) -> Error 
 	   limits.max_sixel_colors <= 0 || limits.max_sixel_colors > MAX_SIXEL_COLORS {
 		return .Invalid_Limit
 	}
+	registry.shared_index = -1
 	registry.limits = limits
 	registry.next_resource_id = 1
 	registry.next_placement_id = 1
@@ -171,6 +238,7 @@ registry_init_with_limits :: proc(registry: ^Registry, limits: Limits) -> Error 
 }
 
 registry_destroy :: proc(registry: ^Registry) {
+	registry_detach_shared_cache(registry)
 	for &resource in registry.resources do delete(resource.pixels)
 	delete(registry.resources)
 	delete(registry.placements)
@@ -201,6 +269,10 @@ add_image :: proc(
 		return 0, .Cache_Full
 	}
 	evict_for(registry, protocol, byte_count)
+	if registry.shared_cache != nil {
+		shared_cache_evict_for(registry.shared_cache, byte_count)
+		if registry.shared_cache.decoded_bytes > registry.shared_cache.limit-byte_count do return 0, .Cache_Full
+	}
 	if registry.decoded_bytes > registry.limits.cache_bytes-byte_count ||
 	   registry.protocol_bytes[protocol_index] > protocol_budget-byte_count {
 		return 0, .Cache_Full
@@ -212,7 +284,7 @@ add_image :: proc(
 
 	id := registry.next_resource_id
 	registry.next_resource_id += 1
-	registry.clock += 1
+	last_used := registry_tick(registry)
 	append(&registry.resources, Resource{
 		id = id,
 		protocol = protocol,
@@ -222,10 +294,11 @@ add_image :: proc(
 		stride = image.stride,
 		format = image.format,
 		pixels = image.pixels,
-		last_used = registry.clock,
+		last_used = last_used,
 	})
 	registry.decoded_bytes += byte_count
 	registry.protocol_bytes[protocol_index] += byte_count
+	if registry.shared_cache != nil do registry.shared_cache.decoded_bytes += byte_count
 	image^ = {}
 	return id, .None
 }
@@ -434,6 +507,7 @@ clear_screen :: proc(registry: ^Registry, screen: Screen) {
 
 registry_clear :: proc(registry: ^Registry) {
 	had_placements := len(registry.placements) > 0
+	if registry.shared_cache != nil do registry.shared_cache.decoded_bytes = max(0, registry.shared_cache.decoded_bytes-registry.decoded_bytes)
 	for &resource in registry.resources do delete(resource.pixels)
 	delete(registry.resources)
 	delete(registry.placements)
@@ -603,8 +677,13 @@ bytes_per_pixel :: proc(format: Pixel_Format) -> int {
 }
 
 touch :: proc(registry: ^Registry, resource: ^Resource) {
+	resource.last_used = registry_tick(registry)
+}
+
+registry_tick :: proc(registry: ^Registry) -> u64 {
+	if registry.shared_cache != nil do return shared_cache_tick(registry.shared_cache)
 	registry.clock += 1
-	resource.last_used = registry.clock
+	return registry.clock
 }
 
 protocol_budget :: proc(registry: ^Registry, protocol: Protocol) -> int {
@@ -625,6 +704,25 @@ evict_for :: proc(registry: ^Registry, protocol: Protocol, incoming_bytes: int) 
 	}
 	for registry.decoded_bytes > registry.limits.cache_bytes-incoming_bytes {
 		if !evict_oldest(registry, .None) do return
+	}
+}
+
+shared_cache_evict_for :: proc(cache: ^Shared_Cache, incoming_bytes: int) {
+	for cache.decoded_bytes > cache.limit-incoming_bytes {
+		oldest_registry: ^Registry
+		oldest_index := -1
+		oldest_tick := max(u64)
+		for registry in cache.registries {
+			for resource, index in registry.resources {
+				if resource.placement_count == 0 && resource.last_used < oldest_tick {
+					oldest_registry = registry
+					oldest_index = index
+					oldest_tick = resource.last_used
+				}
+			}
+		}
+		if oldest_registry == nil do return
+		delete_resource_at(oldest_registry, oldest_index)
 	}
 }
 
@@ -669,6 +767,9 @@ delete_resource_at :: proc(registry: ^Registry, index: int) {
 	}
 	registry.decoded_bytes -= len(registry.resources[index].pixels)
 	registry.protocol_bytes[int(registry.resources[index].protocol)] -= len(registry.resources[index].pixels)
+	if registry.shared_cache != nil {
+		registry.shared_cache.decoded_bytes = max(0, registry.shared_cache.decoded_bytes-len(registry.resources[index].pixels))
+	}
 	delete(registry.resources[index].pixels)
 	ordered_remove(&registry.resources, index)
 	if len(registry.resources) == 0 {

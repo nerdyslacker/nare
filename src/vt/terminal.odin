@@ -166,9 +166,11 @@ terminal_init :: proc(
 	osc52_policy: OSC52_Policy = .Disabled,
 	graphics_limits: ^graphics.Limits = nil,
 	scrollback_byte_limit: int = DEFAULT_SCROLLBACK_BYTES,
+	shared_graphics_cache: ^graphics.Shared_Cache = nil,
 ) -> bool {
 	registry_error := graphics.registry_init_with_limits(&terminal.images, graphics_limits^) if graphics_limits != nil else graphics.registry_init(&terminal.images)
 	if registry_error != .None do return false
+	if shared_graphics_cache != nil do graphics.registry_attach_shared_cache(&terminal.images, shared_graphics_cache)
 	if !screen_init(&terminal.main_screen, columns, rows, scrollback_limit, &terminal.images, .Main, scrollback_byte_limit) {
 		graphics.registry_destroy(&terminal.images)
 		return false
@@ -200,6 +202,7 @@ terminal_set_cell_size :: proc(terminal: ^Terminal, width, height: int) {
 // Screens retain a pointer to their owning image registry. Call this after a
 // Terminal value is moved to a different address.
 terminal_rebind :: proc(terminal: ^Terminal) {
+	graphics.registry_rebind(&terminal.images)
 	terminal.main_screen.image_registry = &terminal.images
 	terminal.alternate_screen.image_registry = &terminal.images
 }
