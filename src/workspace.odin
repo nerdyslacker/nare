@@ -337,6 +337,7 @@ workspace_run :: proc(root: ^x11.Window, command: []cstring, settings: ^config.S
 		delete(targets)
 	}
 	for workspace_service(&workspace) {
+		defer free_all(context.temp_allocator)
 		clear(&fds)
 		clear(&targets)
 		workspace_append_poll(&workspace, &fds, &targets)

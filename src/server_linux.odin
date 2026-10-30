@@ -309,6 +309,7 @@ server_run :: proc(settings: ^config.Settings, socket_path: string = "") -> int 
 		delete(workspace_targets)
 	}
 	for intrinsics.volatile_load(&server_stop_requested) == 0 {
+		defer free_all(context.temp_allocator)
 		server_close_finished_windows(&server)
 		server_cleanup_disconnected(&server)
 		clear(&fds)
