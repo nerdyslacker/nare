@@ -23,7 +23,7 @@
 - Nare parses VT/ANSI sequences, Unicode, true color, alternate screens, synchronized updates, mouse input, focus events, and bracketed paste.
 - Fontconfig, FreeType, and HarfBuzz provide fallback fonts, wide and combining characters, color glyphs, and ligatures.
 - The OpenGL renderer falls back to the CPU renderer after initialization or drawing errors. `nare-lite` provides a CPU-only build.
-- Native tabs support split and stacked panes, font zoom, named command rules, close confirmation, and root-session warnings.
+- Native tabs support resizable split and stacked panes, font zoom, named command rules, close confirmation, and root-session warnings.
 - Bounded scrollback reflows after resize and supports search, prompt navigation, wheel scrolling, and a draggable scrollbar.
 - Nare handles X11 PRIMARY and CLIPBOARD, OSC 8 links, URL hints, command-output copy, and output pipes.
 - Kitty direct graphics, Sixel, and iTerm2 inline images share bounded CPU and GPU image paths.
@@ -148,6 +148,8 @@ The `themes/` directory contains Catppuccin Mocha and Latte. Include a theme bef
 `nare-lite` keeps an independent profile under `$XDG_CONFIG_HOME/nare-lite/nare.conf`, or `~/.config/nare-lite/nare.conf`.
 
 Press `Alt+Shift+R` to reload the file. Nare keeps the current settings after a parse error. Set `[shell] startup-command=/usr/bin/fish --login` to replace `$SHELL` for local tabs and panes.
+
+Middle-click a pane to split it horizontally, or hold `Alt` while middle-clicking to split it vertically. Drag a divider with the left mouse button to resize local panes. `Alt+Shift+H/J/K/L` resizes the active local or tmux pane; the four directional bindings are configurable.
 
 Pass a directory to open the first shell there:
 

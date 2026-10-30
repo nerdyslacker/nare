@@ -41,6 +41,7 @@ Mouse_Event :: struct {
 	column: int,
 	row: int,
 	x, y: int,
+	root_x, root_y: int,
 	modifiers: Modifiers,
 }
 

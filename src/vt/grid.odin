@@ -2,6 +2,7 @@ package vt
 
 import "core:unicode"
 import "core:unicode/utf8"
+import "core:slice"
 import graphics "../graphics"
 
 // Emoji ZWJ families and tag sequences require more storage than ordinary
@@ -75,6 +76,17 @@ Logical_Line :: struct {
 	has_cursor: bool,
 	viewport_offset: int,
 	has_viewport: bool,
+}
+
+Image_Anchor :: struct {
+	placement_index: int,
+	source_row: int,
+	source_column: int,
+	line_index: int,
+	line_offset: int,
+	packed_row: int,
+	packed_column: int,
+	mapped: bool,
 }
 
 screen_init :: proc(
@@ -176,7 +188,9 @@ screen_active_prompt_start :: proc(screen: ^Screen) -> (int, bool) {
 screen_resize_reflow :: proc(screen: ^Screen, columns, rows: int, attributes: Attributes) -> bool {
 	if columns <= 0 || rows <= 0 do return false
 	if columns == screen.columns && rows == screen.rows do return true
-	lines := collect_logical_lines(screen)
+	anchors := collect_image_anchors(screen)
+	defer delete(anchors)
+	lines := collect_logical_lines(screen, &anchors)
 	defer destroy_logical_lines(&lines)
 	packed_rows: [dynamic][]Cell
 	packed_wrapped: [dynamic]bool
@@ -185,7 +199,7 @@ screen_resize_reflow :: proc(screen: ^Screen, columns, rows: int, attributes: At
 		delete(packed_rows)
 		delete(packed_wrapped)
 	}
-	cursor_row, cursor_column, viewport_row := pack_logical_lines(lines[:], columns, attributes, &packed_rows, &packed_wrapped)
+	cursor_row, cursor_column, viewport_row := pack_logical_lines(lines[:], columns, attributes, &packed_rows, &packed_wrapped, &anchors)
 
 	new_cells := make([]Cell, columns * rows)
 	blank := blank_cell(attributes)
@@ -231,6 +245,7 @@ screen_resize_reflow :: proc(screen: ^Screen, columns, rows: int, attributes: At
 	screen.scroll_top = 0
 	screen.scroll_bottom = rows - 1
 	screen.wrap_pending = false
+	reanchor_images(screen, anchors[:], visible_start)
 	return true
 }
 
@@ -281,7 +296,25 @@ screen_resize_without_reflow :: proc(screen: ^Screen, columns, rows: int, attrib
 	return true
 }
 
-collect_logical_lines :: proc(screen: ^Screen) -> [dynamic]Logical_Line {
+collect_image_anchors :: proc(screen: ^Screen) -> [dynamic]Image_Anchor {
+	anchors: [dynamic]Image_Anchor
+	if screen.image_registry == nil do return anchors
+	history_rows := len(screen.scrollback)
+	for placement, index in screen.image_registry.placements {
+		if placement.screen != screen.image_screen do continue
+		source_row := history_rows+placement.row
+		if source_row < 0 || source_row >= history_rows+screen.rows do continue
+		append(&anchors, {placement_index = index, source_row = source_row, source_column = placement.column})
+	}
+	slice.sort_by(anchors[:], proc(left, right: Image_Anchor) -> bool {
+		if left.source_row != right.source_row do return left.source_row < right.source_row
+		if left.source_column != right.source_column do return left.source_column < right.source_column
+		return left.placement_index < right.placement_index
+	})
+	return anchors
+}
+
+collect_logical_lines :: proc(screen: ^Screen, anchors: ^[dynamic]Image_Anchor = nil) -> [dynamic]Logical_Line {
 	lines: [dynamic]Logical_Line
 	current := Logical_Line{}
 	last_used_row := screen.cursor.row
@@ -289,13 +322,30 @@ collect_logical_lines :: proc(screen: ^Screen) -> [dynamic]Logical_Line {
 		cells := screen.cells[row*screen.columns:(row+1)*screen.columns]
 		if row_content_length(cells) > 0 || screen.wrapped[row] do last_used_row = max(last_used_row, row)
 	}
+	if anchors != nil {
+		for anchor in anchors^ {
+			viewport_row := anchor.source_row-len(screen.scrollback)
+			if viewport_row >= 0 do last_used_row = max(last_used_row, viewport_row)
+		}
+	}
 	source_count := len(screen.scrollback) + last_used_row + 1
+	anchor_index := 0
 	for source_index in 0..<source_count {
 		is_history := source_index < len(screen.scrollback)
 		row_index := source_index if is_history else source_index-len(screen.scrollback)
 		row := screen_scrollback_row(screen, row_index) if is_history else screen.cells[row_index*screen.columns:(row_index+1)*screen.columns]
 		wrapped := screen_scrollback_wrapped(screen, row_index) if is_history else screen.wrapped[row_index]
 		content_length := row_content_length(row)
+		if anchors != nil {
+			for anchor_index < len(anchors^) && anchors^[anchor_index].source_row == source_index {
+				anchor := &anchors^[anchor_index]
+				anchor_column := clamp(anchor.source_column, 0, screen.columns-1)
+				anchor.line_index = len(lines)
+				anchor.line_offset = len(current.cells)+anchor_column
+				content_length = max(content_length, anchor_column+1)
+				anchor_index += 1
+			}
+		}
 		if source_index == len(screen.scrollback) {
 			current.has_viewport = true
 			current.viewport_offset = len(current.cells)
@@ -333,15 +383,18 @@ pack_logical_lines :: proc(
 	attributes: Attributes,
 	packed_rows: ^[dynamic][]Cell,
 	packed_wrapped: ^[dynamic]bool,
+	anchors: ^[dynamic]Image_Anchor = nil,
 ) -> (cursor_row, cursor_column, viewport_row: int) {
 	cursor_found := false
 	viewport_found := false
-	for &line in lines {
+	anchor_index := 0
+	for &line, line_index in lines {
 		row := make_blank_row(columns, attributes)
 		column := 0
 		for index := 0; index < len(line.cells); index += 1 {
 			cell := line.cells[index]
 			if cell.continuation {
+				map_image_anchors(anchors, &anchor_index, line_index, index, len(packed_rows^), max(0, column-1))
 				if line.has_viewport && line.viewport_offset == index && !viewport_found {
 					viewport_row, viewport_found = len(packed_rows^), true
 				}
@@ -358,6 +411,7 @@ pack_logical_lines :: proc(
 				row = make_blank_row(columns, attributes)
 				column = 0
 			}
+			map_image_anchors(anchors, &anchor_index, line_index, index, len(packed_rows^), column)
 			if line.has_viewport && line.viewport_offset == index && !viewport_found {
 				viewport_row, viewport_found = len(packed_rows^), true
 			}
@@ -374,6 +428,7 @@ pack_logical_lines :: proc(
 			}
 			column += width
 		}
+		map_image_anchors(anchors, &anchor_index, line_index, len(line.cells), len(packed_rows^), column)
 		if line.has_cursor && !cursor_found {
 			cursor_row, cursor_column, cursor_found = len(packed_rows^), min(column, columns-1), true
 		}
@@ -388,6 +443,34 @@ pack_logical_lines :: proc(
 		cursor_column = 0
 	}
 	return cursor_row, cursor_column, viewport_row
+}
+
+map_image_anchors :: proc(anchors: ^[dynamic]Image_Anchor, anchor_index: ^int, line_index, line_offset, row, column: int) {
+	if anchors == nil do return
+	for anchor_index^ < len(anchors^) {
+		anchor := &anchors^[anchor_index^]
+		if anchor.line_index != line_index || anchor.line_offset > line_offset do return
+		anchor.packed_row = row
+		anchor.packed_column = column
+		anchor.mapped = true
+		anchor_index^ += 1
+	}
+}
+
+reanchor_images :: proc(screen: ^Screen, anchors: []Image_Anchor, visible_start: int) {
+	if screen.image_registry == nil do return
+	changed := false
+	for anchor in anchors {
+		if !anchor.mapped || anchor.placement_index < 0 || anchor.placement_index >= len(screen.image_registry.placements) do continue
+		placement := &screen.image_registry.placements[anchor.placement_index]
+		row := anchor.packed_row-visible_start
+		if placement.row == row && placement.column == anchor.packed_column do continue
+		placement.row = row
+		placement.column = anchor.packed_column
+		changed = true
+	}
+	if changed do screen.image_registry.generation += 1
+	graphics.trim_history(screen.image_registry, screen.image_screen, len(screen.scrollback))
 }
 
 make_blank_row :: proc(columns: int, attributes: Attributes) -> []Cell {

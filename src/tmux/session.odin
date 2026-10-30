@@ -317,6 +317,18 @@ request_focus :: proc(session: ^Session, commands: ^[dynamic]byte, direction: by
 	session_queue_pane_list(session, commands)
 }
 
+request_resize_pane :: proc(session: ^Session, commands: ^[dynamic]byte, direction: byte, pane_id: int = -1, amount: int = 2) {
+	if !session_ready(session) || amount <= 0 do return
+	if direction != 'L' && direction != 'R' && direction != 'U' && direction != 'D' do return
+	target := pane_id if pane_id >= 0 else session.pane_id
+	append(commands, "resize-pane -")
+	append(commands, direction, ' ')
+	append_decimal(commands, amount)
+	append_target_command(commands, target)
+	session_queue_reply(session, .Ignored, -1)
+	session_queue_pane_list(session, commands)
+}
+
 request_swap_pane :: proc(session: ^Session, commands: ^[dynamic]byte, pane_id: int = -1) {
 	if !session_ready(session) do return
 	target := pane_id if pane_id >= 0 else session.pane_id

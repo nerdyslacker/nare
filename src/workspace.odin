@@ -70,10 +70,22 @@ Pane :: struct {
 
 Split_Axis :: enum { Rows, Columns }
 
+SPLIT_RATIO_SCALE :: 1000
+SPLIT_RATIO_HALF :: SPLIT_RATIO_SCALE / 2
+SPLIT_MIN_PIXELS :: 32
+SPLIT_HANDLE_PIXELS :: 5
+SPLIT_KEYBOARD_STEP :: 50
+
 Split_Node :: struct {
 	pane: ^Pane,
 	axis: Split_Axis,
+	ratio: int,
 	first, second: ^Split_Node,
+}
+
+Split_Drag :: struct {
+	node: ^Split_Node,
+	x, y, width, height: int,
 }
 
 Tab :: struct {
@@ -109,6 +121,18 @@ split_find :: proc(node: ^Split_Node, pane: ^Pane) -> ^Split_Node {
 	return split_find(node.second, pane)
 }
 
+split_contains :: proc(node: ^Split_Node, pane: ^Pane) -> bool {
+	return split_find(node, pane) != nil
+}
+
+split_first_extent :: proc(node: ^Split_Node, extent: int) -> int {
+	if extent <= 1 do return extent
+	ratio := node.ratio
+	if ratio <= 0 do ratio = SPLIT_RATIO_HALF
+	minimum := min(SPLIT_MIN_PIXELS, extent/2)
+	return clamp(extent*ratio/SPLIT_RATIO_SCALE, minimum, extent-minimum)
+}
+
 split_remove :: proc(node: ^Split_Node, pane: ^Pane) -> (root: ^Split_Node, removed: bool) {
 	if node == nil do return nil, false
 	if node.pane == pane {
@@ -130,17 +154,62 @@ split_bounds :: proc(node: ^Split_Node, pane: ^Pane, x, y, width, height: int) -
 	if node == nil do return 0, 0, 0, 0, false
 	if node.pane != nil do return x, y, width, height, node.pane == pane
 	if node.axis == .Rows {
-		first_height := height/2
+		first_height := split_first_extent(node, height)
 		if bx, by, bw, bh, found := split_bounds(node.first, pane, x, y, width, first_height); found {
 			return bx, by, bw, bh, true
 		}
 		return split_bounds(node.second, pane, x, y+first_height, width, height-first_height)
 	}
-	first_width := width/2
+	first_width := split_first_extent(node, width)
 	if bx, by, bw, bh, found := split_bounds(node.first, pane, x, y, first_width, height); found {
 		return bx, by, bw, bh, true
 	}
 	return split_bounds(node.second, pane, x+first_width, y, width-first_width, height)
+}
+
+split_divider_at :: proc(node: ^Split_Node, pointer_x, pointer_y, x, y, width, height: int) -> (target: ^Split_Node, target_x, target_y, target_width, target_height: int) {
+	if node == nil || node.pane != nil do return
+	if node.axis == .Rows {
+		first_height := split_first_extent(node, height)
+		if target, target_x, target_y, target_width, target_height = split_divider_at(node.first, pointer_x, pointer_y, x, y, width, first_height); target != nil do return
+		if target, target_x, target_y, target_width, target_height = split_divider_at(node.second, pointer_x, pointer_y, x, y+first_height, width, height-first_height); target != nil do return
+		if pointer_x >= x && pointer_x < x+width && abs(pointer_y-(y+first_height)) <= SPLIT_HANDLE_PIXELS {
+			return node, x, y, width, height
+		}
+		return
+	}
+	first_width := split_first_extent(node, width)
+	if target, target_x, target_y, target_width, target_height = split_divider_at(node.first, pointer_x, pointer_y, x, y, first_width, height); target != nil do return
+	if target, target_x, target_y, target_width, target_height = split_divider_at(node.second, pointer_x, pointer_y, x+first_width, y, width-first_width, height); target != nil do return
+	if pointer_y >= y && pointer_y < y+height && abs(pointer_x-(x+first_width)) <= SPLIT_HANDLE_PIXELS {
+		return node, x, y, width, height
+	}
+	return
+}
+
+split_drag_update :: proc(drag: ^Split_Drag, pointer_x, pointer_y: int) -> bool {
+	if drag == nil || drag.node == nil do return false
+	extent := drag.height if drag.node.axis == .Rows else drag.width
+	if extent <= 1 do return false
+	position := pointer_y-drag.y if drag.node.axis == .Rows else pointer_x-drag.x
+	minimum := min(SPLIT_MIN_PIXELS, extent/2)
+	position = clamp(position, minimum, extent-minimum)
+	ratio := clamp(position*SPLIT_RATIO_SCALE/extent, 1, SPLIT_RATIO_SCALE-1)
+	if ratio == drag.node.ratio do return false
+	drag.node.ratio = ratio
+	return true
+}
+
+split_resize_toward :: proc(node: ^Split_Node, pane: ^Pane, axis: Split_Axis, first_side: bool) -> bool {
+	if node == nil || node.pane != nil do return false
+	in_first := split_contains(node.first, pane)
+	child := node.first if in_first else node.second
+	if split_resize_toward(child, pane, axis, first_side) do return true
+	if node.axis != axis || in_first != first_side do return false
+	if node.ratio <= 0 do node.ratio = SPLIT_RATIO_HALF
+	delta := SPLIT_KEYBOARD_STEP if first_side else -SPLIT_KEYBOARD_STEP
+	node.ratio = clamp(node.ratio+delta, SPLIT_KEYBOARD_STEP, SPLIT_RATIO_SCALE-SPLIT_KEYBOARD_STEP)
+	return true
 }
 
 Tab_Bounds :: struct {
@@ -178,6 +247,7 @@ Workspace :: struct {
 	rename_buffer: [dynamic]byte,
 	last_tab_click_timestamp: u64,
 	last_click_tab: int,
+	split_drag: Split_Drag,
 	last_cursor_toggle: time.Time,
 	last_privilege_check: time.Time,
 	scroll_redraw_source: xlib.Window,
@@ -857,6 +927,7 @@ workspace_insert_split_pane :: proc(workspace: ^Workspace, pane: ^Pane, axis: Sp
 	}
 	leaf.pane = nil
 	leaf.axis = axis
+	leaf.ratio = SPLIT_RATIO_HALF
 	leaf.first = split_leaf(current)
 	leaf.second = split_leaf(pane)
 	append(&tab.panes, pane)
@@ -874,6 +945,29 @@ workspace_split :: proc(workspace: ^Workspace, axis: Split_Axis) {
 	pane := workspace_new_pane(workspace, cwd)
 	if pane == nil do return
 	_ = workspace_insert_split_pane(workspace, pane, axis)
+}
+
+workspace_resize_pane :: proc(workspace: ^Workspace, key: keyboard.Key) {
+	tab := workspace_active_tab(workspace)
+	if tab == nil || tab_is_tmux(tab) || tab.stacked || len(tab.panes) < 2 do return
+	pane := tab.panes[tab.active]
+	axis := Split_Axis.Columns
+	first_side := false
+	#partial switch key {
+	case .Left:
+		first_side = false
+	case .Right:
+		first_side = true
+	case .Up:
+		axis = .Rows
+		first_side = false
+	case .Down:
+		axis = .Rows
+		first_side = true
+	case:
+		return
+	}
+	if split_resize_toward(tab.layout, pane, axis, first_side) do workspace_layout(workspace)
 }
 
 workspace_active_tab :: proc(workspace: ^Workspace) -> ^Tab {
@@ -926,6 +1020,7 @@ workspace_layout :: proc(workspace: ^Workspace, resize_grid: bool = true) {
 		commit_grid = false
 	}
 	if commit_grid do workspace.grid_resize_pending = false
+	row_drag := workspace.split_drag.node != nil && workspace.split_drag.node.axis == .Rows
 	root := workspace.root
 	x11.set_surface_colors(root, workspace.settings.theme.background, workspace.settings.ui_colors.active_border, clear = false)
 	tab_bar := workspace_tab_bar_height(workspace)
@@ -995,10 +1090,9 @@ workspace_layout :: proc(workspace: ^Workspace, resize_grid: bool = true) {
 			}
 			pane.visible = true
 			renderer_changed := pane.renderer.cpu.width != width || pane.renderer.cpu.height != height
-			if commit_grid && renderer_changed {
+			drag_resize := row_drag && renderer_changed
+			if renderer_changed && (commit_grid || drag_resize) {
 				_ = drawing.resize(&pane.renderer, &pane.surface)
-			} else if !commit_grid && renderer_changed {
-				drawing.present_cached(&pane.renderer, &pane.surface)
 			}
 			columns, rows := x11.grid_size(&pane.surface)
 			if commit_grid && (columns != old_columns || rows != old_rows) {
@@ -1009,6 +1103,12 @@ workspace_layout :: proc(workspace: ^Workspace, resize_grid: bool = true) {
 					_ = pty.resize(&pane.process, pty_size(columns, rows, width, height))
 				}
 			}
+			if !row_drag do workspace_redraw(workspace, pane, true)
+		}
+	}
+	if row_drag {
+		for pane in workspace.tabs[workspace.active].panes {
+			if !pane.visible do continue
 			workspace_redraw(workspace, pane, true)
 		}
 	}
@@ -1208,6 +1308,7 @@ workspace_event :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
 		if !workspace.close_confirmation do workspace_show_close_confirmation(workspace)
 		return true
 	case .Resize:
+		if event.source != workspace.root.id do return true
 		if event.dpi_changed do workspace_refresh_dpi(workspace)
 		workspace_capture_window_size(workspace)
 		workspace_remember_window_size(workspace)
@@ -1303,10 +1404,27 @@ workspace_event :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
 			}
 			return true
 		}
-		pointer_y := event.mouse.y
-		if pointer_pane := workspace_find_pane(workspace, event.source); pointer_pane != nil do pointer_y += pointer_pane.surface.y
+		pointer_x, pointer_y := event.mouse.x, event.mouse.y
+		pointer_pane := workspace_find_pane(workspace, event.source)
+		if pointer_pane != nil {
+			pointer_x += pointer_pane.surface.x
+			pointer_y += pointer_pane.surface.y
+		}
 		if event.source == workspace.statusbar_surface.id do pointer_y += workspace.statusbar_surface.y
 		if event.source == workspace.jobs_surface.id do pointer_y += workspace.jobs_surface.y
+		if workspace.split_drag.node != nil && (event.mouse.action == .Motion || event.mouse.action == .Release) {
+			pointer_x = event.mouse.root_x-workspace.root.x
+			pointer_y = event.mouse.root_y-workspace.root.y
+			updated := split_drag_update(&workspace.split_drag, pointer_x, pointer_y)
+			finished := event.mouse.action == .Release
+			if finished {
+				workspace.split_drag = {}
+				workspace_layout(workspace)
+			} else if updated {
+				workspace_layout(workspace, false)
+			}
+			return true
+		}
 		if statusbar_auto_hide_pointer(workspace, pointer_y) do return true
 		if event.source == workspace.jobs_surface.id && statusbar_jobs_mouse(workspace, event.mouse) do return true
 		if event.source == workspace.statusbar_surface.id && statusbar_mouse(workspace, event.mouse) do return true
@@ -1317,6 +1435,26 @@ workspace_event :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
 		if event.source == workspace.root.id && workspace_tab_bar_mouse(workspace, event.mouse, event.timestamp) do return true
 		pane := workspace_find_pane(workspace, event.source)
 		if pane == nil do return true
+		if event.mouse.action == .Press && event.mouse.button == 1 {
+			workspace.split_drag = {}
+			tab := workspace_active_tab(workspace)
+			if tab != nil && !tab_is_tmux(tab) && !tab.stacked && len(tab.panes) > 1 {
+				tab_bar := workspace_tab_bar_height(workspace)
+				status_bar := statusbar_height(workspace)
+				padding := workspace.settings.window.padding
+				content_y := padding
+				if workspace.settings.tabs.edge == .Top do content_y += tab_bar
+				if workspace.settings.statusbar.position == .Top do content_y += status_bar
+				content_width := max(1, workspace.root.width-padding*2)
+				content_height := max(1, workspace.root.height-tab_bar-status_bar-padding*2)
+				node, x, y, width, height := split_divider_at(tab.layout, pointer_x, pointer_y, padding, content_y, content_width, content_height)
+				if node != nil {
+					workspace.split_drag = {node = node, x = x, y = y, width = width, height = height}
+					workspace_focus_pane(workspace, pane)
+					return true
+				}
+			}
+		}
 		if event.mouse.action == .Press do workspace_focus_pane(workspace, pane)
 		mouse := event.mouse
 		mouse.column = max(1, mouse.x/pane.surface.cell_w+1)
@@ -1332,14 +1470,14 @@ workspace_event :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
 				return true
 			}
 		}
-		if local_mouse && mouse.action == .Press && mouse.button == 2 {
+		if (local_mouse || .Alt in mouse.modifiers) && mouse.action == .Press && mouse.button == 2 {
 			if tab := workspace_active_tab(workspace); tab_is_tmux(tab) {
 				owner := tab.tmux_owner
 				if .Shift in mouse.modifiers do tmux.request_kill_pane(&owner.tmux_session, &owner.pending, pane.tmux_pane_id)
-				else do tmux.request_split(&owner.tmux_session, &owner.pending, false, pane.tmux_pane_id)
+				else do tmux.request_split(&owner.tmux_session, &owner.pending, .Alt in mouse.modifiers, pane.tmux_pane_id)
 			} else {
 				if .Shift in mouse.modifiers do workspace_close_pane(workspace)
-				else do workspace_split(workspace, .Rows)
+				else do workspace_split(workspace, .Columns if .Alt in mouse.modifiers else .Rows)
 			}
 			return true
 		}
@@ -1835,6 +1973,10 @@ workspace_shortcut :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
 		if event_matches(event, bindings.focus_right) {tmux.request_focus(&owner.tmux_session, &owner.pending, 'R', pane.tmux_pane_id); return true}
 		if event_matches(event, bindings.focus_up) {tmux.request_focus(&owner.tmux_session, &owner.pending, 'U', pane.tmux_pane_id); return true}
 		if event_matches(event, bindings.focus_down) {tmux.request_focus(&owner.tmux_session, &owner.pending, 'D', pane.tmux_pane_id); return true}
+		if event_matches(event, bindings.resize_left) {tmux.request_resize_pane(&owner.tmux_session, &owner.pending, 'L', pane.tmux_pane_id); return true}
+		if event_matches(event, bindings.resize_right) {tmux.request_resize_pane(&owner.tmux_session, &owner.pending, 'R', pane.tmux_pane_id); return true}
+		if event_matches(event, bindings.resize_up) {tmux.request_resize_pane(&owner.tmux_session, &owner.pending, 'U', pane.tmux_pane_id); return true}
+		if event_matches(event, bindings.resize_down) {tmux.request_resize_pane(&owner.tmux_session, &owner.pending, 'D', pane.tmux_pane_id); return true}
 		if event_matches(event, bindings.swap_pane) {tmux.request_swap_pane(&owner.tmux_session, &owner.pending, pane.tmux_pane_id); return true}
 		if event_matches(event, bindings.copy) { workspace_copy_selection(workspace, tab.panes[tab.active], .Clipboard); return true }
 		if event_matches(event, bindings.paste) {x11.request_selection(workspace.root, .Clipboard); return true}
@@ -1856,6 +1998,10 @@ workspace_shortcut :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
 	if event_matches(event, bindings.move_tab_right) { workspace_move_tab(workspace, 1); return true }
 	if event_matches(event, bindings.focus_left) || event_matches(event, bindings.focus_up) { workspace_focus_delta(workspace, -1); return true }
 	if event_matches(event, bindings.focus_right) || event_matches(event, bindings.focus_down) { workspace_focus_delta(workspace, 1); return true }
+	if event_matches(event, bindings.resize_left) {workspace_resize_pane(workspace, .Left); return true}
+	if event_matches(event, bindings.resize_right) {workspace_resize_pane(workspace, .Right); return true}
+	if event_matches(event, bindings.resize_up) {workspace_resize_pane(workspace, .Up); return true}
+	if event_matches(event, bindings.resize_down) {workspace_resize_pane(workspace, .Down); return true}
 	if event_matches(event, bindings.toggle_stack) { tab.stacked = !tab.stacked; workspace_layout(workspace); return true }
 	if event_matches(event, bindings.swap_pane) {
 		if len(tab.panes) > 1 {
@@ -2144,6 +2290,7 @@ workspace_focus_pane :: proc(workspace: ^Workspace, pane: ^Pane) {
 }
 
 workspace_close_pane :: proc(workspace: ^Workspace) {
+	workspace.split_drag = {}
 	tab := workspace_active_tab(workspace)
 	if tab == nil do return
 	if tab_is_tmux(tab) {
@@ -2167,6 +2314,7 @@ workspace_close_pane :: proc(workspace: ^Workspace) {
 }
 
 workspace_close_tab :: proc(workspace: ^Workspace, index: int) {
+	workspace.split_drag = {}
 	if index < 0 || index >= len(workspace.tabs) do return
 	if tab_is_tmux(workspace.tabs[index]) {
 		tab := workspace.tabs[index]
@@ -2258,6 +2406,7 @@ workspace_reap :: proc(workspace: ^Workspace) {
 		pane_index := len(tab.panes)-1
 		for pane_index >= 0 {
 			if tab.panes[pane_index].exited {
+				workspace.split_drag = {}
 				exited := tab.panes[pane_index]
 				tab.layout, _ = split_remove(tab.layout, exited)
 				pty.shutdown(&exited.process)

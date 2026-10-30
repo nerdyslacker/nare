@@ -89,6 +89,7 @@ Bindings :: struct {
 	new_tab, previous_tab, next_tab: string,
 	close_pane, split_horizontal, split_vertical: string,
 	focus_left, focus_right, focus_up, focus_down: string,
+	resize_left, resize_right, resize_up, resize_down: string,
 	toggle_stack, swap_pane, move_tab_left, move_tab_right: string,
 	copy, paste, font_increase, font_decrease, font_reset: string,
 	tmux_new_tab, tmux_new_window, tmux_attach_last: string,
@@ -303,6 +304,10 @@ settings_init :: proc(settings: ^Settings) {
 		focus_right = strings.clone("alt+shift+right"),
 		focus_up = strings.clone("alt+up"),
 		focus_down = strings.clone("alt+down"),
+		resize_left = strings.clone("alt+shift+h"),
+		resize_right = strings.clone("alt+shift+l"),
+		resize_up = strings.clone("alt+shift+k"),
+		resize_down = strings.clone("alt+shift+j"),
 		toggle_stack = strings.clone("alt+shift+z"),
 		swap_pane = strings.clone("alt+shift+equal"),
 		move_tab_left = strings.clone("alt+control+shift+left"),
@@ -824,6 +829,10 @@ apply :: proc(settings: ^Settings, section, key, value: string) -> Error {
 		case "focus-right": replace_string(&settings.bindings.focus_right, value)
 		case "focus-up": replace_string(&settings.bindings.focus_up, value)
 		case "focus-down": replace_string(&settings.bindings.focus_down, value)
+		case "resize-left": replace_string(&settings.bindings.resize_left, value)
+		case "resize-right": replace_string(&settings.bindings.resize_right, value)
+		case "resize-up": replace_string(&settings.bindings.resize_up, value)
+		case "resize-down": replace_string(&settings.bindings.resize_down, value)
 		case "toggle-stack": replace_string(&settings.bindings.toggle_stack, value)
 		case "swap-pane": replace_string(&settings.bindings.swap_pane, value)
 		case "move-tab-left": replace_string(&settings.bindings.move_tab_left, value)
@@ -1171,6 +1180,7 @@ destroy_bindings :: proc(bindings: ^Bindings) {
 	delete(bindings.new_tab); delete(bindings.previous_tab); delete(bindings.next_tab)
 	delete(bindings.close_pane); delete(bindings.split_horizontal); delete(bindings.split_vertical)
 	delete(bindings.focus_left); delete(bindings.focus_right); delete(bindings.focus_up); delete(bindings.focus_down)
+	delete(bindings.resize_left); delete(bindings.resize_right); delete(bindings.resize_up); delete(bindings.resize_down)
 	delete(bindings.toggle_stack); delete(bindings.swap_pane); delete(bindings.move_tab_left); delete(bindings.move_tab_right)
 	delete(bindings.copy); delete(bindings.paste); delete(bindings.font_increase); delete(bindings.font_decrease); delete(bindings.font_reset)
 	delete(bindings.tmux_new_tab); delete(bindings.tmux_new_window); delete(bindings.tmux_attach_last)
@@ -1316,6 +1326,7 @@ shortcut_conflicts :: proc(settings: ^Settings, chord, rule_name: string) -> boo
 	if chord == b.new_tab || chord == b.previous_tab || chord == b.next_tab ||
 	   chord == b.close_pane || chord == b.split_horizontal || chord == b.split_vertical ||
 	   chord == b.focus_left || chord == b.focus_right || chord == b.focus_up || chord == b.focus_down ||
+	   chord == b.resize_left || chord == b.resize_right || chord == b.resize_up || chord == b.resize_down ||
 	   chord == b.toggle_stack || chord == b.swap_pane || chord == b.move_tab_left || chord == b.move_tab_right ||
 	   chord == b.copy || chord == b.paste || chord == b.font_increase || chord == b.font_decrease || chord == b.font_reset ||
 	   chord == b.tmux_new_tab || chord == b.tmux_new_window || chord == b.tmux_attach_last ||
