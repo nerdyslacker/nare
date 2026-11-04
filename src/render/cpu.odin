@@ -376,13 +376,13 @@ blend_premultiplied :: proc(window: ^x11.Window, background: u32, red, green, bl
 	return rgb_to_pixel(window, min(result_red, 255)<<16|min(result_green, 255)<<8|min(result_blue, 255))
 }
 
-cell_colors :: proc(cell: ^vt.Cell) -> (foreground, background: u32) {
-	return cell_colors_with_bold_policy(cell, active_bold_is_bright)
+cell_colors :: proc(cell: ^vt.Cell, terminal: ^vt.Terminal) -> (foreground, background: u32) {
+	return cell_colors_with_bold_policy(cell, terminal, active_bold_is_bright)
 }
 
-cell_colors_with_bold_policy :: proc(cell: ^vt.Cell, bold_is_bright: bool) -> (foreground, background: u32) {
-	foreground = terminal_color(cell.attributes.foreground, true)
-	background = terminal_color(cell.attributes.background, false)
+cell_colors_with_bold_policy :: proc(cell: ^vt.Cell, terminal: ^vt.Terminal, bold_is_bright: bool) -> (foreground, background: u32) {
+	foreground = terminal_color(cell.attributes.foreground, true, terminal)
+	background = terminal_color(cell.attributes.background, false, terminal)
 	// ncurses/dialog themes use identical indexed foreground and background
 	// colors to hide selected pieces of their ACS borders. Keep those cells
 	// hidden even when bold-to-bright color mapping is enabled.
@@ -406,9 +406,14 @@ mix_color :: proc(foreground, background: u32) -> u32 {
 	return red<<16|green<<8|blue
 }
 
-terminal_color :: proc(color: vt.Color, foreground: bool) -> u32 {
+terminal_color :: proc(color: vt.Color, foreground: bool, terminal: ^vt.Terminal = nil) -> u32 {
 	switch color.kind {
-	case .Default: return active_theme.foreground if foreground else active_theme.background
+	case .Default:
+		if terminal != nil {
+			override := terminal.default_foreground if foreground else terminal.default_background
+			if override.kind != .Default do return override.value
+		}
+		return active_theme.foreground if foreground else active_theme.background
 	case .Indexed:
 		index := int(color.value)
 		if index < 16 do return ansi_color(index)

@@ -63,17 +63,19 @@ build_row_commands :: proc(
 		if scratch_buffer == nil do command_scratch_destroy(scratch)
 	}
 	y := row * window.cell_h
-	append_rectangle(output, 0, y, window.width, window.cell_h, active_theme.background)
+	row_background := terminal_color({}, false, terminal)
+	append_rectangle(output, 0, y, window.width, window.cell_h, row_background)
 	append_image_commands(output, window, screen, row, .Below_Background)
 	append_placeholder_commands(output, screen, row, .Below_Background, window.cell_w, window.cell_h)
 	for column in 0..<screen.columns {
 		cell := vt.cell_at(screen, row, column)
 		_, background := display_colors(
 			cell,
+			terminal,
 			selection.contains(selection_state, screen, row, column),
 			block_cursor(terminal, screen, row, column),
 		)
-		if background != active_theme.background {
+		if background != row_background {
 			append_rectangle(output, column*window.cell_w, y, window.cell_w, window.cell_h, background)
 		}
 	}
@@ -84,6 +86,7 @@ build_row_commands :: proc(
 		if cell.continuation || cell.codepoint == PLACEHOLDER_CODEPOINT do continue
 		foreground, background := display_colors(
 			cell,
+			terminal,
 			selection.contains(selection_state, screen, row, column),
 			block_cursor(terminal, screen, row, column),
 		)
@@ -91,7 +94,7 @@ build_row_commands :: proc(
 		decoration_width := min(window.width-column*window.cell_w, max(1, int(cell.width))*window.cell_w)
 		if cell.attributes.underline != .None {
 			underline_color := foreground
-			if cell.attributes.underline_color.kind != .Default do underline_color = terminal_color(cell.attributes.underline_color, true)
+			if cell.attributes.underline_color.kind != .Default do underline_color = terminal_color(cell.attributes.underline_color, true, terminal)
 			append_underline(
 				output,
 				column*window.cell_w,
@@ -121,6 +124,7 @@ build_row_commands :: proc(
 		if cell.combining_count == 0 {
 			foreground, background := display_colors(
 				cell,
+				terminal,
 				selection.contains(selection_state, screen, row, column),
 				block_cursor(terminal, screen, row, column),
 			)
@@ -150,6 +154,7 @@ build_row_commands :: proc(
 			if current.attributes != attributes && len(text) > 0 do break
 			current_foreground, _ := display_colors(
 				current,
+				terminal,
 				selection.contains(selection_state, screen, row, column),
 				block_cursor(terminal, screen, row, column),
 			)
@@ -172,6 +177,7 @@ build_row_commands :: proc(
 				origin_column := clusters[shaped_glyph.cluster]
 				glyph_color, _ := display_colors(
 					vt.cell_at(screen, row, origin_column),
+					terminal,
 					selection.contains(selection_state, screen, row, origin_column),
 					block_cursor(terminal, screen, row, origin_column),
 				)
@@ -315,8 +321,8 @@ image_command_after :: proc(left, right: Command) -> bool {
 	return left.placement_id > right.placement_id
 }
 
-display_colors :: proc(cell: ^vt.Cell, selected, cursor: bool) -> (foreground, background: u32) {
-	foreground, background = cell_colors(cell)
+display_colors :: proc(cell: ^vt.Cell, terminal: ^vt.Terminal, selected, cursor: bool) -> (foreground, background: u32) {
+	foreground, background = cell_colors(cell, terminal)
 	if selected {
 		foreground = active_theme.selection_foreground
 		background = active_theme.selection_background

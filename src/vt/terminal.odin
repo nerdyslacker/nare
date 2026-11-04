@@ -186,6 +186,8 @@ Terminal :: struct {
 	saved_active_character_set: u8,
 	modes: Modes,
 	color_scheme: Color_Scheme,
+	default_foreground: Color,
+	default_background: Color,
 	progress_state: Progress_State,
 	progress_percent: int,
 	pointer_shape: Pointer_Shape,
@@ -836,11 +838,22 @@ handle_osc :: proc(terminal: ^Terminal, data: []byte) {
 			break
 		}
 	}
-	if separator < 0 do return
+	if separator < 0 {
+		switch string(data) {
+		case "110": terminal.default_foreground = {}
+		case "111": terminal.default_background = {}
+		case:
+		}
+		return
+	}
 	command := string(data[:separator])
 	payload := data[separator+1:]
 	switch command {
 	case "0", "2": set_title_metadata(terminal, payload)
+	case "10":
+		if color, ok := osc_color(payload); ok do terminal.default_foreground = color
+	case "11":
+		if color, ok := osc_color(payload); ok do terminal.default_background = color
 	case "7":
 		set_cwd_metadata(terminal, payload)
 		if !terminal.explicit_shell_integration && !terminal.using_alternate {
@@ -858,6 +871,15 @@ handle_osc :: proc(terminal: ^Terminal, data: []byte) {
 	case "1337": handle_osc1337(terminal, payload)
 	case:
 	}
+}
+
+osc_color :: proc(data: []byte) -> (Color, bool) {
+	// shortcut: supports the #RRGGBB form used by Bubble Tea; add rgb: parsing when a client needs it.
+	if len(data) != 7 || data[0] != '#' do return {}, false
+	parsed_bytes := 0
+	value, ok := strconv.parse_u64(string(data[1:]), 16, &parsed_bytes)
+	if !ok || parsed_bytes != 6 do return {}, false
+	return Color{kind = .RGB, value = u32(value)}, true
 }
 
 handle_osc22 :: proc(terminal: ^Terminal, payload: []byte) {
@@ -1927,6 +1949,8 @@ soft_reset :: proc(terminal: ^Terminal) {
 terminal_reset :: proc(terminal: ^Terminal) {
 	terminal.attributes = {}
 	terminal.saved_attributes = {}
+	terminal.default_foreground = {}
+	terminal.default_background = {}
 	terminal.character_sets = {}
 	terminal.active_character_set = 0
 	terminal.saved_character_sets = {}
