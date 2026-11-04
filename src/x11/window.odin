@@ -48,6 +48,9 @@ Event :: struct {
 	input:      [64]byte,
 	input_size: int,
 	key:        keyboard.Key,
+	key_action: keyboard.Key_Action,
+	key_codepoint: rune,
+	shifted_key_codepoint: rune,
 	modifiers:  keyboard.Modifiers,
 	mouse:      keyboard.Mouse_Event,
 	timestamp:  u64,
@@ -161,6 +164,7 @@ Window :: struct {
 	outgoing_selections: [dynamic]Outgoing_Selection,
 	incoming_selection: Incoming_Selection,
 	pointer_cursors: [dynamic]Pointer_Cursor,
+	pressed_keys: [dynamic]u32,
 }
 
 open :: proc(
@@ -174,6 +178,8 @@ open :: proc(
 	display := xlib.OpenDisplay(nil)
 	if display == nil do return window, .Open_Display
 	window.display = display
+	detectable_repeat: b32
+	_ = xlib.XkbSetDetectableAutoRepeat(display, true, &detectable_repeat)
 	screen := xlib.DefaultScreen(display)
 	initial_width := max(1, width)
 	initial_height := max(1, height)
@@ -408,12 +414,13 @@ next_event :: proc(window: ^Window) -> (result: Event, available: bool) {
 		result.focused = true
 	case .FocusOut:
 		window.focused = false
+		clear(&window.pressed_keys)
 		if window.input_context != nil do xlib.UnsetICFocus(window.input_context)
 		result.kind = .Focus
-	case .KeyPress:
+	case .KeyPress, .KeyRelease:
 		keysym: xlib.KeySym
 		count: i32
-		if window.input_context != nil {
+		if event.type == .KeyPress && window.input_context != nil {
 			status: xlib.LookupStringStatus
 			count = xlib.Xutf8LookupString(
 				window.input_context,
@@ -424,14 +431,30 @@ next_event :: proc(window: ^Window) -> (result: Event, available: bool) {
 				&status,
 			)
 			if status == .BufferOverflow do count = 0
-		} else {
+		} else if event.type == .KeyPress {
 			count = xlib.LookupString(&event.xkey, &result.input[0], len(result.input), &keysym, nil)
+		} else {
+			keysym = xlib.LookupKeysym(&event.xkey, 0)
 		}
 		result.key = key_from_keysym(keysym)
-		if .ShiftMask in event.xkey.state do result.modifiers += {.Shift}
-		if .Mod1Mask in event.xkey.state do result.modifiers += {.Alt}
-		if .ControlMask in event.xkey.state do result.modifiers += {.Control}
-		if result.key != .Text || count > 0 {
+		result.modifiers = modifiers_from_state(event.xkey.state)
+		result.key_codepoint = keysym_codepoint(xlib.LookupKeysym(&event.xkey, 0))
+		result.shifted_key_codepoint = keysym_codepoint(xlib.LookupKeysym(&event.xkey, 1))
+		if result.key_codepoint >= 'A' && result.key_codepoint <= 'Z' do result.key_codepoint += 'a'-'A'
+		if event.type == .KeyRelease {
+			result.key_action = .Release
+			pressed_key_remove(window, event.xkey.keycode)
+		} else if pressed_key_contains(window, event.xkey.keycode) {
+			result.key_action = .Repeat
+		} else {
+			result.key_action = .Press
+			append(&window.pressed_keys, event.xkey.keycode)
+		}
+		if modifier, ok := key_modifier(result.key); ok {
+			if result.key_action == .Release do result.modifiers -= {modifier}
+			else do result.modifiers += {modifier}
+		}
+		if result.key != .Text || count > 0 || result.key_codepoint > 0 {
 			result.kind = .Input
 			result.input_size = int(count)
 		}
@@ -499,7 +522,26 @@ note_configure :: proc(window: ^Window, x, y, width, height: int) -> bool {
 }
 
 base_event_mask :: proc() -> xlib.EventMask {
-	return {.KeyPress, .ButtonPress, .ButtonRelease, .ButtonMotion, .Exposure, .StructureNotify, .FocusChange, .PropertyChange}
+	return {.KeyPress, .KeyRelease, .ButtonPress, .ButtonRelease, .ButtonMotion, .Exposure, .StructureNotify, .FocusChange, .PropertyChange}
+}
+
+pressed_key_contains :: proc(window: ^Window, keycode: u32) -> bool {
+	for pressed in window.pressed_keys do if pressed == keycode do return true
+	return false
+}
+
+pressed_key_remove :: proc(window: ^Window, keycode: u32) {
+	for pressed, index in window.pressed_keys do if pressed == keycode {
+		ordered_remove(&window.pressed_keys, index)
+		return
+	}
+}
+
+keysym_codepoint :: proc(keysym: xlib.KeySym) -> rune {
+	value := u64(keysym)
+	if value >= 0x20 && value <= 0x7e || value >= 0xa0 && value <= 0xff do return rune(value)
+	if value & 0xff000000 == 0x01000000 do return rune(value & 0x00ffffff)
+	return 0
 }
 
 own_selection :: proc(window: ^Window, kind: Selection_Kind, data: []byte) -> bool {
@@ -773,6 +815,7 @@ modifiers_from_state :: proc(state: xlib.InputMask) -> keyboard.Modifiers {
 	if .ShiftMask in state do result += {.Shift}
 	if .Mod1Mask in state do result += {.Alt}
 	if .ControlMask in state do result += {.Control}
+	if .Mod4Mask in state do result += {.Super}
 	return result
 }
 
@@ -811,7 +854,27 @@ key_from_keysym :: proc(keysym: xlib.KeySym) -> keyboard.Key {
 	case .XK_F10: return .F10
 	case .XK_F11: return .F11
 	case .XK_F12: return .F12
+	case .XK_Shift_L: return .Left_Shift
+	case .XK_Control_L: return .Left_Control
+	case .XK_Alt_L: return .Left_Alt
+	case .XK_Super_L: return .Left_Super
+	case .XK_Shift_R: return .Right_Shift
+	case .XK_Control_R: return .Right_Control
+	case .XK_Alt_R: return .Right_Alt
+	case .XK_Super_R: return .Right_Super
+	case .XK_Caps_Lock: return .Caps_Lock
+	case .XK_Num_Lock: return .Num_Lock
 	case: return .Text
+	}
+}
+
+key_modifier :: proc(key: keyboard.Key) -> (keyboard.Modifier, bool) {
+	#partial switch key {
+	case .Left_Shift, .Right_Shift: return .Shift, true
+	case .Left_Control, .Right_Control: return .Control, true
+	case .Left_Alt, .Right_Alt: return .Alt, true
+	case .Left_Super, .Right_Super: return .Super, true
+	case: return {}, false
 	}
 }
 
@@ -826,6 +889,7 @@ close :: proc(window: ^Window) {
 	if window.input_method != nil do _ = close_input_method(window.input_method)
 	for entry in window.pointer_cursors do xlib.FreeCursor(window.display, entry.cursor)
 	delete(window.pointer_cursors)
+	delete(window.pressed_keys)
 	if window.gc != nil do xlib.FreeGC(window.display, window.gc)
 	if window.id != 0 do xlib.DestroyWindow(window.display, window.id)
 	xlib.CloseDisplay(window.display)

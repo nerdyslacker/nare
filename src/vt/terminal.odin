@@ -6,7 +6,6 @@ import "core:net"
 import "core:strconv"
 import "core:strings"
 import "core:time"
-import "core:unicode"
 import "core:unicode/utf8"
 import graphics "../graphics"
 
@@ -21,7 +20,10 @@ MAX_OSC52_ACTIONS :: 8
 MAX_OSC52_QUEUED_BYTES :: 512 * 1024
 MAX_OSC133_BYTES :: 4 * 1024
 MAX_OSC9_BYTES :: 64
-MAX_OSC22_BYTES :: 64
+MAX_OSC22_BYTES :: 512
+MAX_POINTER_SHAPE_STACK :: 16
+MAX_KEYBOARD_STACK :: 16
+KEYBOARD_FLAGS_MASK :: 31
 MAX_XTGETTCAP_BYTES :: 4 * 1024
 MAX_XTGETTCAP_NAMES :: 32
 MAX_XTGETTCAP_NAME_BYTES :: 32
@@ -162,6 +164,7 @@ Modes :: struct {
 	cursor_visible: bool,
 	synchronized_updates: bool,
 	color_scheme_reporting: bool,
+	grapheme_clusters: bool,
 	sixel_display: bool,
 	sixel_private_colors: bool,
 	mouse_tracking: int,
@@ -186,6 +189,11 @@ Terminal :: struct {
 	progress_state: Progress_State,
 	progress_percent: int,
 	pointer_shape: Pointer_Shape,
+	pointer_shape_stacks: [2][MAX_POINTER_SHAPE_STACK]Pointer_Shape,
+	pointer_shape_depths: [2]int,
+	keyboard_flags: [2]u8,
+	keyboard_stack: [2][MAX_KEYBOARD_STACK]u8,
+	keyboard_stack_depth: [2]int,
 	replies: [dynamic]byte,
 	reply_overflow: bool,
 	hyperlinks: [dynamic]string,
@@ -290,6 +298,11 @@ terminal_screen :: proc(terminal: ^Terminal) -> ^Screen {
 	return &terminal.alternate_screen if terminal.using_alternate else &terminal.main_screen
 }
 
+terminal_keyboard_flags :: proc(terminal: ^Terminal) -> u8 {
+	if terminal == nil do return 0
+	return terminal.keyboard_flags[1 if terminal.using_alternate else 0]
+}
+
 terminal_feed :: proc(terminal: ^Terminal, data: []byte) {
 	parser_feed(&terminal.parser, data, terminal_event, rawptr(terminal))
 }
@@ -374,8 +387,15 @@ terminal_event :: proc(event: Event, user_data: rawptr) {
 
 terminal_print_graphic :: proc(terminal: ^Terminal, codepoint: rune, remember: bool) {
 	screen := terminal_screen(terminal)
-	if terminal.modes.insert do insert_cells(screen, max(1, unicode.normalized_east_asian_width(codepoint)), terminal.attributes)
-	screen_put(screen, codepoint, terminal.attributes, terminal.modes.autowrap, terminal.active_hyperlink)
+	screen_put(
+		screen,
+		codepoint,
+		terminal.attributes,
+		terminal.modes.autowrap,
+		terminal.active_hyperlink,
+		terminal.modes.insert,
+		terminal.modes.grapheme_clusters,
+	)
 	if remember {
 		terminal.last_graphic = codepoint
 		terminal.last_graphic_valid = true
@@ -842,10 +862,74 @@ handle_osc :: proc(terminal: ^Terminal, data: []byte) {
 
 handle_osc22 :: proc(terminal: ^Terminal, payload: []byte) {
 	if len(payload) > MAX_OSC22_BYTES do return
-	name := string(payload)
-	if len(name) > 0 && name[0] == '=' do name = name[1:]
-	shape, ok := pointer_shape_from_name(name)
-	if ok do terminal.pointer_shape = shape
+	operation := byte('=')
+	data := payload
+	if len(data) > 0 && (data[0] == '=' || data[0] == '>' || data[0] == '<' || data[0] == '?') {
+		operation, data = data[0], data[1:]
+	}
+	screen_index := 1 if terminal.using_alternate else 0
+	stack := &terminal.pointer_shape_stacks[screen_index]
+	depth := &terminal.pointer_shape_depths[screen_index]
+	switch operation {
+	case '=':
+		shape, ok := pointer_shape_from_name(string(data))
+		if !ok do return
+		if len(data) == 0 {
+			depth^ = 0
+		} else if depth^ == 0 {
+			stack[0], depth^ = shape, 1
+		} else {
+			stack[depth^-1] = shape
+		}
+		terminal.pointer_shape = shape
+	case '>':
+		start := 0
+		for start <= len(data) {
+			end := start
+			for end < len(data) && data[end] != ',' do end += 1
+			if shape, ok := pointer_shape_from_name(string(data[start:end])); ok && end > start {
+				if depth^ == MAX_POINTER_SHAPE_STACK {
+					copy(stack[:MAX_POINTER_SHAPE_STACK-1], stack[1:])
+					depth^ -= 1
+				}
+				stack[depth^] = shape
+				depth^ += 1
+				terminal.pointer_shape = shape
+			}
+			if end == len(data) do break
+			start = end+1
+		}
+	case '<':
+		if depth^ > 0 do depth^ -= 1
+		terminal.pointer_shape = stack[depth^-1] if depth^ > 0 else .Default
+	case '?': handle_osc22_query(terminal, data, stack, depth^)
+	}
+}
+
+handle_osc22_query :: proc(terminal: ^Terminal, data: []byte, stack: ^[MAX_POINTER_SHAPE_STACK]Pointer_Shape, depth: int) {
+	response: [dynamic]byte
+	defer delete(response)
+	append(&response, ..transmute([]byte)string("\x1b]22;"))
+	start := 0
+	for start <= len(data) {
+		end := start
+		for end < len(data) && data[end] != ',' do end += 1
+		if start > 0 do append(&response, ',')
+		name := string(data[start:end])
+		switch name {
+		case "__current__":
+			if depth == 0 do append(&response, '0')
+			else do append(&response, ..transmute([]byte)pointer_shape_name(stack[depth-1]))
+		case "__default__", "__grabbed__": append(&response, ..transmute([]byte)string("default"))
+		case:
+			_, ok := pointer_shape_from_name(name)
+			append(&response, '1' if ok else '0')
+		}
+		if end == len(data) do break
+		start = end+1
+	}
+	append(&response, 0x1b, '\\')
+	append_reply(terminal, response[:])
 }
 
 pointer_shape_from_name :: proc(name: string) -> (Pointer_Shape, bool) {
@@ -885,6 +969,45 @@ pointer_shape_from_name :: proc(name: string) -> (Pointer_Shape, bool) {
 	case "grabbing": return .Grabbing, true
 	case: return {}, false
 	}
+}
+
+pointer_shape_name :: proc(shape: Pointer_Shape) -> string {
+	switch shape {
+	case .Default: return "default"
+	case .Arrow: return "arrow"
+	case .Beam: return "beam"
+	case .Text: return "text"
+	case .Pointer: return "pointer"
+	case .Hand: return "hand"
+	case .Help: return "help"
+	case .Wait: return "wait"
+	case .Progress: return "progress"
+	case .Crosshair: return "crosshair"
+	case .Cell: return "cell"
+	case .Vertical_Text: return "vertical-text"
+	case .Move: return "move"
+	case .E_Resize: return "e-resize"
+	case .NE_Resize: return "ne-resize"
+	case .NW_Resize: return "nw-resize"
+	case .N_Resize: return "n-resize"
+	case .SE_Resize: return "se-resize"
+	case .SW_Resize: return "sw-resize"
+	case .S_Resize: return "s-resize"
+	case .W_Resize: return "w-resize"
+	case .EW_Resize: return "ew-resize"
+	case .NS_Resize: return "ns-resize"
+	case .NESW_Resize: return "nesw-resize"
+	case .NWSE_Resize: return "nwse-resize"
+	case .Zoom_In: return "zoom-in"
+	case .Zoom_Out: return "zoom-out"
+	case .Alias: return "alias"
+	case .Copy: return "copy"
+	case .Not_Allowed: return "not-allowed"
+	case .No_Drop: return "no-drop"
+	case .Grab: return "grab"
+	case .Grabbing: return "grabbing"
+	}
+	return "default"
 }
 
 handle_osc9 :: proc(terminal: ^Terminal, payload: []byte) {
@@ -1324,6 +1447,10 @@ translate_character :: proc(terminal: ^Terminal, codepoint: rune) -> rune {
 
 handle_csi :: proc(terminal: ^Terminal, event: Event) {
 	screen := terminal_screen(terminal)
+	if event.final == 'u' && event.private_marker != 0 {
+		handle_keyboard_flags(terminal, event)
+		return
+	}
 	if event.intermediate_count > 0 {
 		if event.intermediates[0] == '!' && event.final == 'p' do soft_reset(terminal)
 		if event.intermediates[0] == ' ' && event.final == 'q' do set_cursor_style(terminal, parameter_raw(event, 0, 0))
@@ -1370,6 +1497,41 @@ handle_csi :: proc(terminal: ^Terminal, event: Event) {
 	case 'c': device_attributes(terminal, event)
 	case 't': window_status(terminal, event)
 	case:
+	}
+}
+
+handle_keyboard_flags :: proc(terminal: ^Terminal, event: Event) {
+	screen_index := 1 if terminal.using_alternate else 0
+	flags := &terminal.keyboard_flags[screen_index]
+	stack := &terminal.keyboard_stack[screen_index]
+	depth := &terminal.keyboard_stack_depth[screen_index]
+	switch event.private_marker {
+	case '=':
+		requested := u8(parameter_raw(event, 0, 0) & KEYBOARD_FLAGS_MASK)
+		switch parameter(event, 1, 1) {
+		case 1: flags^ = requested
+		case 2: flags^ |= requested
+		case 3: flags^ &~= requested
+		case: return
+		}
+		if depth^ > 0 do stack[depth^-1] = flags^
+	case '>':
+		requested := u8(parameter_raw(event, 0, 0) & KEYBOARD_FLAGS_MASK)
+		if depth^ == MAX_KEYBOARD_STACK {
+			copy(stack[:MAX_KEYBOARD_STACK-1], stack[1:])
+			depth^ -= 1
+		}
+		stack[depth^] = requested
+		depth^ += 1
+		flags^ = requested
+	case '<':
+		count := min(parameter(event, 0, 1), depth^)
+		depth^ -= count
+		flags^ = stack[depth^-1] if depth^ > 0 else 0
+	case '?':
+		response := fmt.aprintf("\x1b[?%du", flags^)
+		append_reply(terminal, transmute([]byte)response)
+		delete(response)
 	}
 }
 
@@ -1508,6 +1670,7 @@ set_modes :: proc(terminal: ^Terminal, event: Event, enabled: bool) {
 			case 1047, 1049: switch_alternate(terminal, enabled, mode == 1049)
 			case 2004: terminal.modes.bracketed_paste = enabled
 			case 2026: terminal.modes.synchronized_updates = enabled
+			case 2027: terminal.modes.grapheme_clusters = enabled
 			case 2031: terminal.modes.color_scheme_reporting = enabled
 			case:
 			}
@@ -1535,6 +1698,7 @@ report_mode :: proc(terminal: ^Terminal, event: Event) {
 		case 1070: status = 1 if terminal.modes.sixel_private_colors else 2
 		case 2004: status = 1 if terminal.modes.bracketed_paste else 2
 		case 2026: status = 1 if terminal.modes.synchronized_updates else 2
+		case 2027: status = 1 if terminal.modes.grapheme_clusters else 2
 		case 2031: status = 1 if terminal.modes.color_scheme_reporting else 2
 		case:
 		}
@@ -1557,6 +1721,9 @@ switch_alternate :: proc(terminal: ^Terminal, enabled, save_cursor: bool) {
 			terminal.main_screen.wrap_pending = false
 		}
 	}
+	screen_index := 1 if terminal.using_alternate else 0
+	depth := terminal.pointer_shape_depths[screen_index]
+	terminal.pointer_shape = terminal.pointer_shape_stacks[screen_index][depth-1] if depth > 0 else .Default
 }
 
 device_status :: proc(terminal: ^Terminal, event: Event) {
@@ -1769,6 +1936,9 @@ terminal_reset :: proc(terminal: ^Terminal) {
 	terminal.progress_state = .None
 	terminal.progress_percent = 0
 	terminal.pointer_shape = .Default
+	terminal.pointer_shape_depths = {}
+	terminal.keyboard_flags = {}
+	terminal.keyboard_stack_depth = {}
 	terminal.modes = Modes{autowrap = true, cursor_visible = true, sixel_private_colors = true, alternate_scroll = true}
 	terminal.using_alternate = false
 	screen_clear(&terminal.main_screen, {})

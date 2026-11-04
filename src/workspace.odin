@@ -1409,6 +1409,10 @@ workspace_event :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
 			workspace_redraw(workspace, pane, true)
 		}
 	case .Input:
+		if event.key_action == .Release {
+			if pane := workspace_active_pane(workspace); pane != nil do workspace_send_key_event(workspace, pane, event)
+			return true
+		}
 		if workspace.close_confirmation {
 			if event.key == .Enter || (event.key == .Text && event.input_size == 1 && (event.input[0] == 'y' || event.input[0] == 'Y')) do return false
 			if event.key == .Escape || (event.key == .Text && event.input_size == 1 && (event.input[0] == 'n' || event.input[0] == 'N')) do workspace_hide_close_confirmation(workspace)
@@ -1448,27 +1452,7 @@ workspace_event :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
 		}
 		if copy_shortcut(event) { workspace_copy_selection(workspace, pane, .Clipboard); return true }
 		if paste_shortcut(event) { x11.request_selection(workspace.root, .Clipboard); return true }
-		encoded: [16]byte
-		input := event.input
-		data := input[:event.input_size]
-		if event.key != .Text do data = keyboard.encode_key(event.key, event.modifiers, pane.terminal.modes.application_cursor, encoded[:])
-		if len(data) > 0 && pane.scrollback_state.active {
-			features.scrollback_close(&pane.scrollback_state)
-			selection.clear(&pane.selection_state)
-			workspace_redraw(workspace, pane, true)
-		}
-		vt.terminal_input(&pane.terminal, data)
-		owner := pane_tmux_owner(pane)
-		if owner != nil && tmux.session_active(&owner.tmux_session) {
-			if tmux.session_ready(&owner.tmux_session) {
-				target := pane.tmux_pane_id if pane.tmux_pane_id >= 0 else owner.tmux_session.pane_id
-				if event.key == .Text && .Alt in event.modifiers do tmux.append_input_commands(&owner.tmux_session, &owner.pending, target, {0x1b})
-				tmux.append_input_commands(&owner.tmux_session, &owner.pending, target, data)
-			}
-			return true
-		}
-		if event.key == .Text && .Alt in event.modifiers do queue_input(&pane.pending, pane.pending_offset, {0x1b})
-		queue_input(&pane.pending, pane.pending_offset, data)
+		workspace_send_key_event(workspace, pane, event)
 	case .Mouse:
 		workspace_clear_scrollbar_hover(workspace, event.source)
 		if workspace.close_confirmation {
@@ -1644,6 +1628,41 @@ workspace_event :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
 	case:
 	}
 	return true
+}
+
+workspace_send_key_event :: proc(workspace: ^Workspace, pane: ^Pane, event: x11.Event) {
+	encoded: [512]byte
+	flags := vt.terminal_keyboard_flags(&pane.terminal)
+	input := event.input
+	data, escape_encoded := keyboard.encode_key_event(
+		event.key,
+		event.modifiers,
+		event.key_action,
+		event.key_codepoint,
+		event.shifted_key_codepoint,
+		input[:event.input_size],
+		flags,
+		pane.terminal.modes.application_cursor,
+		encoded[:],
+	)
+	if len(data) == 0 do return
+	if pane.scrollback_state.active {
+		features.scrollback_close(&pane.scrollback_state)
+		selection.clear(&pane.selection_state)
+		workspace_redraw(workspace, pane, true)
+	}
+	vt.terminal_input(&pane.terminal, data)
+	owner := pane_tmux_owner(pane)
+	if owner != nil && tmux.session_active(&owner.tmux_session) {
+		if tmux.session_ready(&owner.tmux_session) {
+			target := pane.tmux_pane_id if pane.tmux_pane_id >= 0 else owner.tmux_session.pane_id
+			if !escape_encoded && event.key == .Text && .Alt in event.modifiers do tmux.append_input_commands(&owner.tmux_session, &owner.pending, target, {0x1b})
+			tmux.append_input_commands(&owner.tmux_session, &owner.pending, target, data)
+		}
+		return
+	}
+	if !escape_encoded && event.key == .Text && .Alt in event.modifiers do queue_input(&pane.pending, pane.pending_offset, {0x1b})
+	queue_input(&pane.pending, pane.pending_offset, data)
 }
 
 workspace_tab_bar_mouse :: proc(workspace: ^Workspace, mouse: keyboard.Mouse_Event, timestamp: u64) -> bool {

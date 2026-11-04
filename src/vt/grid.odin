@@ -404,7 +404,7 @@ pack_logical_lines :: proc(
 				}
 				continue
 			}
-			width := max(1, unicode.normalized_east_asian_width(cell.codepoint))
+			width := max(1, int(cell.width))
 			if width > columns do width = 1
 			if column+width > columns {
 				append(packed_rows, row)
@@ -662,21 +662,32 @@ blank_cell :: proc(attributes: Attributes) -> Cell {
 	return Cell{codepoint = ' ', width = 1, attributes = {background = background}}
 }
 
-screen_put :: proc(screen: ^Screen, codepoint: rune, attributes: Attributes, autowrap: bool, hyperlink_id: u32 = 0) {
+screen_put :: proc(
+	screen: ^Screen,
+	codepoint: rune,
+	attributes: Attributes,
+	autowrap: bool,
+	hyperlink_id: u32 = 0,
+	insert: bool = false,
+	grapheme_clusters: bool = false,
+) {
 	previous, previous_column := screen_previous_cell(screen)
-	if unicode.is_combining(codepoint) || emoji_sequence_extension(previous, codepoint) {
+	cluster_extension, cluster_width := false, 0
+	if grapheme_clusters do cluster_extension, cluster_width = grapheme_sequence_extension(previous, codepoint)
+	if cluster_extension || !grapheme_clusters && (unicode.is_combining(codepoint) || emoji_sequence_extension(previous, codepoint)) {
 		if previous != nil && int(previous.combining_count) < len(previous.combining) {
 			previous.combining[previous.combining_count] = codepoint
 			previous.combining_count += 1
-			if emoji_sequence_is_wide(previous, codepoint) {
-				screen_widen_sequence_cell(screen, previous, previous_column, attributes)
-			}
+			if grapheme_clusters do screen_set_sequence_width(screen, previous, previous_column, cluster_width)
+			else if emoji_sequence_is_wide(previous, codepoint) do screen_set_sequence_width(screen, previous, previous_column, 2)
 		}
 		return
 	}
+	if grapheme_clusters && unicode.is_combining(codepoint) do return
 
 	width := unicode.normalized_east_asian_width(codepoint)
 	if width <= 0 do return
+	if insert do insert_cells(screen, width, attributes)
 	if screen.wrap_pending {
 		if autowrap {
 			screen.wrapped[screen.cursor.row] = true
@@ -722,6 +733,33 @@ screen_put :: proc(screen: ^Screen, codepoint: rune, attributes: Attributes, aut
 	}
 }
 
+grapheme_sequence_extension :: proc(previous: ^Cell, codepoint: rune) -> (extends: bool, width: int) {
+	if previous == nil || int(previous.combining_count) >= len(previous.combining) do return
+	// shortcut: clusters longer than the cell's fixed rune capacity split, increase MAX_COMBINING_RUNES if real applications need more.
+	encoded: [(MAX_COMBINING_RUNES+2)*4]byte
+	length := 0
+	length += encode_grapheme_rune(encoded[length:], previous.codepoint)
+	for value in previous.combining[:int(previous.combining_count)] do length += encode_grapheme_rune(encoded[length:], value)
+	length += encode_grapheme_rune(encoded[length:], codepoint)
+	count, _, measured_width := utf8.grapheme_count(string(encoded[:length]))
+	if count != 1 do return
+	extends = true
+	width = clamp(measured_width, 1, 2)
+	for value in previous.combining[:int(previous.combining_count)] {
+		if value == 0xfe0e do width = 1
+		if value == 0xfe0f do width = 2
+	}
+	if codepoint == 0xfe0e do width = 1
+	if codepoint == 0xfe0f do width = 2
+	return
+}
+
+encode_grapheme_rune :: proc(output: []byte, value: rune) -> int {
+	bytes, count := utf8.encode_rune(value)
+	copy(output, bytes[:count])
+	return count
+}
+
 screen_previous_cell :: proc(screen: ^Screen) -> (cell: ^Cell, column: int) {
 	if screen == nil || screen.columns <= 0 || screen.rows <= 0 do return nil, -1
 	column = screen.cursor.column if screen.wrap_pending else screen.cursor.column-1
@@ -753,19 +791,25 @@ emoji_sequence_is_wide :: proc(cell: ^Cell, codepoint: rune) -> bool {
 	       codepoint >= 0x1f1e6 && codepoint <= 0x1f1ff
 }
 
-screen_widen_sequence_cell :: proc(screen: ^Screen, cell: ^Cell, column: int, attributes: Attributes) {
-	if screen == nil || cell == nil || column < 0 || column+1 >= screen.columns do return
-	continuation := cell_at(screen, screen.cursor.row, column+1)
-	continuation^ = blank_cell(attributes)
-	continuation.width = 0
-	continuation.continuation = true
-	continuation.hyperlink_id = cell.hyperlink_id
-	cell.width = 2
-	if !screen.wrap_pending && screen.cursor.column == column+1 {
-		if screen.cursor.column+1 >= screen.columns {
-			screen.cursor.column = screen.columns-1
-			screen.wrap_pending = true
-		} else do screen.cursor.column += 1
+screen_set_sequence_width :: proc(screen: ^Screen, cell: ^Cell, column, width: int) {
+	if screen == nil || cell == nil || column < 0 || width < 1 || width > 2 || int(cell.width) == width do return
+	if width == 2 {
+		if column+1 >= screen.columns do return
+		continuation := cell_at(screen, screen.cursor.row, column+1)
+		continuation^ = blank_cell(cell.attributes)
+		continuation.width = 0
+		continuation.continuation = true
+		continuation.hyperlink_id = cell.hyperlink_id
+	} else if column+1 < screen.columns {
+		cell_at(screen, screen.cursor.row, column+1)^ = blank_cell(cell.attributes)
+	}
+	cell.width = u8(width)
+	if column+width >= screen.columns {
+		screen.cursor.column = screen.columns-1
+		screen.wrap_pending = true
+	} else {
+		screen.cursor.column = column+width
+		screen.wrap_pending = false
 	}
 }
 

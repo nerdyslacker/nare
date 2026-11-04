@@ -28,10 +28,28 @@ Key :: enum {
 	F10,
 	F11,
 	F12,
+	Left_Shift,
+	Left_Control,
+	Left_Alt,
+	Left_Super,
+	Right_Shift,
+	Right_Control,
+	Right_Alt,
+	Right_Super,
+	Caps_Lock,
+	Num_Lock,
 }
 
 Modifiers :: bit_set[Modifier]
-Modifier :: enum { Shift, Alt, Control }
+Modifier :: enum { Shift, Alt, Control, Super, Hyper, Meta, Caps_Lock, Num_Lock }
+
+Key_Action :: enum { Press, Repeat, Release }
+
+KITTY_DISAMBIGUATE :: u8(1)
+KITTY_REPORT_EVENTS :: u8(2)
+KITTY_ALTERNATE_KEYS :: u8(4)
+KITTY_ALL_KEYS :: u8(8)
+KITTY_ASSOCIATED_TEXT :: u8(16)
 
 Mouse_Action :: enum { Press, Release, Motion }
 
@@ -52,7 +70,7 @@ encode_key :: proc(key: Key, modifiers: Modifiers, application_cursor: bool, buf
 	if .Alt in modifiers do modifier += 2
 	if .Control in modifiers do modifier += 4
 
-	switch key {
+	#partial switch key {
 	case .Enter: return copy_sequence(buffer, "\r")
 	case .Backspace:
 		if .Alt in modifiers do return copy_sequence(buffer, "\x1b\x7f")
@@ -88,25 +106,161 @@ encode_key :: proc(key: Key, modifiers: Modifiers, application_cursor: bool, buf
 	return nil
 }
 
-encode_cursor :: proc(buffer: []byte, final: byte, modifier: int, application: bool) -> []byte {
-	if modifier == 1 {
+encode_key_event :: proc(
+	key: Key,
+	modifiers: Modifiers,
+	action: Key_Action,
+	codepoint, shifted_codepoint: rune,
+	text: []byte,
+	flags: u8,
+	application_cursor: bool,
+	buffer: []byte,
+) -> (data: []byte, escape_encoded: bool) {
+	if len(buffer) < 512 do return
+	report_events := flags & KITTY_REPORT_EVENTS != 0
+	all_keys := flags & KITTY_ALL_KEYS != 0
+	if action == .Release && (!report_events || !all_keys && (key == .Text || key == .Enter || key == .Tab || key == .Backspace)) do return
+	if key == .Text {
+		escape_encoded = all_keys || flags & KITTY_DISAMBIGUATE != 0 && (.Alt in modifiers || .Control in modifiers)
+		if !escape_encoded do return text, false
+		key_codepoint := codepoint
+		if key_codepoint == 0 {
+			for value in string(text) { key_codepoint = value; break }
+		}
+		return encode_kitty_key(buffer, key_codepoint, shifted_codepoint, modifiers, action, text, flags), true
+	}
+	code := kitty_key_code(key)
+	if code != 0 && (all_keys || key == .Escape && flags & KITTY_DISAMBIGUATE != 0) {
+		return encode_kitty_key(buffer, code, 0, modifiers, action, nil, flags), true
+	}
+	modifier := kitty_modifier(modifiers)
+	event_type := int(action)+1
+	switch key {
+	case .Enter: return copy_sequence(buffer, "\r"), false
+	case .Backspace:
+		if .Alt in modifiers do return copy_sequence(buffer, "\x1b\x7f"), true
+		return copy_sequence(buffer, "\x7f"), false
+	case .Tab:
+		if .Shift in modifiers do return copy_sequence(buffer, "\x1b[Z"), true
+		return copy_sequence(buffer, "\t"), false
+	case .Escape: return copy_sequence(buffer, "\x1b"), true
+	case .Up: return encode_cursor(buffer, 'A', modifier, application_cursor, event_type, report_events), true
+	case .Down: return encode_cursor(buffer, 'B', modifier, application_cursor, event_type, report_events), true
+	case .Right: return encode_cursor(buffer, 'C', modifier, application_cursor, event_type, report_events), true
+	case .Left: return encode_cursor(buffer, 'D', modifier, application_cursor, event_type, report_events), true
+	case .Home: return encode_cursor(buffer, 'H', modifier, application_cursor, event_type, report_events), true
+	case .End: return encode_cursor(buffer, 'F', modifier, application_cursor, event_type, report_events), true
+	case .Insert: return encode_tilde(buffer, 2, modifier, event_type, report_events), true
+	case .Delete: return encode_tilde(buffer, 3, modifier, event_type, report_events), true
+	case .Page_Up: return encode_tilde(buffer, 5, modifier, event_type, report_events), true
+	case .Page_Down: return encode_tilde(buffer, 6, modifier, event_type, report_events), true
+	case .F1: return encode_function(buffer, 'P', modifier, event_type, report_events), true
+	case .F2: return encode_function(buffer, 'Q', modifier, event_type, report_events), true
+	case .F3: return encode_function(buffer, 'R', modifier, event_type, report_events), true
+	case .F4: return encode_function(buffer, 'S', modifier, event_type, report_events), true
+	case .F5: return encode_tilde(buffer, 15, modifier, event_type, report_events), true
+	case .F6: return encode_tilde(buffer, 17, modifier, event_type, report_events), true
+	case .F7: return encode_tilde(buffer, 18, modifier, event_type, report_events), true
+	case .F8: return encode_tilde(buffer, 19, modifier, event_type, report_events), true
+	case .F9: return encode_tilde(buffer, 20, modifier, event_type, report_events), true
+	case .F10: return encode_tilde(buffer, 21, modifier, event_type, report_events), true
+	case .F11: return encode_tilde(buffer, 23, modifier, event_type, report_events), true
+	case .F12: return encode_tilde(buffer, 24, modifier, event_type, report_events), true
+	case .Text, .Left_Shift, .Left_Control, .Left_Alt, .Left_Super, .Right_Shift, .Right_Control, .Right_Alt, .Right_Super, .Caps_Lock, .Num_Lock: return
+	}
+	return
+}
+
+kitty_key_code :: proc(key: Key) -> rune {
+	#partial switch key {
+	case .Escape: return 27
+	case .Enter: return 13
+	case .Tab: return 9
+	case .Backspace: return 127
+	case .Caps_Lock: return 57358
+	case .Num_Lock: return 57360
+	case .Left_Shift: return 57441
+	case .Left_Control: return 57442
+	case .Left_Alt: return 57443
+	case .Left_Super: return 57444
+	case .Right_Shift: return 57447
+	case .Right_Control: return 57448
+	case .Right_Alt: return 57449
+	case .Right_Super: return 57450
+	case: return 0
+	}
+}
+
+kitty_modifier :: proc(modifiers: Modifiers) -> int {
+	value := 1
+	if .Shift in modifiers do value += 1
+	if .Alt in modifiers do value += 2
+	if .Control in modifiers do value += 4
+	if .Super in modifiers do value += 8
+	if .Hyper in modifiers do value += 16
+	if .Meta in modifiers do value += 32
+	if .Caps_Lock in modifiers do value += 64
+	if .Num_Lock in modifiers do value += 128
+	return value
+}
+
+encode_kitty_key :: proc(buffer: []byte, codepoint, shifted_codepoint: rune, modifiers: Modifiers, action: Key_Action, text: []byte, flags: u8) -> []byte {
+	index := 0
+	buffer[index], buffer[index+1] = 0x1b, '['
+	index += 2
+	index += append_decimal(buffer[index:], int(max(0, codepoint)))
+	if flags & KITTY_ALTERNATE_KEYS != 0 && .Shift in modifiers && shifted_codepoint > 0 {
+		buffer[index] = ':'
+		index += 1
+		index += append_decimal(buffer[index:], int(shifted_codepoint))
+	}
+	buffer[index] = ';'
+	index += 1
+	index += append_decimal(buffer[index:], kitty_modifier(modifiers))
+	if flags & KITTY_REPORT_EVENTS != 0 {
+		buffer[index] = ':'
+		index += 1
+		index += append_decimal(buffer[index:], int(action)+1)
+	}
+	if flags & KITTY_ASSOCIATED_TEXT != 0 && flags & KITTY_ALL_KEYS != 0 && len(text) > 0 {
+		text_start := index
+		buffer[index] = ';'
+		index += 1
+		first := true
+		for value in string(text) {
+			if value < 0x20 || value >= 0x7f && value <= 0x9f do continue
+			if !first { buffer[index] = ':'; index += 1 }
+			index += append_decimal(buffer[index:], int(value))
+			first = false
+		}
+		if first do index = text_start
+	}
+	buffer[index] = 'u'
+	return buffer[:index+1]
+}
+
+encode_cursor :: proc(buffer: []byte, final: byte, modifier: int, application: bool, event_type: int = 1, report_event: bool = false) -> []byte {
+	if modifier == 1 && !report_event {
 		buffer[0], buffer[1], buffer[2] = 0x1b, '[' if !application else 'O', final
 		return buffer[:3]
 	}
-	buffer[0], buffer[1], buffer[2], buffer[3], buffer[4], buffer[5] = 0x1b, '[', '1', ';', byte('0'+modifier), final
-	return buffer[:6]
+	index := 4
+	buffer[0], buffer[1], buffer[2], buffer[3] = 0x1b, '[', '1', ';'
+	index += append_decimal(buffer[index:], modifier)
+	if report_event { buffer[index] = ':'; index += 1; index += append_decimal(buffer[index:], event_type) }
+	buffer[index] = final
+	return buffer[:index+1]
 }
 
-encode_function :: proc(buffer: []byte, final: byte, modifier: int) -> []byte {
-	if modifier == 1 {
+encode_function :: proc(buffer: []byte, final: byte, modifier: int, event_type: int = 1, report_event: bool = false) -> []byte {
+	if modifier == 1 && !report_event {
 		buffer[0], buffer[1], buffer[2] = 0x1b, 'O', final
 		return buffer[:3]
 	}
-	buffer[0], buffer[1], buffer[2], buffer[3], buffer[4], buffer[5] = 0x1b, '[', '1', ';', byte('0'+modifier), final
-	return buffer[:6]
+	return encode_cursor(buffer, final, modifier, false, event_type, report_event)
 }
 
-encode_tilde :: proc(buffer: []byte, number, modifier: int) -> []byte {
+encode_tilde :: proc(buffer: []byte, number, modifier: int, event_type: int = 1, report_event: bool = false) -> []byte {
 	index := 0
 	buffer[index], buffer[index+1] = 0x1b, '['
 	index += 2
@@ -116,9 +270,11 @@ encode_tilde :: proc(buffer: []byte, number, modifier: int) -> []byte {
 	}
 	buffer[index] = byte('0' + number%10)
 	index += 1
-	if modifier != 1 {
-		buffer[index], buffer[index+1] = ';', byte('0'+modifier)
-		index += 2
+	if modifier != 1 || report_event {
+		buffer[index] = ';'
+		index += 1
+		index += append_decimal(buffer[index:], modifier)
+		if report_event { buffer[index] = ':'; index += 1; index += append_decimal(buffer[index:], event_type) }
 	}
 	buffer[index] = '~'
 	return buffer[:index+1]

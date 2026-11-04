@@ -476,6 +476,12 @@ run :: proc(
 					redraw(renderer, window, terminal, &selection_state, &search_state, &url_state, true, &shell_state, &scrollback_state)
 				}
 			case .Input:
+				if event.key_action == .Release {
+					encoded: [512]byte
+					data, _ := keyboard.encode_key_event(event.key, event.modifiers, event.key_action, event.key_codepoint, event.shifted_key_codepoint, nil, vt.terminal_keyboard_flags(terminal), terminal.modes.application_cursor, encoded[:])
+					queue_input(&pending, pending_offset, data)
+					continue
+				}
 				if scroll_rows := scrollback_shortcut(event, vt.terminal_screen(terminal).rows); scroll_rows != 0 {
 					if search_state.active do features.close(&search_state)
 					if url_state.active do features.url_close(&url_state)
@@ -562,11 +568,9 @@ run :: proc(
 					if !osc52_request.active do x11.request_selection(window, .Primary)
 					continue
 				}
-				encoded: [16]byte
-				data := event.input[:event.input_size]
-				if event.key != .Text {
-					data = keyboard.encode_key(event.key, event.modifiers, terminal.modes.application_cursor, encoded[:])
-				} else if .Alt in event.modifiers {
+				encoded: [512]byte
+				data, escape_encoded := keyboard.encode_key_event(event.key, event.modifiers, event.key_action, event.key_codepoint, event.shifted_key_codepoint, event.input[:event.input_size], vt.terminal_keyboard_flags(terminal), terminal.modes.application_cursor, encoded[:])
+				if !escape_encoded && event.key == .Text && .Alt in event.modifiers {
 					queue_input(&pending, pending_offset, {0x1b})
 				}
 				vt.terminal_input(terminal, data)
