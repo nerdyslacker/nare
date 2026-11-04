@@ -6,6 +6,7 @@ import vt "../vt"
 import x11 "../x11"
 
 Kind :: enum { CPU, GPU, Auto }
+GPU_Backend :: enum { Auto, OpenGL, Vulkan }
 Error :: enum { None, Font, CPU, GPU_Unavailable }
 
 Theme :: struct {
@@ -50,6 +51,8 @@ Renderer :: struct {
 	owns_font: bool,
 	cpu: CPU,
 	gpu: GPU,
+	vulkan: Vulkan,
+	gpu_backend: GPU_Backend,
 	active: Kind,
 	ligatures: bool,
 	suspended: bool,
@@ -59,6 +62,7 @@ init :: proc(
 	renderer: ^Renderer,
 	window: ^x11.Window,
 	kind: Kind,
+	gpu_backend: GPU_Backend = .OpenGL,
 	ligatures: bool = true,
 	family: string = fonts.DEFAULT_FAMILY,
 	point_size: int = fonts.DEFAULT_POINT_SIZE,
@@ -82,44 +86,73 @@ init :: proc(
 	}
 	x11.set_cell_size(window, renderer.font.cell_width, renderer.font.cell_height)
 	renderer.active = .CPU
+	renderer.gpu_backend = gpu_backend
 	gpu_ready := false
+	selected_backend := gpu_backend
 	if kind != .CPU {
-		gpu_ready = gpu_init(&renderer.gpu, window)
+		backends: [2]GPU_Backend
+		count := 0
+		switch gpu_backend {
+		case .OpenGL:
+			backends[0] = .OpenGL
+			count = 1
+		case .Vulkan:
+			backends[0] = .Vulkan
+			count = 1
+		case .Auto:
+			backends[0] = .Vulkan
+			backends[1] = .OpenGL
+			count = 2
+		}
+		for index in 0..<count {
+			if try_gpu_backend(renderer, window, backends[index]) {
+				gpu_ready = true
+				selected_backend = backends[index]
+				break
+			}
+		}
 	}
-	selected, available := select_kind(kind, gpu_ready)
-	if !available {
-		destroy(renderer, window)
-		return .GPU_Unavailable
-	}
-	if selected == .GPU {
+	if gpu_ready {
 		if !cpu_damage_resize(&renderer.cpu, window.width, window.height) {
 			destroy(renderer, window)
 			return .CPU
 		}
+		renderer.active = .GPU
+		renderer.gpu_backend = selected_backend
 	} else if !cpu_resize(&renderer.cpu, window) {
 		destroy(renderer, window)
 		return .CPU
 	}
-	renderer.active = selected
 	renderer.ligatures = ligatures
 	return .None
 }
 
-select_kind :: proc(requested: Kind, gpu_ready: bool) -> (selected: Kind, available: bool) {
-	switch requested {
-	case .CPU:
-		return .CPU, true
-	case .GPU:
-		return .GPU, gpu_ready
+try_gpu_backend :: proc(renderer: ^Renderer, window: ^x11.Window, backend: GPU_Backend) -> bool {
+	switch backend {
+	case .OpenGL:
+		return gpu_init(&renderer.gpu, window)
+	case .Vulkan:
+		return vulkan_init(&renderer.vulkan, window)
 	case .Auto:
-		if gpu_ready do return .GPU, true
-		return .CPU, true
+		return false
 	}
-	return .CPU, false
+	return false
+}
+
+destroy_gpu_backend :: proc(renderer: ^Renderer, window: ^x11.Window) {
+	switch renderer.gpu_backend {
+	case .Vulkan:
+		vulkan_destroy(&renderer.vulkan, window)
+	case .OpenGL, .Auto:
+		gpu_destroy(&renderer.gpu, window)
+	}
 }
 
 destroy :: proc(renderer: ^Renderer, window: ^x11.Window = nil) {
-	if window != nil do gpu_destroy(&renderer.gpu, window)
+	if window != nil {
+		gpu_destroy(&renderer.gpu, window)
+		vulkan_destroy(&renderer.vulkan, window)
+	}
 	cpu_destroy(&renderer.cpu)
 	if renderer.owns_font do fonts.destroy(&renderer.owned_font)
 	renderer^ = {}
@@ -128,10 +161,22 @@ destroy :: proc(renderer: ^Renderer, window: ^x11.Window = nil) {
 suspend :: proc(renderer: ^Renderer, window: ^x11.Window) {
 	if renderer == nil || window == nil || renderer.suspended do return
 	if renderer.active == .GPU {
-		_ = gpu_release_image_textures(&renderer.gpu, window)
-		delete(renderer.gpu.commands)
-		renderer.gpu.commands = nil
-		command_scratch_destroy(&renderer.gpu.command_scratch)
+		switch renderer.gpu_backend {
+		case .Vulkan:
+			_ = vulkan_release_image_textures(&renderer.vulkan, window)
+			delete(renderer.vulkan.commands)
+			renderer.vulkan.commands = nil
+			delete(renderer.vulkan.row_commands)
+			renderer.vulkan.row_commands = nil
+			delete(renderer.vulkan.rows)
+			renderer.vulkan.rows = nil
+			command_scratch_destroy(&renderer.vulkan.scratch)
+		case .OpenGL, .Auto:
+			_ = gpu_release_image_textures(&renderer.gpu, window)
+			delete(renderer.gpu.commands)
+			renderer.gpu.commands = nil
+			command_scratch_destroy(&renderer.gpu.command_scratch)
+		}
 	}
 	cpu_destroy(&renderer.cpu)
 	renderer.suspended = true
@@ -140,12 +185,23 @@ suspend :: proc(renderer: ^Renderer, window: ^x11.Window) {
 resume :: proc(renderer: ^Renderer, window: ^x11.Window) -> bool {
 	if renderer == nil || window == nil do return false
 	if !renderer.suspended do return true
-	if renderer.active == .GPU && renderer.gpu.ctx != nil {
-		if cpu_damage_resize(&renderer.cpu, window.width, window.height) {
-			renderer.suspended = false
-			return true
+	if renderer.active == .GPU {
+		usable := false
+		switch renderer.gpu_backend {
+		case .Vulkan:
+			usable = renderer.vulkan.device != nil
+			if usable && cpu_damage_resize(&renderer.cpu, window.width, window.height) && vulkan_resize(&renderer.vulkan, window) {
+				renderer.suspended = false
+				return true
+			}
+		case .OpenGL, .Auto:
+			usable = renderer.gpu.ctx != nil
+			if usable && cpu_damage_resize(&renderer.cpu, window.width, window.height) {
+				renderer.suspended = false
+				return true
+			}
 		}
-		gpu_destroy(&renderer.gpu, window)
+		if usable do destroy_gpu_backend(renderer, window)
 	}
 	if !cpu_resize(&renderer.cpu, window) do return false
 	renderer.active = .CPU
@@ -157,8 +213,15 @@ resize :: proc(renderer: ^Renderer, window: ^x11.Window) -> bool {
 	if renderer.suspended do return false
 	if renderer.active == .GPU {
 		if !cpu_damage_resize(&renderer.cpu, window.width, window.height) do return false
-		if gpu_resize(&renderer.gpu, window) do return true
-		gpu_destroy(&renderer.gpu, window)
+		resized := false
+		switch renderer.gpu_backend {
+		case .Vulkan:
+			resized = vulkan_resize(&renderer.vulkan, window)
+		case .OpenGL, .Auto:
+			resized = gpu_resize(&renderer.gpu, window)
+		}
+		if resized do return true
+		destroy_gpu_backend(renderer, window)
 		if !cpu_resize(&renderer.cpu, window) do return false
 		renderer.active = .CPU
 		return true
@@ -169,7 +232,12 @@ resize :: proc(renderer: ^Renderer, window: ^x11.Window) -> bool {
 present_cached :: proc(renderer: ^Renderer, window: ^x11.Window) {
 	if renderer.suspended do return
 	if renderer.active == .GPU {
-		_ = gpu_present_cached(&renderer.gpu, window)
+		switch renderer.gpu_backend {
+		case .Vulkan:
+			_ = vulkan_present_cached(&renderer.vulkan, window)
+		case .OpenGL, .Auto:
+			_ = gpu_present_cached(&renderer.gpu, window)
+		}
 		return
 	}
 	cpu_present_cached(&renderer.cpu, window)
@@ -189,8 +257,37 @@ draw :: proc(
 		cpu_draw(&renderer.cpu, renderer.font, window, terminal, renderer.ligatures, force, selection_state, screen_override, scrollbar)
 		return
 	}
-	if !gpu_draw(&renderer.gpu, &renderer.cpu, renderer.font, window, terminal, renderer.ligatures, force, selection_state, screen_override, scrollbar) {
-		gpu_destroy(&renderer.gpu, window)
+	drawn := false
+	switch renderer.gpu_backend {
+	case .Vulkan:
+		drawn = vulkan_draw(
+			&renderer.vulkan,
+			&renderer.cpu,
+			renderer.font,
+			window,
+			terminal,
+			renderer.ligatures,
+			force,
+			selection_state,
+			screen_override,
+			scrollbar,
+		)
+	case .OpenGL, .Auto:
+		drawn = gpu_draw(
+			&renderer.gpu,
+			&renderer.cpu,
+			renderer.font,
+			window,
+			terminal,
+			renderer.ligatures,
+			force,
+			selection_state,
+			screen_override,
+			scrollbar,
+		)
+	}
+	if !drawn {
+		destroy_gpu_backend(renderer, window)
 		if !cpu_resize(&renderer.cpu, window) do return
 		renderer.active = .CPU
 		_ = cpu_render(&renderer.cpu, renderer.font, window, terminal, renderer.ligatures, true, selection_state, screen_override, scrollbar)

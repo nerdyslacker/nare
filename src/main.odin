@@ -366,6 +366,8 @@ config_argument :: proc(args: []string) -> (path: string, explicit, disabled, ok
 apply_argument :: proc(options: ^config.Settings, argument: string) -> config.Error {
 	if strings.has_prefix(argument, "--renderer=") {
 		return config.apply(options, "main", "renderer", argument[len("--renderer="):])
+	} else if strings.has_prefix(argument, "--gpu-backend=") {
+		return config.apply(options, "gpu", "backend", argument[len("--gpu-backend="):])
 	} else if strings.has_prefix(argument, "--font=") {
 		return config.apply(options, "main", "font", argument[len("--font="):])
 	} else if strings.has_prefix(argument, "--font-size=") {
@@ -389,7 +391,7 @@ apply_argument :: proc(options: ^config.Settings, argument: string) -> config.Er
 }
 
 usage :: proc() -> string {
-	return "usage: nare [--quake] [--server|--client [--no-wait]] [--server-socket=PATH] [DIRECTORY|--working-directory=PATH] [--config=PATH|--no-config] [--renderer=cpu|gpu|auto] [--font=FAMILY] [--font-size=POINTS] [--ligatures=true|false] [--title=TITLE] [--scrollback-lines=COUNT] [--url-opener=COMMAND] [--output-pipe=COMMAND] [--term=NAME] [--osc52=disabled|copy-enabled|paste-enabled|enabled] [--tmux [SESSION]|--tmux-profile=NAME] [--ssh=HOST] [--session=NAME] [--new-tab|--new-window] [-e COMMAND [ARG...]]\n       nare status job ...\n       nare job run LABEL -- COMMAND [ARG...]"
+	return "usage: nare [--quake] [--server|--client [--no-wait]] [--server-socket=PATH] [DIRECTORY|--working-directory=PATH] [--config=PATH|--no-config] [--renderer=cpu|gpu|auto] [--gpu-backend=auto|opengl|vulkan] [--font=FAMILY] [--font-size=POINTS] [--ligatures=true|false] [--title=TITLE] [--scrollback-lines=COUNT] [--url-opener=COMMAND] [--output-pipe=COMMAND] [--term=NAME] [--osc52=disabled|copy-enabled|paste-enabled|enabled] [--tmux [SESSION]|--tmux-profile=NAME] [--ssh=HOST] [--session=NAME] [--new-tab|--new-window] [-e COMMAND [ARG...]]\n       nare status job ...\n       nare job run LABEL -- COMMAND [ARG...]"
 }
 
 OSC52_Request :: struct {

@@ -201,6 +201,7 @@ Result :: struct {
 
 Settings :: struct {
 	renderer: drawing.Kind,
+	gpu_backend: drawing.GPU_Backend,
 	ligatures: bool,
 	font: string,
 	bold_font: string,
@@ -241,6 +242,7 @@ Settings :: struct {
 
 settings_init :: proc(settings: ^Settings) {
 	settings.renderer = .Auto
+	settings.gpu_backend = .OpenGL
 	settings.ligatures = true
 	settings.font = strings.clone("monospace")
 	settings.bold_font = strings.clone("auto")
@@ -482,7 +484,7 @@ parse_contents :: proc(
 		if line[0] == '[' {
 			if len(line) < 3 || line[len(line)-1] != ']' do return {error = .Syntax, line = line_number}
 			section = strings.trim_space(line[1:len(line)-1])
-			if section != "main" && section != "scrollback" && section != "url" && section != "shell" && section != "security" && section != "graphics" && section != "window" && section != "tabs" && section != "colors" && section != "bindings" && section != "cursor" && section != "tmux" && section != "quake" && section != "statusbar" && section != "statusbar.jobs" && !status_module_section(section) && !tmux_profile_section(section) && !tab_rule_section(section) {
+			if section != "main" && section != "scrollback" && section != "url" && section != "shell" && section != "security" && section != "graphics" && section != "gpu" && section != "window" && section != "tabs" && section != "colors" && section != "bindings" && section != "cursor" && section != "tmux" && section != "quake" && section != "statusbar" && section != "statusbar.jobs" && !status_module_section(section) && !tmux_profile_section(section) && !tab_rule_section(section) {
 				return {error = .Unknown_Section, line = line_number}
 			}
 			if tmux_profile_section(section) {
@@ -710,6 +712,17 @@ apply :: proc(settings: ^Settings, section, key, value: string) -> Error {
 			parsed, ok := strconv.parse_int(value)
 			if !ok || parsed <= 0 || parsed > graphics.MAX_SIXEL_COLORS do return .Invalid_Value
 			settings.graphics_limits.max_sixel_colors = parsed
+		case: return .Unknown_Key
+		}
+	} else if section == "gpu" {
+		switch key {
+		case "backend":
+			switch value {
+			case "auto": settings.gpu_backend = .Auto
+			case "opengl": settings.gpu_backend = .OpenGL
+			case "vulkan": settings.gpu_backend = .Vulkan
+			case: return .Invalid_Value
+			}
 		case: return .Unknown_Key
 		}
 	} else if section == "window" {

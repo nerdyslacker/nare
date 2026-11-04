@@ -14,6 +14,7 @@ DEFAULT_SCROLLBACK_BYTES :: 64 * 1024 * 1024
 
 Color_Kind :: enum u8 { Default, Indexed, RGB }
 Color :: struct { kind: Color_Kind, value: u32 }
+Underline_Style :: enum u8 { None, Single, Double, Curly, Dotted, Dashed }
 
 Shell_Marker :: enum { Prompt, Command, Output, Finished }
 Shell_Markers :: bit_set[Shell_Marker; u8]
@@ -24,8 +25,8 @@ Attributes :: struct {
 	bold: bool,
 	faint: bool,
 	italic: bool,
-	underline: bool,
-	double_underline: bool,
+	underline: Underline_Style,
+	underline_color: Color,
 	blink: bool,
 	inverse: bool,
 	hidden: bool,

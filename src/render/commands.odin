@@ -87,11 +87,18 @@ build_row_commands :: proc(
 		)
 		if foreground == background do continue
 		decoration_width := min(window.width-column*window.cell_w, max(1, int(cell.width))*window.cell_w)
-		if cell.attributes.underline {
-			append_rectangle(output, column*window.cell_w, y+window.cell_h-1, decoration_width, 1, foreground)
-			if cell.attributes.double_underline {
-				append_rectangle(output, column*window.cell_w, y+window.cell_h-3, decoration_width, 1, foreground)
-			}
+		if cell.attributes.underline != .None {
+			underline_color := foreground
+			if cell.attributes.underline_color.kind != .Default do underline_color = terminal_color(cell.attributes.underline_color, true)
+			append_underline(
+				output,
+				column*window.cell_w,
+				y,
+				decoration_width,
+				window.cell_h,
+				cell.attributes.underline,
+				underline_color,
+			)
 		}
 		if cell.attributes.strikethrough {
 			append_rectangle(output, column*window.cell_w, y+window.cell_h/2, decoration_width, 1, foreground)
@@ -122,6 +129,7 @@ build_row_commands :: proc(
 		}
 		run_start := column
 		attributes := cell.attributes
+		run_foreground: u32
 		clear(&text)
 		clear(&clusters)
 		clear(&shaped)
@@ -133,6 +141,13 @@ build_row_commands :: proc(
 			}
 			if current.combining_count == 0 && is_cell_graphic(current.codepoint) && len(text) > 0 do break
 			if current.attributes != attributes && len(text) > 0 do break
+			current_foreground, _ := display_colors(
+				current,
+				selection.contains(selection_state, screen, row, column),
+				block_cursor(terminal, screen, row, column),
+			)
+			if len(text) > 0 && current_foreground != run_foreground do break
+			run_foreground = current_foreground
 			append(&text, current.codepoint)
 			append(&clusters, column)
 			for index in 0..<int(current.combining_count) {

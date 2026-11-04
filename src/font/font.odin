@@ -352,9 +352,9 @@ cache_glyph :: proc(manager: ^Manager, face_id: int, index: u32) -> bool {
 	source_width := int(bitmap.width)
 	source_height := int(bitmap.rows)
 	width, height := source_width, source_height
-	if channels == 4 && source_width > 0 && source_height > 0 {
-		max_width := max(1, manager.cell_width*2)
-		max_height := max(1, manager.cell_height)
+	max_width := max(1, manager.cell_width*2)
+	max_height := max(1, manager.cell_height)
+	if source_width > 0 && source_height > 0 && (channels == 4 || source_width > max_width || source_height > max_height) {
 		if source_width*max_height > source_height*max_width {
 			width = min(source_width, max_width)
 			height = max(1, source_height*width/source_width)
@@ -363,6 +363,7 @@ cache_glyph :: proc(manager: ^Manager, face_id: int, index: u32) -> bool {
 			width = max(1, source_width*height/source_height)
 		}
 	}
+	scaled := width != source_width || height != source_height
 	size := width*height*channels
 	if size > MAX_GLYPH_BYTES do return false
 	for len(manager.glyphs) >= MAX_GLYPH_COUNT || manager.glyph_bytes+size > MAX_GLYPH_BYTES {
@@ -381,14 +382,29 @@ cache_glyph :: proc(manager: ^Manager, face_id: int, index: u32) -> bool {
 		pixels = make([]u8, size),
 		last_use = manager.clock,
 	}
-	if channels == 4 {
+	if channels == 4 && scaled {
 		entry.left = max(0, (manager.cell_width*2-entry.width)/2)
+		entry.top = manager.ascent-(manager.cell_height-entry.height)/2
+	} else if channels == 1 && scaled {
+		box_width := max_width if source_width > manager.cell_width else manager.cell_width
+		entry.left = max(0, (box_width-entry.width)/2)
 		entry.top = manager.ascent-(manager.cell_height-entry.height)/2
 	}
 	if bitmap.buffer != nil {
 		pitch := int(bitmap.pitch)
-		if channels == 4 && (entry.width != source_width || entry.height != source_height) {
+		if channels == 4 && scaled {
 			resample_bgra(entry.pixels, entry.width, entry.height, bitmap.buffer, source_width, source_height, pitch)
+		} else if channels == 1 && scaled {
+			resample_coverage(
+				entry.pixels,
+				entry.width,
+				entry.height,
+				bitmap.buffer,
+				source_width,
+				source_height,
+				pitch,
+				bitmap.pixel_mode,
+			)
 		} else {
 			for row in 0..<entry.height {
 				source_row := row if pitch >= 0 else source_height-row-1
@@ -437,6 +453,46 @@ resample_bgra :: proc(
 			}
 		}
 	}
+}
+
+resample_coverage :: proc(
+	destination: []u8,
+	width, height: int,
+	source: [^]u8,
+	source_width, source_height, source_pitch: int,
+	pixel_mode: u8,
+) {
+	if len(destination) < width*height || source == nil || source_width <= 0 || source_height <= 0 do return
+	pitch := abs(source_pitch)
+	if pitch == 0 do return
+	for y in 0..<height {
+		source_y_fixed := clamp(((2*y+1)*source_height*256)/(2*height)-128, 0, (source_height-1)*256)
+		y0 := source_y_fixed/256
+		y1 := min(source_height-1, y0+1)
+		fy := source_y_fixed&255
+		row0 := y0 if source_pitch >= 0 else source_height-y0-1
+		row1 := y1 if source_pitch >= 0 else source_height-y1-1
+		for x in 0..<width {
+			source_x_fixed := clamp(((2*x+1)*source_width*256)/(2*width)-128, 0, (source_width-1)*256)
+			x0 := source_x_fixed/256
+			x1 := min(source_width-1, x0+1)
+			fx := source_x_fixed&255
+			top := (coverage_sample(source, row0, pitch, x0, pixel_mode)*(256-fx)+
+				coverage_sample(source, row0, pitch, x1, pixel_mode)*fx+128)/256
+			bottom := (coverage_sample(source, row1, pitch, x0, pixel_mode)*(256-fx)+
+				coverage_sample(source, row1, pitch, x1, pixel_mode)*fx+128)/256
+			destination[y*width+x] = u8((top*(256-fy)+bottom*fy+128)/256)
+		}
+	}
+}
+
+coverage_sample :: proc(source: [^]u8, row, pitch, x: int, pixel_mode: u8) -> int {
+	source_row := source[row*pitch:]
+	if pixel_mode == FT_PIXEL_MODE_MONO {
+		mask := u8(0x80 >> u32(x&7))
+		return 255 if source_row[x/8]&mask != 0 else 0
+	}
+	return int(source_row[x])
 }
 
 evict_oldest :: proc(manager: ^Manager) {

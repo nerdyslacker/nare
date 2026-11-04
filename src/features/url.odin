@@ -212,7 +212,7 @@ build_url_view :: proc(state: ^URL_State, screen: ^vt.Screen) {
 	for &link in state.links {
 		if link.hyperlink_id != 0 {
 			for &cell in state.view.cells {
-				if !cell.continuation && cell.hyperlink_id == link.hyperlink_id do cell.attributes.underline = true
+				if !cell.continuation && cell.hyperlink_id == link.hyperlink_id do cell.attributes.underline = .Single
 			}
 		} else {
 			first_row := int(link.first.row)-first_source_row
@@ -222,7 +222,7 @@ build_url_view :: proc(state: ^URL_State, screen: ^vt.Screen) {
 				last_column := int(link.last.column) if row == last_row else screen.columns-1
 				for column in first_column..=last_column {
 					cell := vt.cell_at(&state.view, row, column)
-					if !cell.continuation do cell.attributes.underline = true
+					if !cell.continuation do cell.attributes.underline = .Single
 				}
 			}
 		}

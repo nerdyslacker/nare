@@ -1,6 +1,7 @@
 package render
 
 import "core:math"
+import vt "../vt"
 
 Line_Weight :: enum u8 {
 	None,
@@ -13,11 +14,51 @@ Box_Lines :: struct {
 	left, right, up, down: Line_Weight,
 }
 
+append_underline :: proc(
+	output: ^[dynamic]Command,
+	x, y, width, height: int,
+	style: vt.Underline_Style,
+	color: u32,
+) {
+	if width <= 0 || height <= 0 do return
+	thickness := max(1, height/16)
+	bottom := y+height-thickness
+	switch style {
+	case .None:
+	case .Single:
+		append_rectangle(output, x, bottom, width, thickness, color)
+	case .Double:
+		append_rectangle(output, x, bottom, width, thickness, color)
+		append_rectangle(output, x, max(y, bottom-max(2, thickness*2)), width, thickness, color)
+	case .Curly:
+		amplitude := max(1, height/8)
+		period := max(4, width)
+		for offset in 0..<width {
+			phase := 2*math.PI*f64(offset)/f64(period)
+			wave := int(math.round(math.sin(phase)*f64(amplitude)))
+			top := clamp(bottom+wave, y, y+height-thickness)
+			append_rectangle(output, x+offset, top, 1, thickness, color)
+		}
+	case .Dotted:
+		dot := max(1, thickness)
+		spacing := max(3, width/4)
+		for offset := 0; offset < width; offset += spacing {
+			append_rectangle(output, x+offset, y+height-dot, min(dot, width-offset), dot, color)
+		}
+	case .Dashed:
+		dash := max(2, width/3)
+		gap := max(2, width/4)
+		for offset := 0; offset < width; offset += dash+gap {
+			append_rectangle(output, x+offset, bottom, min(dash, width-offset), thickness, color)
+		}
+	}
+}
+
 is_cell_graphic :: proc(codepoint: rune) -> bool {
 	return codepoint >= 0x23ba && codepoint <= 0x23bd ||
 	       codepoint >= 0x2500 && codepoint <= 0x259f ||
 	       codepoint >= 0x2800 && codepoint <= 0x28ff ||
-	       codepoint == 0xe0b4 || codepoint == 0xe0b6
+	       codepoint >= 0xe0b0 && codepoint <= 0xe0b7
 }
 
 append_cell_graphic :: proc(
@@ -27,8 +68,8 @@ append_cell_graphic :: proc(
 	color: u32,
 ) -> bool {
 	if width <= 0 || height <= 0 do return false
-	if codepoint == 0xe0b4 || codepoint == 0xe0b6 {
-		append_powerline_round_cap(output, x, y, width, height, codepoint == 0xe0b4, color)
+	if codepoint >= 0xe0b0 && codepoint <= 0xe0b7 {
+		append_powerline(output, x, y, width, height, codepoint, color)
 		return true
 	}
 	if codepoint >= 0x23ba && codepoint <= 0x23bd {
@@ -346,36 +387,105 @@ append_diagonal :: proc(
 	}
 }
 
+append_powerline :: proc(
+	output: ^[dynamic]Command,
+	x, y, width, height: int,
+	codepoint: rune,
+	color: u32,
+) {
+	switch codepoint {
+	case 0xe0b0: append_powerline_triangle(output, x, y, width, height, true, false, color)
+	case 0xe0b1: append_powerline_triangle(output, x, y, width, height, true, true, color)
+	case 0xe0b2: append_powerline_triangle(output, x, y, width, height, false, false, color)
+	case 0xe0b3: append_powerline_triangle(output, x, y, width, height, false, true, color)
+	case 0xe0b4: append_powerline_round_cap(output, x, y, width, height, true, true, color)
+	case 0xe0b5: append_powerline_round_cap(output, x, y, width, height, true, false, color)
+	case 0xe0b6: append_powerline_round_cap(output, x, y, width, height, false, true, color)
+	case 0xe0b7: append_powerline_round_cap(output, x, y, width, height, false, false, color)
+	}
+}
+
+append_powerline_triangle :: proc(
+	output: ^[dynamic]Command,
+	x, y, width, height: int,
+	right: bool,
+	outline: bool,
+	color: u32,
+) {
+	if outline {
+		thickness := max(1, min(width, height)/16)
+		if right {
+			append_powerline_line(output, x, y, x+width-1, y+height/2, thickness, color)
+			append_powerline_line(output, x, y+height-1, x+width-1, y+height/2, thickness, color)
+		} else {
+			append_powerline_line(output, x+width-1, y, x, y+height/2, thickness, color)
+			append_powerline_line(output, x+width-1, y+height-1, x, y+height/2, thickness, color)
+		}
+		return
+	}
+	denominator := max(1, height-1)
+	for pixel_y in 0..<height {
+		distance := abs(2*pixel_y-(height-1))
+		span := max(1, width*(height-1-distance)/denominator)
+		if right {
+			append_rectangle(output, x, y+pixel_y, span, 1, color)
+		} else {
+			append_rectangle(output, x+width-span, y+pixel_y, span, 1, color)
+		}
+	}
+}
+
+append_powerline_line :: proc(
+	output: ^[dynamic]Command,
+	x0, y0, x1, y1, thickness: int,
+	color: u32,
+) {
+	dx := abs(x1-x0)
+	dy := -abs(y1-y0)
+	step_x := 1 if x0 < x1 else -1
+	step_y := 1 if y0 < y1 else -1
+	err := dx+dy
+	pixel_x, pixel_y := x0, y0
+	for {
+		append_rectangle(output, pixel_x-thickness/2, pixel_y-thickness/2, thickness, thickness, color)
+		if pixel_x == x1 && pixel_y == y1 do break
+		twice := err*2
+		if twice >= dy {
+			err += dy
+			pixel_x += step_x
+		}
+		if twice <= dx {
+			err += dx
+			pixel_y += step_y
+		}
+	}
+}
+
 append_powerline_round_cap :: proc(
 	output: ^[dynamic]Command,
 	x, y, width, height: int,
-	round_right: bool,
+	round_right, filled: bool,
 	color: u32,
 ) {
-	SAMPLE_GRID :: 8
-	sample_total :: SAMPLE_GRID*SAMPLE_GRID
+	thickness := max(1, min(width, height)/16)
 	center_y := f64(height)/2
 	radius_x := f64(width)
 	radius_y := f64(height)/2
 	for pixel_y in 0..<height {
-		for pixel_x in 0..<width {
-			covered := 0
-			for sample_y in 0..<SAMPLE_GRID {
-				py := f64(pixel_y)+(f64(sample_y)+0.5)/SAMPLE_GRID
-				normal_y := (py-center_y)/radius_y
-				extent := radius_x*math.sqrt(max(0.0, 1-normal_y*normal_y))
-				for sample_x in 0..<SAMPLE_GRID {
-					px := f64(pixel_x)+(f64(sample_x)+0.5)/SAMPLE_GRID
-					inside := px <= extent if round_right else px >= f64(width)-extent
-					if inside do covered += 1
-				}
-			}
-			if covered == 0 do continue
-			opacity := u8(covered*255/sample_total)
-			if opacity == 255 {
-				append_rectangle(output, x+pixel_x, y+pixel_y, 1, 1, color)
+		normal_y := (f64(pixel_y)+0.5-center_y)/radius_y
+		extent := int(radius_x*math.sqrt(max(0.0, 1-normal_y*normal_y)))
+		if round_right {
+			if filled {
+				append_rectangle(output, x, y+pixel_y, max(1, extent), 1, color)
 			} else {
-				append_translucent_rectangle(output, x+pixel_x, y+pixel_y, 1, 1, color, opacity)
+				append_rectangle(output, x+max(0, extent-thickness), y+pixel_y, thickness, 1, color)
+			}
+		} else {
+			if filled {
+				start := max(0, width-extent)
+				append_rectangle(output, x+start, y+pixel_y, width-start, 1, color)
+			} else {
+				append_rectangle(output, x+max(0, width-extent), y+pixel_y, thickness, 1, color)
 			}
 		}
 	}

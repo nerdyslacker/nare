@@ -259,6 +259,7 @@ Workspace :: struct {
 	graphics_cache: ^graphics.Shared_Cache,
 	local_graphics_cache: graphics.Shared_Cache,
 	renderer: drawing.Kind,
+	gpu_backend: drawing.GPU_Backend,
 	ligatures: bool,
 	title: string,
 	quake: ^quake.Controller,
@@ -443,7 +444,7 @@ workspace_init :: proc(
 	workspace^ = Workspace{
 		root = root, settings = settings, command = command, initial_font_size = font_size, font_size = font_size,
 		renaming_tab = -1, last_click_tab = -2, last_cursor_toggle = time.now(), tab_reveal_active = true,
-		renderer = renderer, ligatures = ligatures, title = strings.clone(title), quake = quake_controller,
+		renderer = renderer, gpu_backend = settings.gpu_backend, ligatures = ligatures, title = strings.clone(title), quake = quake_controller,
 		normal_width = root.width, normal_height = root.height,
 	}
 	workspace.statusbar.visible = settings.statusbar.enabled
@@ -701,7 +702,7 @@ workspace_new_pane_command :: proc(workspace: ^Workspace, command: []cstring, cw
 	if !ok { free(pane); return nil }
 	pane.surface = surface
 	if drawing.init(
-		&pane.renderer, &pane.surface, workspace.renderer, workspace.ligatures,
+		&pane.renderer, &pane.surface, workspace.renderer, workspace.gpu_backend, workspace.ligatures,
 		workspace.settings.font, workspace.font_size,
 		workspace.settings.bold_font, workspace.settings.italic_font, workspace.settings.bold_italic_font,
 		workspace.settings.cell_width_percent, workspace.settings.cell_height_percent,
@@ -772,7 +773,7 @@ workspace_new_tmux_view :: proc(workspace: ^Workspace, owner: ^Pane, pane_id: in
 	if !ok {free(pane); return nil}
 	pane.surface = surface
 	if drawing.init(
-		&pane.renderer, &pane.surface, workspace.renderer, workspace.ligatures,
+		&pane.renderer, &pane.surface, workspace.renderer, workspace.gpu_backend, workspace.ligatures,
 		workspace.settings.font, workspace.font_size,
 		workspace.settings.bold_font, workspace.settings.italic_font, workspace.settings.bold_italic_font,
 		workspace.settings.cell_width_percent, workspace.settings.cell_height_percent,
@@ -2052,7 +2053,8 @@ workspace_reload_config :: proc(workspace: ^Workspace) -> bool {
 	fresh.tmux.explicit_launch = workspace.settings.tmux.explicit_launch
 	config.replace_string(&fresh.tmux.explicit_ssh_host, workspace.settings.tmux.explicit_ssh_host)
 
-	render_changed := workspace.renderer != fresh.renderer || workspace.ligatures != fresh.ligatures ||
+	render_changed := workspace.renderer != fresh.renderer || workspace.gpu_backend != fresh.gpu_backend ||
+				  workspace.ligatures != fresh.ligatures ||
 	                  workspace.font_size != fresh.font_size || workspace.settings.font != fresh.font ||
 	                  workspace.settings.bold_font != fresh.bold_font || workspace.settings.italic_font != fresh.italic_font ||
 	                  workspace.settings.bold_italic_font != fresh.bold_italic_font ||
@@ -2072,6 +2074,7 @@ workspace_reload_config :: proc(workspace: ^Workspace) -> bool {
 	workspace.settings^ = fresh
 	fresh = {}
 	workspace.renderer = workspace.settings.renderer
+	workspace.gpu_backend = workspace.settings.gpu_backend
 	workspace.ligatures = workspace.settings.ligatures
 	workspace.initial_font_size = workspace.settings.font_size
 	workspace.font_size = workspace.settings.font_size
@@ -2105,7 +2108,7 @@ workspace_reload_config :: proc(workspace: ^Workspace) -> bool {
 		for tab in workspace.tabs do for pane in tab.panes {
 			drawing.destroy(&pane.renderer, &pane.surface)
 			_ = drawing.init(
-				&pane.renderer, &pane.surface, workspace.renderer, workspace.ligatures,
+				&pane.renderer, &pane.surface, workspace.renderer, workspace.gpu_backend, workspace.ligatures,
 				workspace.settings.font, workspace.font_size,
 				workspace.settings.bold_font, workspace.settings.italic_font, workspace.settings.bold_italic_font,
 				workspace.settings.cell_width_percent, workspace.settings.cell_height_percent,
@@ -2176,7 +2179,7 @@ workspace_font_size :: proc(workspace: ^Workspace, size: int) {
 	for tab in workspace.tabs do for pane in tab.panes {
 		drawing.destroy(&pane.renderer, &pane.surface)
 		font_error := drawing.init(
-			&pane.renderer, &pane.surface, workspace.renderer, workspace.ligatures,
+			&pane.renderer, &pane.surface, workspace.renderer, workspace.gpu_backend, workspace.ligatures,
 			workspace.settings.font, new_size,
 			workspace.settings.bold_font, workspace.settings.italic_font, workspace.settings.bold_italic_font,
 			workspace.settings.cell_width_percent, workspace.settings.cell_height_percent,
@@ -2201,7 +2204,7 @@ workspace_refresh_dpi :: proc(workspace: ^Workspace) -> bool {
 		pane.surface.dpi = workspace.root.dpi
 		drawing.destroy(&pane.renderer, &pane.surface)
 		if drawing.init(
-			&pane.renderer, &pane.surface, workspace.renderer, workspace.ligatures,
+			&pane.renderer, &pane.surface, workspace.renderer, workspace.gpu_backend, workspace.ligatures,
 			workspace.settings.font, workspace.font_size,
 			workspace.settings.bold_font, workspace.settings.italic_font, workspace.settings.bold_italic_font,
 			workspace.settings.cell_width_percent, workspace.settings.cell_height_percent,

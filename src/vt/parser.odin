@@ -30,6 +30,7 @@ Event :: struct {
 	final: byte,
 	private_marker: byte,
 	parameters: [MAX_PARAMETERS]int,
+	parameter_subparameters: [MAX_PARAMETERS]bool,
 	parameter_count: int,
 	intermediates: [MAX_INTERMEDIATES]byte,
 	intermediate_count: int,
@@ -44,9 +45,11 @@ Parser :: struct {
 	state: Parser_State,
 	string_state: Parser_State,
 	parameters: [MAX_PARAMETERS]int,
+	parameter_subparameters: [MAX_PARAMETERS]bool,
 	parameter_count: int,
 	parameter_value: int,
 	parameter_active: bool,
+	pending_subparameter: bool,
 	private_marker: byte,
 	intermediates: [MAX_INTERMEDIATES]byte,
 	intermediate_count: int,
@@ -68,6 +71,7 @@ parser_reset :: proc(parser: ^Parser) {
 	parser.string_state = .Ground
 	parser.parameter_count = 0
 	parser.parameter_active = false
+	parser.pending_subparameter = false
 	parser.private_marker = 0
 	parser.intermediate_count = 0
 	parser.string_discarded = false
@@ -229,7 +233,11 @@ consume_csi :: proc(parser: ^Parser, value: byte, handler: Event_Handler, user_d
 		return
 	}
 	if (value == ';' || value == ':') && parser.state != .CSI_Intermediate {
-		if !push_parameter(parser) do parser.state = .CSI_Ignore
+		if !push_parameter(parser) {
+			parser.state = .CSI_Ignore
+			return
+		}
+		parser.pending_subparameter = value == ':'
 		return
 	}
 	if value >= 0x3c && value <= 0x3f && parser.state == .CSI_Entry && parser.private_marker == 0 {
@@ -258,6 +266,7 @@ reset_control :: proc(parser: ^Parser) {
 	parser.parameter_count = 0
 	parser.parameter_value = 0
 	parser.parameter_active = false
+	parser.pending_subparameter = false
 	parser.private_marker = 0
 	parser.intermediate_count = 0
 }
@@ -266,9 +275,11 @@ push_parameter :: proc(parser: ^Parser) -> bool {
 	if parser.parameter_count >= MAX_PARAMETERS do return false
 	value := parser.parameter_value if parser.parameter_active else -1
 	parser.parameters[parser.parameter_count] = value
+	parser.parameter_subparameters[parser.parameter_count] = parser.pending_subparameter
 	parser.parameter_count += 1
 	parser.parameter_value = 0
 	parser.parameter_active = false
+	parser.pending_subparameter = false
 	return true
 }
 
@@ -339,6 +350,7 @@ emit_control_event :: proc(parser: ^Parser, kind: Event_Kind, final: byte, handl
 		intermediate_count = parser.intermediate_count,
 	}
 	copy(event.parameters[:], parser.parameters[:parser.parameter_count])
+	copy(event.parameter_subparameters[:], parser.parameter_subparameters[:parser.parameter_count])
 	copy(event.intermediates[:], parser.intermediates[:parser.intermediate_count])
 	handler(event, user_data)
 }

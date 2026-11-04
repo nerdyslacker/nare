@@ -1350,29 +1350,45 @@ apply_sgr :: proc(terminal: ^Terminal, event: Event) {
 		terminal.attributes = {}
 		return
 	}
-	for index := 0; index < event.parameter_count; index += 1 {
+	index := 0
+	for index < event.parameter_count {
 		value := event.parameters[index]
 		if value < 0 do value = 0
+		if index+1 < event.parameter_count && event.parameter_subparameters[index+1] {
+			group_end := sgr_group_end(event, index)
+			switch value {
+			case 4:
+				if index+1 < group_end {
+					terminal.attributes.underline = sgr_underline_style(event.parameters[index+1])
+				}
+			case 38, 48, 58:
+				color, ok := sgr_colon_color(event, index, group_end)
+				if ok {
+					if value == 38 do terminal.attributes.foreground = color
+					if value == 48 do terminal.attributes.background = color
+					if value == 58 do terminal.attributes.underline_color = color
+				}
+			case 59:
+				terminal.attributes.underline_color = {}
+			case:
+			}
+			index = group_end
+			continue
+		}
 		switch value {
 		case 0: terminal.attributes = {}
 		case 1: terminal.attributes.bold = true
 		case 2: terminal.attributes.faint = true
 		case 3: terminal.attributes.italic = true
-		case 4:
-			terminal.attributes.underline = true
-			terminal.attributes.double_underline = false
-		case 21:
-			terminal.attributes.underline = true
-			terminal.attributes.double_underline = true
+		case 4: terminal.attributes.underline = .Single
+		case 21: terminal.attributes.underline = .Double
 		case 5, 6: terminal.attributes.blink = true
 		case 7: terminal.attributes.inverse = true
 		case 8: terminal.attributes.hidden = true
 		case 9: terminal.attributes.strikethrough = true
 		case 22: terminal.attributes.bold, terminal.attributes.faint = false, false
 		case 23: terminal.attributes.italic = false
-		case 24:
-			terminal.attributes.underline = false
-			terminal.attributes.double_underline = false
+		case 24: terminal.attributes.underline = .None
 		case 25: terminal.attributes.blink = false
 		case 27: terminal.attributes.inverse = false
 		case 28: terminal.attributes.hidden = false
@@ -1390,9 +1406,54 @@ apply_sgr :: proc(terminal: ^Terminal, event: Event) {
 			}
 		case 39: terminal.attributes.foreground = {}
 		case 49: terminal.attributes.background = {}
+		case 59: terminal.attributes.underline_color = {}
 		case:
 		}
+		index += 1
 	}
+}
+
+sgr_group_end :: proc(event: Event, start: int) -> int {
+	end := start+1
+	for end < event.parameter_count && event.parameter_subparameters[end] do end += 1
+	return end
+}
+
+sgr_underline_style :: proc(value: int) -> Underline_Style {
+	switch value {
+	case 0: return .None
+	case 1: return .Single
+	case 2: return .Double
+	case 3: return .Curly
+	case 4: return .Dotted
+	case 5: return .Dashed
+	}
+	return .None
+}
+
+sgr_colon_color :: proc(event: Event, start, end: int) -> (color: Color, ok: bool) {
+	if start+1 >= end do return
+	mode := event.parameters[start+1]
+	if mode == 5 && start+2 < end {
+		value := event.parameters[start+2]
+		if value >= 0 && value <= 255 do return Color{kind = .Indexed, value = u32(value)}, true
+		return
+	}
+	if mode != 2 do return
+	if end-start >= 6 {
+		r, g, b := event.parameters[start+3], event.parameters[start+4], event.parameters[start+5]
+		if r >= 0 && r <= 255 && g >= 0 && g <= 255 && b >= 0 && b <= 255 {
+			return Color{kind = .RGB, value = u32(r<<16 | g<<8 | b)}, true
+		}
+		return
+	}
+	if end-start >= 5 {
+		r, g, b := event.parameters[start+2], event.parameters[start+3], event.parameters[start+4]
+		if r >= 0 && r <= 255 && g >= 0 && g <= 255 && b >= 0 && b <= 255 {
+			return Color{kind = .RGB, value = u32(r<<16 | g<<8 | b)}, true
+		}
+	}
+	return
 }
 
 extended_color :: proc(event: Event, start: int) -> (color: Color, consumed: int, ok: bool) {
