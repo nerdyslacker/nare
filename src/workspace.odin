@@ -710,11 +710,21 @@ workspace_color_scheme :: proc(workspace: ^Workspace) -> vt.Color_Scheme {
 	return .Light if red*299+green*587+blue*114 >= 128000 else .Dark
 }
 
+terminal_named_color :: proc(data: []byte, user_data: rawptr) -> (u32, bool) {
+	return x11.named_color((^x11.Window)(user_data), data)
+}
+
 workspace_set_color_scheme :: proc(workspace: ^Workspace) {
 	scheme := workspace_color_scheme(workspace)
 	for tab in workspace.tabs do for pane in tab.panes {
 		vt.terminal_set_color_scheme(&pane.terminal, scheme)
-		if pane.has_local_terminal do vt.terminal_set_color_scheme(&pane.local_terminal, scheme)
+		vt.terminal_set_theme_colors(&pane.terminal, workspace.settings.theme.foreground, workspace.settings.theme.background)
+		vt.terminal_set_named_color_resolver(&pane.terminal, terminal_named_color, rawptr(&pane.surface))
+		if pane.has_local_terminal {
+			vt.terminal_set_color_scheme(&pane.local_terminal, scheme)
+			vt.terminal_set_theme_colors(&pane.local_terminal, workspace.settings.theme.foreground, workspace.settings.theme.background)
+			vt.terminal_set_named_color_resolver(&pane.local_terminal, terminal_named_color, rawptr(&pane.surface))
+		}
 	}
 }
 
@@ -756,6 +766,8 @@ workspace_new_pane_command :: proc(workspace: ^Workspace, command: []cstring, cw
 		pty.shutdown(&pane.process); drawing.destroy(&pane.renderer, &pane.surface); x11.destroy_child(&pane.surface); free(pane); return nil
 	}
 	vt.terminal_set_color_scheme(&pane.terminal, workspace_color_scheme(workspace))
+	vt.terminal_set_theme_colors(&pane.terminal, workspace.settings.theme.foreground, workspace.settings.theme.background)
+	vt.terminal_set_named_color_resolver(&pane.terminal, terminal_named_color, rawptr(&pane.surface))
 	vt.terminal_set_cell_size(&pane.terminal, pane.surface.cell_w, pane.surface.cell_h)
 	workspace_apply_cursor(workspace, pane)
 	pane.visible = true
@@ -816,6 +828,8 @@ workspace_new_tmux_view :: proc(workspace: ^Workspace, owner: ^Pane, pane_id: in
 		return nil
 	}
 	vt.terminal_set_color_scheme(&pane.terminal, workspace_color_scheme(workspace))
+	vt.terminal_set_theme_colors(&pane.terminal, workspace.settings.theme.foreground, workspace.settings.theme.background)
+	vt.terminal_set_named_color_resolver(&pane.terminal, terminal_named_color, rawptr(&pane.surface))
 	vt.terminal_set_cell_size(&pane.terminal, pane.surface.cell_w, pane.surface.cell_h)
 	workspace_apply_cursor(workspace, pane)
 	return pane
@@ -3095,6 +3109,8 @@ workspace_tmux_activate :: proc(workspace: ^Workspace, pane: ^Pane) -> bool {
 		return false
 	}
 	vt.terminal_set_color_scheme(&pane.terminal, workspace_color_scheme(workspace))
+	vt.terminal_set_theme_colors(&pane.terminal, workspace.settings.theme.foreground, workspace.settings.theme.background)
+	vt.terminal_set_named_color_resolver(&pane.terminal, terminal_named_color, rawptr(&pane.surface))
 	vt.terminal_set_cell_size(&pane.terminal, pane.surface.cell_w, pane.surface.cell_h)
 	workspace_apply_cursor(workspace, pane)
 	workspace_reset_view_state(pane)
@@ -3121,6 +3137,8 @@ workspace_tmux_reset_display :: proc(workspace: ^Workspace, pane: ^Pane) -> bool
 	replacement: vt.Terminal
 	if !vt.terminal_init(&replacement, columns, rows, workspace.settings.scrollback_lines, workspace.settings.osc52_policy, &workspace.settings.graphics_limits, workspace.settings.scrollback_bytes, workspace.graphics_cache) do return false
 	vt.terminal_set_color_scheme(&replacement, workspace_color_scheme(workspace))
+	vt.terminal_set_theme_colors(&replacement, workspace.settings.theme.foreground, workspace.settings.theme.background)
+	vt.terminal_set_named_color_resolver(&replacement, terminal_named_color, rawptr(&pane.surface))
 	vt.terminal_destroy(&pane.terminal)
 	pane.terminal = replacement
 	vt.terminal_rebind(&pane.terminal)

@@ -575,6 +575,16 @@ take_paste :: proc(window: ^Window) -> []byte {
 	return window.paste_data[:]
 }
 
+named_color :: proc(window: ^Window, name: []byte) -> (u32, bool) {
+	if window == nil || window.display == nil || len(name) == 0 || len(name) >= 128 do return 0, false
+	buffer: [128]byte
+	copy(buffer[:], name)
+	exact, screen: xlib.XColor
+	colormap := xlib.DefaultColormap(window.display, xlib.DefaultScreen(window.display))
+	if i32(xlib.LookupColor(window.display, colormap, cstring(&buffer[0]), &exact, &screen)) == 0 do return 0, false
+	return u32(exact.red>>8)<<16 | u32(exact.green>>8)<<8 | u32(exact.blue>>8), true
+}
+
 consume_paste :: proc(window: ^Window) {
 	clear(&window.paste_data)
 }

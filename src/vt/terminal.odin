@@ -34,6 +34,8 @@ XTGETTCAP_Entry :: struct {
 	value: string,
 }
 
+Named_Color_Resolver :: #type proc(data: []byte, user_data: rawptr) -> (u32, bool)
+
 XTGETTCAP_ENTRIES := [?]XTGETTCAP_Entry{
 	{"Co", "256"},
 	{"colors", "256"},
@@ -186,8 +188,12 @@ Terminal :: struct {
 	saved_active_character_set: u8,
 	modes: Modes,
 	color_scheme: Color_Scheme,
+	theme_foreground: u32,
+	theme_background: u32,
 	default_foreground: Color,
 	default_background: Color,
+	named_color_resolver: Named_Color_Resolver,
+	named_color_user_data: rawptr,
 	progress_state: Progress_State,
 	progress_percent: int,
 	pointer_shape: Pointer_Shape,
@@ -269,6 +275,16 @@ terminal_set_color_scheme :: proc(terminal: ^Terminal, scheme: Color_Scheme) {
 	if terminal == nil || terminal.color_scheme == scheme do return
 	terminal.color_scheme = scheme
 	if terminal.modes.color_scheme_reporting do report_color_scheme(terminal)
+}
+
+terminal_set_theme_colors :: proc(terminal: ^Terminal, foreground, background: u32) {
+	terminal.theme_foreground = foreground
+	terminal.theme_background = background
+}
+
+terminal_set_named_color_resolver :: proc(terminal: ^Terminal, resolver: Named_Color_Resolver, user_data: rawptr) {
+	terminal.named_color_resolver = resolver
+	terminal.named_color_user_data = user_data
 }
 
 // Screens retain a pointer to their owning image registry. Call this after a
@@ -851,9 +867,13 @@ handle_osc :: proc(terminal: ^Terminal, data: []byte) {
 	switch command {
 	case "0", "2": set_title_metadata(terminal, payload)
 	case "10":
-		if color, ok := osc_color(payload); ok do terminal.default_foreground = color
+		if len(payload) == 1 && payload[0] == '?' do reply_osc_color(terminal, "10", true)
+		else if color, ok := osc_color(terminal, payload); ok do terminal.default_foreground = color
 	case "11":
-		if color, ok := osc_color(payload); ok do terminal.default_background = color
+		if len(payload) == 1 && payload[0] == '?' do reply_osc_color(terminal, "11", false)
+		else if color, ok := osc_color(terminal, payload); ok do terminal.default_background = color
+	case "110": terminal.default_foreground = {}
+	case "111": terminal.default_background = {}
 	case "7":
 		set_cwd_metadata(terminal, payload)
 		if !terminal.explicit_shell_integration && !terminal.using_alternate {
@@ -873,13 +893,73 @@ handle_osc :: proc(terminal: ^Terminal, data: []byte) {
 	}
 }
 
-osc_color :: proc(data: []byte) -> (Color, bool) {
-	// shortcut: supports the #RRGGBB form used by Bubble Tea; add rgb: parsing when a client needs it.
-	if len(data) != 7 || data[0] != '#' do return {}, false
+osc_color :: proc(terminal: ^Terminal, data: []byte) -> (Color, bool) {
+	if len(data) > 1 && data[0] == '#' {
+		digits := len(data)-1
+		if digits == 3 || digits == 6 || digits == 9 || digits == 12 {
+			width := digits/3
+			red, red_ok := osc_hex_component(data[1:1+width], width)
+			green, green_ok := osc_hex_component(data[1+width:1+width*2], width)
+			blue, blue_ok := osc_hex_component(data[1+width*2:], width)
+			if red_ok && green_ok && blue_ok do return Color{kind = .RGB, value = red<<16 | green<<8 | blue}, true
+		}
+	}
+	prefix_length := 4
+	is_rgbi := len(data) >= 5 && string(data[:5]) == "rgbi:"
+	if is_rgbi do prefix_length = 5
+	if !is_rgbi && (len(data) < 9 || string(data[:4]) != "rgb:") {
+		if terminal.named_color_resolver != nil {
+			value, ok := terminal.named_color_resolver(data, terminal.named_color_user_data)
+			if ok do return Color{kind = .RGB, value = value}, true
+		}
+		return {}, false
+	}
+	first, second := -1, -1
+	for value, index in data[prefix_length:] do if value == '/' {
+		if first < 0 do first = index+prefix_length
+		else if second < 0 do second = index+prefix_length
+		else do return {}, false
+	}
+	if first < 0 || second < 0 do return {}, false
+	red, red_ok := osc_color_component(data[prefix_length:first], is_rgbi)
+	green, green_ok := osc_color_component(data[first+1:second], is_rgbi)
+	blue, blue_ok := osc_color_component(data[second+1:], is_rgbi)
+	if !red_ok || !green_ok || !blue_ok do return {}, false
+	return Color{kind = .RGB, value = red<<16 | green<<8 | blue}, true
+}
+
+osc_hex_component :: proc(data: []byte, digits: int) -> (u32, bool) {
 	parsed_bytes := 0
-	value, ok := strconv.parse_u64(string(data[1:]), 16, &parsed_bytes)
-	if !ok || parsed_bytes != 6 do return {}, false
-	return Color{kind = .RGB, value = u32(value)}, true
+	value, ok := strconv.parse_u64(string(data), 16, &parsed_bytes)
+	if !ok || parsed_bytes != digits do return 0, false
+	bits := digits*4
+	if bits < 8 do return u32(value<<uint(8-bits)), true
+	return u32(value>>uint(bits-8)), true
+}
+
+osc_color_component :: proc(data: []byte, intensity: bool) -> (u32, bool) {
+	if intensity {
+		value, ok := strconv.parse_f64(string(data))
+		if !ok do return 0, false
+		return u32(clamp(value, 0, 1)*255+0.5), true
+	}
+	if len(data) < 1 || len(data) > 4 do return 0, false
+	parsed_bytes := 0
+	value, ok := strconv.parse_u64(string(data), 16, &parsed_bytes)
+	if !ok || parsed_bytes != len(data) do return 0, false
+	maximum := (u64(1)<<uint(len(data)*4))-1
+	return u32((value*255+maximum/2)/maximum), true
+}
+
+reply_osc_color :: proc(terminal: ^Terminal, command: string, foreground: bool) {
+	override := terminal.default_foreground if foreground else terminal.default_background
+	color := override.value if override.kind != .Default else (terminal.theme_foreground if foreground else terminal.theme_background)
+	red := ((color>>16)&0xff)*257
+	green := ((color>>8)&0xff)*257
+	blue := (color&0xff)*257
+	response := fmt.aprintf("\x1b]%s;rgb:%04x/%04x/%04x\x1b\\", command, red, green, blue)
+	append_reply(terminal, transmute([]byte)response)
+	delete(response)
 }
 
 handle_osc22 :: proc(terminal: ^Terminal, payload: []byte) {
