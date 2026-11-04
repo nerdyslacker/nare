@@ -21,6 +21,7 @@ MAX_OSC52_ACTIONS :: 8
 MAX_OSC52_QUEUED_BYTES :: 512 * 1024
 MAX_OSC133_BYTES :: 4 * 1024
 MAX_OSC9_BYTES :: 64
+MAX_OSC22_BYTES :: 64
 MAX_XTGETTCAP_BYTES :: 4 * 1024
 MAX_XTGETTCAP_NAMES :: 32
 MAX_XTGETTCAP_NAME_BYTES :: 32
@@ -108,6 +109,42 @@ Progress_State :: enum {
 	Warning,
 }
 
+Pointer_Shape :: enum {
+	Default,
+	Arrow,
+	Beam,
+	Text,
+	Pointer,
+	Hand,
+	Help,
+	Wait,
+	Progress,
+	Crosshair,
+	Cell,
+	Vertical_Text,
+	Move,
+	E_Resize,
+	NE_Resize,
+	NW_Resize,
+	N_Resize,
+	SE_Resize,
+	SW_Resize,
+	S_Resize,
+	W_Resize,
+	EW_Resize,
+	NS_Resize,
+	NESW_Resize,
+	NWSE_Resize,
+	Zoom_In,
+	Zoom_Out,
+	Alias,
+	Copy,
+	Not_Allowed,
+	No_Drop,
+	Grab,
+	Grabbing,
+}
+
 Character_Set :: enum {
 	ASCII,
 	DEC_Special_Graphics,
@@ -148,6 +185,7 @@ Terminal :: struct {
 	color_scheme: Color_Scheme,
 	progress_state: Progress_State,
 	progress_percent: int,
+	pointer_shape: Pointer_Shape,
 	replies: [dynamic]byte,
 	reply_overflow: bool,
 	hyperlinks: [dynamic]string,
@@ -794,10 +832,58 @@ handle_osc :: proc(terminal: ^Terminal, data: []byte) {
 		}
 	case "8": set_hyperlink(terminal, payload)
 	case "9": handle_osc9(terminal, payload)
+	case "22": handle_osc22(terminal, payload)
 	case "52": handle_osc52(terminal, payload)
 	case "133": handle_osc133(terminal, payload)
 	case "1337": handle_osc1337(terminal, payload)
 	case:
+	}
+}
+
+handle_osc22 :: proc(terminal: ^Terminal, payload: []byte) {
+	if len(payload) > MAX_OSC22_BYTES do return
+	name := string(payload)
+	if len(name) > 0 && name[0] == '=' do name = name[1:]
+	shape, ok := pointer_shape_from_name(name)
+	if ok do terminal.pointer_shape = shape
+}
+
+pointer_shape_from_name :: proc(name: string) -> (Pointer_Shape, bool) {
+	switch name {
+	case "", "default": return .Default, true
+	case "arrow": return .Arrow, true
+	case "beam": return .Beam, true
+	case "text": return .Text, true
+	case "pointer": return .Pointer, true
+	case "hand": return .Hand, true
+	case "help": return .Help, true
+	case "wait": return .Wait, true
+	case "progress": return .Progress, true
+	case "crosshair": return .Crosshair, true
+	case "cell": return .Cell, true
+	case "vertical-text": return .Vertical_Text, true
+	case "move": return .Move, true
+	case "e-resize": return .E_Resize, true
+	case "ne-resize": return .NE_Resize, true
+	case "nw-resize": return .NW_Resize, true
+	case "n-resize": return .N_Resize, true
+	case "se-resize": return .SE_Resize, true
+	case "sw-resize": return .SW_Resize, true
+	case "s-resize": return .S_Resize, true
+	case "w-resize": return .W_Resize, true
+	case "ew-resize": return .EW_Resize, true
+	case "ns-resize": return .NS_Resize, true
+	case "nesw-resize": return .NESW_Resize, true
+	case "nwse-resize": return .NWSE_Resize, true
+	case "zoom-in": return .Zoom_In, true
+	case "zoom-out": return .Zoom_Out, true
+	case "alias": return .Alias, true
+	case "copy": return .Copy, true
+	case "not-allowed": return .Not_Allowed, true
+	case "no-drop": return .No_Drop, true
+	case "grab": return .Grab, true
+	case "grabbing": return .Grabbing, true
+	case: return {}, false
 	}
 }
 
@@ -1682,6 +1768,7 @@ terminal_reset :: proc(terminal: ^Terminal) {
 	terminal.last_graphic_valid = false
 	terminal.progress_state = .None
 	terminal.progress_percent = 0
+	terminal.pointer_shape = .Default
 	terminal.modes = Modes{autowrap = true, cursor_visible = true, sixel_private_colors = true, alternate_scroll = true}
 	terminal.using_alternate = false
 	screen_clear(&terminal.main_screen, {})

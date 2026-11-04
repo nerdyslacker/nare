@@ -34,6 +34,11 @@ Incoming_Selection :: struct {
 	target: xlib.Atom,
 }
 
+Pointer_Cursor :: struct {
+	shape:  xlib.CursorShape,
+	cursor: xlib.Cursor,
+}
+
 Event :: struct {
 	kind:       Event_Kind,
 	source:     xlib.Window,
@@ -155,6 +160,7 @@ Window :: struct {
 	paste_data: [dynamic]byte,
 	outgoing_selections: [dynamic]Outgoing_Selection,
 	incoming_selection: Incoming_Selection,
+	pointer_cursors: [dynamic]Pointer_Cursor,
 }
 
 open :: proc(
@@ -329,6 +335,22 @@ set_title :: proc(window: ^Window, title: string) {
 	defer delete(owned)
 	xlib.StoreName(window.display, window.id, owned)
 	_ = xlib.Flush(window.display)
+}
+
+set_pointer_cursor :: proc(owner, target: ^Window, shape: xlib.CursorShape) {
+	if owner == nil || target == nil || owner.display == nil || target.id == 0 do return
+	for entry in owner.pointer_cursors do if entry.shape == shape {
+		_ = xlib.DefineCursor(target.display, target.id, entry.cursor)
+		return
+	}
+	cursor := xlib.CreateFontCursor(owner.display, shape)
+	if cursor == 0 do return
+	append(&owner.pointer_cursors, Pointer_Cursor{shape, cursor})
+	_ = xlib.DefineCursor(target.display, target.id, cursor)
+}
+
+unset_pointer_cursor :: proc(window: ^Window) {
+	if window != nil && window.display != nil && window.id != 0 do _ = xlib.UndefineCursor(window.display, window.id)
 }
 
 next_event :: proc(window: ^Window) -> (result: Event, available: bool) {
@@ -802,6 +824,8 @@ close :: proc(window: ^Window) {
 	delete(window.outgoing_selections)
 	if window.input_context != nil do destroy_input_context(window.input_context)
 	if window.input_method != nil do _ = close_input_method(window.input_method)
+	for entry in window.pointer_cursors do xlib.FreeCursor(window.display, entry.cursor)
+	delete(window.pointer_cursors)
 	if window.gc != nil do xlib.FreeGC(window.display, window.gc)
 	if window.id != 0 do xlib.DestroyWindow(window.display, window.id)
 	xlib.CloseDisplay(window.display)

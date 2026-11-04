@@ -249,6 +249,8 @@ Workspace :: struct {
 	last_click_tab: int,
 	split_drag: Split_Drag,
 	last_cursor_toggle: time.Time,
+	pointer_shape: vt.Pointer_Shape,
+	pointer_shape_surfaces: int,
 	last_privilege_check: time.Time,
 	scroll_redraw_source: xlib.Window,
 	exit_status: int,
@@ -1154,6 +1156,56 @@ workspace_layout :: proc(workspace: ^Workspace, resize_grid: bool = true) {
 	}
 	if status_bar > 0 && workspace.statusbar_surface.id != 0 do x11.raise_child(&workspace.statusbar_surface)
 	workspace_draw_tabs(workspace)
+	workspace_apply_pointer_shape(workspace)
+}
+
+workspace_pointer_cursor :: proc(shape: vt.Pointer_Shape) -> xlib.CursorShape {
+	switch shape {
+	case .Default, .Arrow: return .XC_left_ptr
+	case .Beam, .Text, .Vertical_Text: return .XC_xterm
+	case .Pointer, .Hand, .Grab: return .XC_hand2
+	case .Help: return .XC_question_arrow
+	case .Wait, .Progress: return .XC_watch
+	case .Crosshair, .Cell: return .XC_crosshair
+	case .Move, .Grabbing: return .XC_fleur
+	case .E_Resize, .W_Resize, .EW_Resize: return .XC_sb_h_double_arrow
+	case .N_Resize, .S_Resize, .NS_Resize: return .XC_sb_v_double_arrow
+	case .NE_Resize: return .XC_top_right_corner
+	case .NW_Resize: return .XC_top_left_corner
+	case .SE_Resize: return .XC_bottom_right_corner
+	case .SW_Resize: return .XC_bottom_left_corner
+	case .NESW_Resize: return .XC_sizing
+	case .NWSE_Resize: return .XC_sizing
+	case .Zoom_In, .Zoom_Out: return .XC_target
+	case .Alias, .Copy: return .XC_plus
+	case .Not_Allowed, .No_Drop: return .XC_pirate
+	}
+	return .XC_left_ptr
+}
+
+workspace_set_pointer_window :: proc(workspace: ^Workspace, window: ^x11.Window, shape: vt.Pointer_Shape) {
+	if window == nil || window.id == 0 do return
+	if shape == .Default do x11.unset_pointer_cursor(window)
+	else do x11.set_pointer_cursor(workspace.root, window, workspace_pointer_cursor(shape))
+}
+
+workspace_apply_pointer_shape :: proc(workspace: ^Workspace) {
+	pane := workspace_active_pane(workspace)
+	shape := pane.terminal.pointer_shape if pane != nil else vt.Pointer_Shape.Default
+	surfaces := 1
+	windows := [?]^x11.Window{&workspace.search_surface, &workspace.close_surface, &workspace.statusbar_surface, &workspace.jobs_surface}
+	for window in windows do if window.id != 0 do surfaces += 1
+	for tab in workspace.tabs do surfaces += len(tab.panes)
+	if shape == workspace.pointer_shape && surfaces == workspace.pointer_shape_surfaces do return
+	workspace.pointer_shape = shape
+	workspace.pointer_shape_surfaces = surfaces
+	workspace_set_pointer_window(workspace, workspace.root, shape)
+	workspace_set_pointer_window(workspace, &workspace.search_surface, shape)
+	workspace_set_pointer_window(workspace, &workspace.close_surface, shape)
+	workspace_set_pointer_window(workspace, &workspace.statusbar_surface, shape)
+	workspace_set_pointer_window(workspace, &workspace.jobs_surface, shape)
+	for tab in workspace.tabs do for candidate in tab.panes do workspace_set_pointer_window(workspace, &candidate.surface, shape)
+	_ = xlib.Flush(workspace.root.display)
 }
 
 workspace_tmux_pane_info :: proc(owner: ^Pane, pane_id: int) -> ^tmux.Pane_Info {
@@ -2796,9 +2848,11 @@ workspace_tmux_restore_tab :: proc(workspace: ^Workspace, owner: ^Pane) {
 workspace_feed_pty :: proc(workspace: ^Workspace, pane: ^Pane, data: []byte) -> bool {
 	progress_state := pane.terminal.progress_state
 	progress_percent := pane.terminal.progress_percent
+	pointer_shape := pane.terminal.pointer_shape
 	defer if progress_state != pane.terminal.progress_state || progress_percent != pane.terminal.progress_percent {
 		workspace_draw_statusbar(workspace)
 	}
+	defer if pointer_shape != pane.terminal.pointer_shape do workspace_apply_pointer_shape(workspace)
 	if !workspace.settings.tmux.enabled || (!workspace.settings.tmux.auto_detect && !pane.tmux_expected) {
 		selection.clear(&pane.selection_state)
 		vt.terminal_feed(&pane.terminal, data)
@@ -2857,6 +2911,9 @@ workspace_feed_pty :: proc(workspace: ^Workspace, pane: ^Pane, data: []byte) -> 
 		case .Output:
 			target := workspace_tmux_view(workspace, pane, event.pane_id)
 			if target != nil {
+				target_progress_state := target.terminal.progress_state
+				target_progress_percent := target.terminal.progress_percent
+				target_pointer_shape := target.terminal.pointer_shape
 				selection.clear(&target.selection_state)
 				if event.kind == .Reply_Data {
 					screen := vt.terminal_screen(&target.terminal)
@@ -2866,6 +2923,8 @@ workspace_feed_pty :: proc(workspace: ^Workspace, pane: ^Pane, data: []byte) -> 
 				}
 				vt.terminal_feed(&target.terminal, event.data[:])
 				process_osc52_actions(workspace.root, &target.terminal, &target.osc52)
+				if target_progress_state != target.terminal.progress_state || target_progress_percent != target.terminal.progress_percent do workspace_draw_statusbar(workspace)
+				if target_pointer_shape != target.terminal.pointer_shape do workspace_apply_pointer_shape(workspace)
 				features.scrollback_refresh(&target.scrollback_state, vt.terminal_screen(&target.terminal))
 				if target.search_state.active do features.refresh(&target.search_state, vt.terminal_screen(&target.terminal))
 				if target.visible && target != pane do workspace_redraw(workspace, target, false)
