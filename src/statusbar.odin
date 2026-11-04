@@ -1293,6 +1293,14 @@ statusbar_module_text :: proc(workspace: ^Workspace, module: config.Status_Modul
 		if workspace.initial_font_size > 0 do value = fmt.tprintf("%d%%", (workspace.font_size*100+workspace.initial_font_size/2)/workspace.initial_font_size)
 		return statusbar_join_label(label, value)
 	case .Jobs: return statusbar_join_label(label, workspace.statusbar.jobs_text)
+	case .Progress:
+		switch pane.terminal.progress_state {
+		case .None: return ""
+		case .Normal: return statusbar_join_label(label, fmt.tprintf("%d%%", pane.terminal.progress_percent))
+		case .Error: return statusbar_join_label(label, "ERR")
+		case .Indeterminate: return statusbar_join_label(label, "WORK")
+		case .Warning: return statusbar_join_label(label, "WARN")
+		}
 	}
 	return ""
 }

@@ -700,6 +700,22 @@ workspace_new_pane :: proc(workspace: ^Workspace, cwd: string = "") -> ^Pane {
 	return workspace_new_pane_command(workspace, workspace.command, cwd, false)
 }
 
+workspace_color_scheme :: proc(workspace: ^Workspace) -> vt.Color_Scheme {
+	background := workspace.settings.theme.background
+	red := int((background>>16)&0xff)
+	green := int((background>>8)&0xff)
+	blue := int(background&0xff)
+	return .Light if red*299+green*587+blue*114 >= 128000 else .Dark
+}
+
+workspace_set_color_scheme :: proc(workspace: ^Workspace) {
+	scheme := workspace_color_scheme(workspace)
+	for tab in workspace.tabs do for pane in tab.panes {
+		vt.terminal_set_color_scheme(&pane.terminal, scheme)
+		if pane.has_local_terminal do vt.terminal_set_color_scheme(&pane.local_terminal, scheme)
+	}
+}
+
 workspace_new_pane_command :: proc(workspace: ^Workspace, command: []cstring, cwd: string = "", tmux_expected: bool = false) -> ^Pane {
 	pane := new(Pane)
 	pane.workspace = workspace
@@ -737,6 +753,7 @@ workspace_new_pane_command :: proc(workspace: ^Workspace, command: []cstring, cw
 	if !vt.terminal_init(&pane.terminal, columns, rows, workspace.settings.scrollback_lines, workspace.settings.osc52_policy, &workspace.settings.graphics_limits, workspace.settings.scrollback_bytes, workspace.graphics_cache) {
 		pty.shutdown(&pane.process); drawing.destroy(&pane.renderer, &pane.surface); x11.destroy_child(&pane.surface); free(pane); return nil
 	}
+	vt.terminal_set_color_scheme(&pane.terminal, workspace_color_scheme(workspace))
 	vt.terminal_set_cell_size(&pane.terminal, pane.surface.cell_w, pane.surface.cell_h)
 	workspace_apply_cursor(workspace, pane)
 	pane.visible = true
@@ -796,6 +813,7 @@ workspace_new_tmux_view :: proc(workspace: ^Workspace, owner: ^Pane, pane_id: in
 		free(pane)
 		return nil
 	}
+	vt.terminal_set_color_scheme(&pane.terminal, workspace_color_scheme(workspace))
 	vt.terminal_set_cell_size(&pane.terminal, pane.surface.cell_w, pane.surface.cell_h)
 	workspace_apply_cursor(workspace, pane)
 	return pane
@@ -2086,6 +2104,7 @@ workspace_reload_config :: proc(workspace: ^Workspace) -> bool {
 	workspace.font_size = workspace.settings.font_size
 	config.replace_string(&workspace.title, workspace.settings.title)
 	drawing.set_theme(workspace.settings.theme)
+	workspace_set_color_scheme(workspace)
 	drawing.set_bold_is_bright(workspace.settings.bold_is_bright)
 	x11.set_opacity(workspace.root, workspace.settings.window.background_opacity)
 	x11.set_decorations(workspace.root, workspace.settings.window.decorations)
@@ -2775,6 +2794,11 @@ workspace_tmux_restore_tab :: proc(workspace: ^Workspace, owner: ^Pane) {
 }
 
 workspace_feed_pty :: proc(workspace: ^Workspace, pane: ^Pane, data: []byte) -> bool {
+	progress_state := pane.terminal.progress_state
+	progress_percent := pane.terminal.progress_percent
+	defer if progress_state != pane.terminal.progress_state || progress_percent != pane.terminal.progress_percent {
+		workspace_draw_statusbar(workspace)
+	}
 	if !workspace.settings.tmux.enabled || (!workspace.settings.tmux.auto_detect && !pane.tmux_expected) {
 		selection.clear(&pane.selection_state)
 		vt.terminal_feed(&pane.terminal, data)
@@ -2992,6 +3016,7 @@ workspace_tmux_activate :: proc(workspace: ^Workspace, pane: ^Pane) -> bool {
 		pane.root_foreground = pane.local_root_foreground
 		return false
 	}
+	vt.terminal_set_color_scheme(&pane.terminal, workspace_color_scheme(workspace))
 	vt.terminal_set_cell_size(&pane.terminal, pane.surface.cell_w, pane.surface.cell_h)
 	workspace_apply_cursor(workspace, pane)
 	workspace_reset_view_state(pane)
@@ -3017,6 +3042,7 @@ workspace_tmux_reset_display :: proc(workspace: ^Workspace, pane: ^Pane) -> bool
 	columns, rows := x11.grid_size(&pane.surface)
 	replacement: vt.Terminal
 	if !vt.terminal_init(&replacement, columns, rows, workspace.settings.scrollback_lines, workspace.settings.osc52_policy, &workspace.settings.graphics_limits, workspace.settings.scrollback_bytes, workspace.graphics_cache) do return false
+	vt.terminal_set_color_scheme(&replacement, workspace_color_scheme(workspace))
 	vt.terminal_destroy(&pane.terminal)
 	pane.terminal = replacement
 	vt.terminal_rebind(&pane.terminal)

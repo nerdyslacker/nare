@@ -20,6 +20,7 @@ MAX_OSC52_READ_BYTES :: 128 * 1024
 MAX_OSC52_ACTIONS :: 8
 MAX_OSC52_QUEUED_BYTES :: 512 * 1024
 MAX_OSC133_BYTES :: 4 * 1024
+MAX_OSC9_BYTES :: 64
 MAX_XTGETTCAP_BYTES :: 4 * 1024
 MAX_XTGETTCAP_NAMES :: 32
 MAX_XTGETTCAP_NAME_BYTES :: 32
@@ -94,6 +95,19 @@ Cursor_Style :: enum {
 	Steady_Bar,
 }
 
+Color_Scheme :: enum {
+	Dark,
+	Light,
+}
+
+Progress_State :: enum {
+	None,
+	Normal,
+	Error,
+	Indeterminate,
+	Warning,
+}
+
 Character_Set :: enum {
 	ASCII,
 	DEC_Special_Graphics,
@@ -110,6 +124,7 @@ Modes :: struct {
 	focus_reporting: bool,
 	cursor_visible: bool,
 	synchronized_updates: bool,
+	color_scheme_reporting: bool,
 	sixel_display: bool,
 	sixel_private_colors: bool,
 	mouse_tracking: int,
@@ -130,6 +145,9 @@ Terminal :: struct {
 	saved_character_sets: [2]Character_Set,
 	saved_active_character_set: u8,
 	modes: Modes,
+	color_scheme: Color_Scheme,
+	progress_state: Progress_State,
+	progress_percent: int,
 	replies: [dynamic]byte,
 	reply_overflow: bool,
 	hyperlinks: [dynamic]string,
@@ -197,6 +215,12 @@ terminal_init :: proc(
 terminal_set_cell_size :: proc(terminal: ^Terminal, width, height: int) {
 	terminal.cell_width = clamp(width, 1, graphics.MAX_IMAGE_DIMENSION)
 	terminal.cell_height = clamp(height, 1, graphics.MAX_IMAGE_DIMENSION)
+}
+
+terminal_set_color_scheme :: proc(terminal: ^Terminal, scheme: Color_Scheme) {
+	if terminal == nil || terminal.color_scheme == scheme do return
+	terminal.color_scheme = scheme
+	if terminal.modes.color_scheme_reporting do report_color_scheme(terminal)
 }
 
 // Screens retain a pointer to their owning image registry. Call this after a
@@ -769,6 +793,7 @@ handle_osc :: proc(terminal: ^Terminal, data: []byte) {
 			terminal.implicit_prompt_active = true
 		}
 	case "8": set_hyperlink(terminal, payload)
+	case "9": handle_osc9(terminal, payload)
 	case "52": handle_osc52(terminal, payload)
 	case "133": handle_osc133(terminal, payload)
 	case "1337": handle_osc1337(terminal, payload)
@@ -776,7 +801,38 @@ handle_osc :: proc(terminal: ^Terminal, data: []byte) {
 	}
 }
 
+handle_osc9 :: proc(terminal: ^Terminal, payload: []byte) {
+	if len(payload) < 3 || len(payload) > MAX_OSC9_BYTES || string(payload[:2]) != "4;" do return
+	parameters := string(payload[2:])
+	separator := strings.index_byte(parameters, ';')
+	state_text := parameters
+	progress_text := ""
+	if separator >= 0 do state_text, progress_text = parameters[:separator], parameters[separator+1:]
+	state, state_ok := strconv.parse_int(state_text)
+	if !state_ok || state < 0 || state > 4 do return
+	if state == 0 {
+		terminal.progress_state = .None
+		terminal.progress_percent = 0
+		return
+	}
+	progress := 0
+	if progress_text != "" {
+		parsed, ok := strconv.parse_int(progress_text)
+		if !ok do return
+		progress = clamp(parsed, 0, 100)
+	} else if state == 1 {
+		return
+	}
+	terminal.progress_state = Progress_State(state)
+	terminal.progress_percent = progress
+}
+
 handle_osc1337 :: proc(terminal: ^Terminal, payload: []byte) {
+	copy_prefix := "Copy=:"
+	if len(payload) >= len(copy_prefix) && string(payload[:len(copy_prefix)]) == copy_prefix {
+		handle_clipboard_write(terminal, .Clipboard, payload[len(copy_prefix):])
+		return
+	}
 	prefix := "File="
 	if len(payload) < len(prefix) || string(payload[:len(prefix)]) != prefix do return
 	command, image, decode_error := graphics.decode_iterm2_inline(payload[len(prefix):], &terminal.images.limits)
@@ -885,6 +941,10 @@ handle_osc52 :: proc(terminal: ^Terminal, payload: []byte) {
 		enqueue_osc52_action(terminal, {kind = .Read, selection = selection})
 		return
 	}
+	handle_clipboard_write(terminal, selection, data)
+}
+
+handle_clipboard_write :: proc(terminal: ^Terminal, selection: OSC52_Selection, data: []byte) {
 	if terminal.osc52_policy != .Copy && terminal.osc52_policy != .Enabled do return
 	if len(data) > ((MAX_OSC52_WRITE_BYTES+2)/3)*4 do return
 	decoded, err := base64.decode(string(data), options = {.Strict})
@@ -1181,6 +1241,7 @@ handle_csi :: proc(terminal: ^Terminal, event: Event) {
 	if event.intermediate_count > 0 {
 		if event.intermediates[0] == '!' && event.final == 'p' do soft_reset(terminal)
 		if event.intermediates[0] == ' ' && event.final == 'q' do set_cursor_style(terminal, parameter_raw(event, 0, 0))
+		if event.intermediates[0] == '$' && event.final == 'p' do report_mode(terminal, event)
 		return
 	}
 	switch event.final {
@@ -1361,12 +1422,40 @@ set_modes :: proc(terminal: ^Terminal, event: Event, enabled: bool) {
 			case 1047, 1049: switch_alternate(terminal, enabled, mode == 1049)
 			case 2004: terminal.modes.bracketed_paste = enabled
 			case 2026: terminal.modes.synchronized_updates = enabled
+			case 2031: terminal.modes.color_scheme_reporting = enabled
 			case:
 			}
 		} else if mode == 4 {
 			terminal.modes.insert = enabled
 		}
 	}
+}
+
+report_mode :: proc(terminal: ^Terminal, event: Event) {
+	mode := parameter_raw(event, 0, 0)
+	status := 0
+	if event.private_marker == '?' {
+		switch mode {
+		case 1: status = 1 if terminal.modes.application_cursor else 2
+		case 6: status = 1 if terminal.modes.origin else 2
+		case 7: status = 1 if terminal.modes.autowrap else 2
+		case 25: status = 1 if terminal.modes.cursor_visible else 2
+		case 80: status = 1 if terminal.modes.sixel_display else 2
+		case 1000, 1002, 1003: status = 1 if terminal.modes.mouse_tracking == mode else 2
+		case 1004: status = 1 if terminal.modes.focus_reporting else 2
+		case 1006: status = 1 if terminal.modes.mouse_sgr else 2
+		case 1007: status = 1 if terminal.modes.alternate_scroll else 2
+		case 1047, 1049: status = 1 if terminal.using_alternate else 2
+		case 1070: status = 1 if terminal.modes.sixel_private_colors else 2
+		case 2004: status = 1 if terminal.modes.bracketed_paste else 2
+		case 2026: status = 1 if terminal.modes.synchronized_updates else 2
+		case 2031: status = 1 if terminal.modes.color_scheme_reporting else 2
+		case:
+		}
+	}
+	response := fmt.aprintf("\x1b[?%d;%d$y", mode, status)
+	append_reply(terminal, transmute([]byte)response)
+	delete(response)
 }
 
 switch_alternate :: proc(terminal: ^Terminal, enabled, save_cursor: bool) {
@@ -1386,6 +1475,8 @@ switch_alternate :: proc(terminal: ^Terminal, enabled, save_cursor: bool) {
 
 device_status :: proc(terminal: ^Terminal, event: Event) {
 	switch parameter_raw(event, 0, 0) {
+	case 996:
+		if event.private_marker == '?' do report_color_scheme(terminal)
 	case 5:
 		if event.private_marker == 0 do append_reply(terminal, transmute([]byte)string("\x1b[0n"))
 	case 6:
@@ -1396,6 +1487,13 @@ device_status :: proc(terminal: ^Terminal, event: Event) {
 		delete(response)
 	case:
 	}
+}
+
+report_color_scheme :: proc(terminal: ^Terminal) {
+	value := 1 if terminal.color_scheme == .Dark else 2
+	response := fmt.aprintf("\x1b[?997;%dn", value)
+	append_reply(terminal, transmute([]byte)response)
+	delete(response)
 }
 
 device_attributes :: proc(terminal: ^Terminal, event: Event) {
@@ -1582,6 +1680,8 @@ terminal_reset :: proc(terminal: ^Terminal) {
 	terminal.saved_active_character_set = 0
 	terminal.last_graphic = 0
 	terminal.last_graphic_valid = false
+	terminal.progress_state = .None
+	terminal.progress_percent = 0
 	terminal.modes = Modes{autowrap = true, cursor_visible = true, sixel_private_colors = true, alternate_scroll = true}
 	terminal.using_alternate = false
 	screen_clear(&terminal.main_screen, {})

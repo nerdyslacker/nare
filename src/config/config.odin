@@ -40,8 +40,8 @@ Tab_Rule_Reuse :: enum { Always_New, Focus }
 Quake_Horizontal_Align :: enum { Left, Center, Right }
 Quake_Animation :: enum { None, Slide, Fade }
 Status_Position :: enum { Top, Bottom }
-Status_Module :: enum { Mode, Session, Host, Cwd, Git, Command, Size, Tabs, Clock, Battery, Resource, Zoom, Jobs }
-STATUS_MODULE_COUNT :: int(Status_Module.Jobs)+1
+Status_Module :: enum { Mode, Session, Host, Cwd, Git, Command, Size, Tabs, Clock, Battery, Resource, Zoom, Jobs, Progress }
+STATUS_MODULE_COUNT :: int(Status_Module.Progress)+1
 Jobs_Sort :: enum { Running_First, Newest }
 Jobs_Scope :: enum { Window }
 
@@ -352,7 +352,7 @@ settings_init :: proc(settings: ^Settings) {
 		sort = .Running_First, scope = .Window,
 	}
 	append(&settings.statusbar.left, .Mode, .Session)
-	append(&settings.statusbar.right, .Resource, .Battery, .Size, .Clock)
+	append(&settings.statusbar.right, .Resource, .Battery, .Size, .Progress, .Clock)
 	settings.cursor = {shape = .Block, blink = true, blink_interval_ms = 500, beam_width = 2, underline_height = 2}
 	settings.tmux = {enabled = true, auto_detect = true, default_target = .New_Tab, active_tab_color = 0x13ba19, auto_reconnect = true}
 	settings.quake = {
@@ -1240,6 +1240,7 @@ status_module_from_name :: proc(name: string) -> (Status_Module, bool) {
 	case "resource", "resources": return .Resource, true
 	case "zoom": return .Zoom, true
 	case "jobs": return .Jobs, true
+	case "progress": return .Progress, true
 	}
 	return {}, false
 }
