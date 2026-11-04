@@ -34,6 +34,7 @@ Vulkan_Texture :: struct {
 Vulkan_Image :: struct {
 	texture:    Vulkan_Texture,
 	image_id:   u64,
+	version:    u64,
 	byte_count: int,
 	last_used:  u64,
 }
@@ -861,6 +862,25 @@ when GPU_ENABLED {
 		return false
 	}
 
+	vulkan_upload_resource_texture :: proc(vk: ^Vulkan, texture: ^Vulkan_Texture, resource: ^graphics.Resource) -> bool {
+		channels := graphics.bytes_per_pixel(resource.format)
+		if channels <= 0 do return false
+		pixels := make([]u8, resource.width*resource.height*4)
+		defer delete(pixels)
+		for y in 0..<resource.height {
+			for x in 0..<resource.width {
+				source := y*resource.stride+x*channels
+				target := (y*resource.width+x)*4
+				pixels[target] = resource.pixels[source]
+				pixels[target+1] = resource.pixels[source+1]
+				pixels[target+2] = resource.pixels[source+2]
+				pixels[target+3] = 255
+				if channels == 4 do pixels[target+3] = resource.pixels[source+3]
+			}
+		}
+		return vulkan_upload_texture(vk, texture, pixels)
+	}
+
 	vulkan_create_image_texture :: proc(vk: ^Vulkan, resource: ^graphics.Resource) -> bool {
 		channels := graphics.bytes_per_pixel(resource.format)
 		if channels <= 0 || resource.stride%channels != 0 do return false
@@ -882,20 +902,7 @@ when GPU_ENABLED {
 			return false
 		}
 		texture.descriptor = descriptor
-		pixels := make([]u8, resource.width*resource.height*4)
-		defer delete(pixels)
-		for y in 0..<resource.height {
-			for x in 0..<resource.width {
-				source := y*resource.stride+x*channels
-				target := (y*resource.width+x)*4
-				pixels[target] = resource.pixels[source]
-				pixels[target+1] = resource.pixels[source+1]
-				pixels[target+2] = resource.pixels[source+2]
-				pixels[target+3] = 255
-				if channels == 4 do pixels[target+3] = resource.pixels[source+3]
-			}
-		}
-		if !vulkan_upload_texture(vk, &texture, pixels) {
+		if !vulkan_upload_resource_texture(vk, &texture, resource) {
 			vulkan_destroy_texture(vk, &texture, true)
 			return false
 		}
@@ -903,6 +910,7 @@ when GPU_ENABLED {
 		append(&vk.images, Vulkan_Image{
 			texture = texture,
 			image_id = resource.id,
+			version = resource.version,
 			byte_count = byte_count,
 			last_used = vk.image_clock,
 		})
@@ -963,6 +971,12 @@ when GPU_ENABLED {
 			vk.image_stats.texture_lookups += 1
 			entry := vulkan_find_image(vk, resource.id)
 			if entry != nil {
+				if entry.version != resource.version {
+					if !vulkan_upload_resource_texture(vk, &entry.texture, resource) do return false
+					entry.version = resource.version
+					vk.image_stats.uploads += 1
+					vk.image_stats.uploaded_bytes += u64(entry.byte_count)
+				}
 				vk.image_stats.cache_hits += 1
 				vulkan_touch_image(vk, entry)
 				continue

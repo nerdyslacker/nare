@@ -332,6 +332,53 @@ handle_apc :: proc(terminal: ^Terminal, data: []byte, discarded: bool = false) {
 		kitty_reply(terminal, command, false, kitty_error_text(decode_error))
 		return
 	}
+	if command.action == .Frame {
+		resource := graphics.find_protocol_image(&terminal.images, .Kitty, command.image_id)
+		if resource == nil {
+			graphics.decoded_image_destroy(&image)
+			kitty_reply(terminal, command, false, "ENOENT")
+			return
+		}
+		frame_error := graphics.kitty_add_frame(&terminal.images, resource, command, &image)
+		graphics.decoded_image_destroy(&image)
+		if frame_error != .None {
+			kitty_reply(terminal, command, false, kitty_error_text(frame_error))
+			return
+		}
+		terminal.images.generation += 1
+		kitty_reply(terminal, command, true, "")
+		return
+	}
+	if command.action == .Animate {
+		resource := graphics.find_protocol_image(&terminal.images, .Kitty, command.image_id)
+		if resource == nil {
+			kitty_reply(terminal, command, false, "ENOENT")
+			return
+		}
+		animation_error := graphics.kitty_control_animation(resource, command)
+		if animation_error != .None {
+			kitty_reply(terminal, command, false, kitty_error_text(animation_error))
+			return
+		}
+		terminal.images.generation += 1
+		kitty_reply(terminal, command, true, "")
+		return
+	}
+	if command.action == .Compose {
+		resource := graphics.find_protocol_image(&terminal.images, .Kitty, command.image_id)
+		if resource == nil {
+			kitty_reply(terminal, command, false, "ENOENT")
+			return
+		}
+		compose_error := graphics.kitty_compose_frames(resource, command)
+		if compose_error != .None {
+			kitty_reply(terminal, command, false, kitty_error_text(compose_error))
+			return
+		}
+		terminal.images.generation += 1
+		kitty_reply(terminal, command, true, "")
+		return
+	}
 	if command.action == .Delete {
 		screen := terminal_screen(terminal)
 		screen_kind := graphics.Screen.Alternate if terminal.using_alternate else graphics.Screen.Main
@@ -416,6 +463,29 @@ terminal_kitty_timeout_ms :: proc(terminal: ^Terminal) -> int {
 	return graphics.kitty_transfer_timeout_ms(&terminal.kitty_transfer, time.tick_now())
 }
 
+terminal_animation_tick :: proc(terminal: ^Terminal) -> bool {
+	if terminal == nil do return false
+	now := time.tick_now()
+	changed := false
+	for &resource in terminal.images.resources {
+		if graphics.kitty_animation_advance(&resource, now) do changed = true
+	}
+	if changed do terminal.images.generation += 1
+	return changed
+}
+
+terminal_animation_timeout_ms :: proc(terminal: ^Terminal) -> int {
+	if terminal == nil do return -1
+	now := time.tick_now()
+	timeout := -1
+	for &resource in terminal.images.resources {
+		remaining := graphics.kitty_animation_timeout_ms(&resource, now)
+		if remaining < 0 do continue
+		if timeout < 0 || remaining < timeout do timeout = remaining
+	}
+	return timeout
+}
+
 kitty_place_image :: proc(terminal: ^Terminal, command: graphics.Kitty_Command, image_id: u64) -> string {
 	resource := graphics.find_image(&terminal.images, image_id)
 	if resource == nil || command.source_x >= resource.width || command.source_y >= resource.height do return "EINVAL"
@@ -435,7 +505,7 @@ kitty_place_image :: proc(terminal: ^Terminal, command: graphics.Kitty_Command, 
 	if !geometry_ok do return "EINVAL"
 	screen := terminal_screen(terminal)
 	screen_kind := graphics.Screen.Alternate if terminal.using_alternate else graphics.Screen.Main
-	_, placement_error := graphics.add_placement(&terminal.images, {
+	request := graphics.Placement_Request{
 		image_id = image_id,
 		protocol_id = command.placement_id if command.image_id != 0 else 0,
 		screen = screen_kind,
@@ -453,10 +523,30 @@ kitty_place_image :: proc(terminal: ^Terminal, command: graphics.Kitty_Command, 
 		source_height = source_height,
 		z = command.z,
 		preserve_aspect = preserve_aspect,
-	})
-	if placement_error == .Active_Limit do return "ENOSPC"
-	if placement_error != .None do return "EINVAL"
-	if !command.no_cursor_move {
+		virtual = command.virtual,
+	}
+	if command.virtual {
+		request.row = 0
+		request.column = 0
+	} else if command.parent_image_id != 0 {
+		parent_resource := graphics.find_protocol_image(&terminal.images, .Kitty, command.parent_image_id)
+		if parent_resource == nil do return "ENOPARENT"
+		parent := graphics.find_protocol_placement(&terminal.images, parent_resource.id, command.parent_placement_id)
+		if parent == nil do return "ENOPARENT"
+		request.parent_placement_id = parent.id
+		request.relative_row = command.parent_offset_y
+		request.relative_column = command.parent_offset_x
+	}
+	_, placement_error := graphics.add_placement(&terminal.images, request)
+	#partial switch placement_error {
+	case .None:
+	case .Unknown_Parent: return "ENOPARENT"
+	case .Parent_Cycle: return "ECYCLE"
+	case .Parent_Too_Deep: return "ETOODEEP"
+	case .Active_Limit: return "ENOSPC"
+	case: return "EINVAL"
+	}
+	if !command.no_cursor_move && !command.virtual && command.parent_image_id == 0 {
 		screen.cursor.column = min(screen.columns-1, screen.cursor.column+columns)
 		for _ in 0..<rows do line_feed(screen, terminal.attributes)
 	}

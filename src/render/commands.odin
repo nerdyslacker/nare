@@ -65,6 +65,7 @@ build_row_commands :: proc(
 	y := row * window.cell_h
 	append_rectangle(output, 0, y, window.width, window.cell_h, active_theme.background)
 	append_image_commands(output, window, screen, row, .Below_Background)
+	append_placeholder_commands(output, screen, row, .Below_Background, window.cell_w, window.cell_h)
 	for column in 0..<screen.columns {
 		cell := vt.cell_at(screen, row, column)
 		_, background := display_colors(
@@ -77,9 +78,10 @@ build_row_commands :: proc(
 		}
 	}
 	append_image_commands(output, window, screen, row, .Below_Text)
+	append_placeholder_commands(output, screen, row, .Below_Text, window.cell_w, window.cell_h)
 	for column in 0..<screen.columns {
 		cell := vt.cell_at(screen, row, column)
-		if cell.continuation do continue
+		if cell.continuation || cell.codepoint == PLACEHOLDER_CODEPOINT do continue
 		foreground, background := display_colors(
 			cell,
 			selection.contains(selection_state, screen, row, column),
@@ -112,6 +114,10 @@ build_row_commands :: proc(
 			column += 1
 			continue
 		}
+		if cell.codepoint == PLACEHOLDER_CODEPOINT {
+			column += max(1, int(cell.width))
+			continue
+		}
 		if cell.combining_count == 0 {
 			foreground, background := display_colors(
 				cell,
@@ -139,6 +145,7 @@ build_row_commands :: proc(
 				column += 1
 				continue
 			}
+			if current.codepoint == PLACEHOLDER_CODEPOINT do break
 			if current.combining_count == 0 && is_cell_graphic(current.codepoint) && len(text) > 0 do break
 			if current.attributes != attributes && len(text) > 0 do break
 			current_foreground, _ := display_colors(
@@ -185,6 +192,7 @@ build_row_commands :: proc(
 		}
 	}
 	append_image_commands(output, window, screen, row, .Above_Text)
+	append_placeholder_commands(output, screen, row, .Above_Text, window.cell_w, window.cell_h)
 	append_cursor_commands(output, window, terminal, screen, row)
 	append_scrollbar_commands(output, window, screen, row, scrollbar)
 }
@@ -200,9 +208,14 @@ append_image_commands :: proc(
 	start := len(output^)
 	row_top, row_bottom := row*window.cell_h, (row+1)*window.cell_h
 	for placement in screen.image_registry.placements {
-		if placement.screen != screen.image_screen || image_placement_layer(screen.image_registry, placement) != layer do continue
+		if placement.virtual || placement.screen != screen.image_screen || image_placement_layer(screen.image_registry, placement) != layer do continue
+		placement_row, placement_column, position_ok := placement_effective_position(screen, placement)
+		if !position_ok do continue
+		positioned := placement
+		positioned.row = placement_row
+		positioned.column = placement_column
 		x, y, width, height := image_destination(
-			placement,
+			positioned,
 			window.cell_w,
 			window.cell_h,
 			screen.image_row_offset,
@@ -227,14 +240,41 @@ append_image_commands :: proc(
 			z = placement.z,
 		})
 	}
-	for index := start+1; index < len(output^); index += 1 {
-		current := output^[index]
+	sort_image_commands(output^, start)
+}
+
+placement_effective_position :: proc(screen: ^vt.Screen, placement: graphics.Placement) -> (row, column: int, ok: bool) {
+	if placement.parent_placement_id == 0 do return placement.row, placement.column, true
+	offset_row := placement.relative_row
+	offset_column := placement.relative_column
+	child := placement
+	for _ in 0..<graphics.MAX_RELATIVE_DEPTH {
+		parent := graphics.find_placement(screen.image_registry, child.parent_placement_id)
+		if parent == nil do return 0, 0, false
+		if parent.virtual {
+			anchor_row, anchor_column, anchor_ok := find_placeholder_anchor(screen, parent)
+			if !anchor_ok do return 0, 0, false
+			return anchor_row+offset_row, anchor_column+offset_column, true
+		}
+		if parent.parent_placement_id == 0 {
+			return parent.row+offset_row, parent.column+offset_column, true
+		}
+		offset_row += parent.relative_row
+		offset_column += parent.relative_column
+		child = parent^
+	}
+	return 0, 0, false
+}
+
+sort_image_commands :: proc(commands: [dynamic]Command, start: int) {
+	for index := start+1; index < len(commands); index += 1 {
+		current := commands[index]
 		position := index
-		for position > start && image_command_after(output^[position-1], current) {
-			output^[position] = output^[position-1]
+		for position > start && image_command_after(commands[position-1], current) {
+			commands[position] = commands[position-1]
 			position -= 1
 		}
-		output^[position] = current
+		commands[position] = current
 	}
 }
 

@@ -12,6 +12,7 @@ MAX_IMAGE_TEXTURE_BYTES :: graphics.MAX_CACHE_BYTES
 
 Image_Texture :: struct {
 	image_id: u64,
+	version: u64,
 	texture: u32,
 	byte_count: int,
 	last_used: u64,
@@ -443,6 +444,9 @@ when GPU_ENABLED {
 			gpu.image_stats.texture_lookups += 1
 			entry := gpu_find_image_texture(gpu, resource.id)
 			if entry != nil {
+				if entry.version != resource.version {
+					if !gpu_update_image_texture(gpu, entry, resource) do return false
+				}
 				gpu.image_stats.cache_hits += 1
 				gpu_touch_image_texture(gpu, entry)
 				continue
@@ -497,6 +501,7 @@ when GPU_ENABLED {
 		gpu.image_texture_clock += 1
 		append(&gpu.image_textures, Image_Texture{
 			image_id = resource.id,
+			version = resource.version,
 			texture = texture,
 			byte_count = byte_count,
 			last_used = gpu.image_texture_clock,
@@ -504,6 +509,33 @@ when GPU_ENABLED {
 		gpu.image_texture_bytes += byte_count
 		gpu.image_stats.uploads += 1
 		gpu.image_stats.uploaded_bytes += u64(byte_count)
+		return true
+	}
+
+	gpu_update_image_texture :: proc(gpu: ^GPU, entry: ^Image_Texture, resource: ^graphics.Resource) -> bool {
+		channels := graphics.bytes_per_pixel(resource.format)
+		if channels <= 0 || resource.stride%channels != 0 do return false
+		BindTexture(GL_TEXTURE_2D, entry.texture)
+		PixelStorei(GL_UNPACK_ALIGNMENT, 1)
+		PixelStorei(GL_UNPACK_ROW_LENGTH, i32(resource.stride/channels))
+		format: u32 = GL_RGB
+		if resource.format == .RGBA8 do format = GL_RGBA
+		TexSubImage2D(
+			GL_TEXTURE_2D,
+			0,
+			0,
+			0,
+			i32(resource.width),
+			i32(resource.height),
+			format,
+			GL_UNSIGNED_BYTE,
+			raw_data(resource.pixels),
+		)
+		PixelStorei(GL_UNPACK_ROW_LENGTH, 0)
+		if GetError() != GL_NO_ERROR do return false
+		entry.version = resource.version
+		gpu.image_stats.uploads += 1
+		gpu.image_stats.uploaded_bytes += u64(entry.byte_count)
 		return true
 	}
 

@@ -392,6 +392,7 @@ workspace_poll_timeout_ms :: proc(workspace: ^Workspace) -> int {
 	if workspace.statusbar.sample_thread != nil do timeout = poll_timeout_limit(timeout, int(STATUSBAR_SERVICE_INTERVAL/time.Millisecond))
 	for tab in workspace.tabs do for pane in tab.panes {
 		timeout = poll_timeout_limit(timeout, vt.terminal_kitty_timeout_ms(&pane.terminal))
+		timeout = poll_timeout_limit(timeout, vt.terminal_animation_timeout_ms(&pane.terminal))
 	}
 	if workspace.quake != nil do timeout = quake.poll_timeout_ms(workspace.quake, timeout)
 	return timeout
@@ -619,6 +620,11 @@ workspace_dispatch_poll :: proc(target: Workspace_Poll_Target, events: posix.Pol
 
 workspace_finish_cycle :: proc(workspace: ^Workspace) {
 	for tab in workspace.tabs do for pane in tab.panes do _ = vt.terminal_expire_kitty_transfer(&pane.terminal)
+	for tab in workspace.tabs do for pane in tab.panes {
+		if vt.terminal_animation_tick(&pane.terminal) && pane.visible {
+			workspace_redraw(workspace, pane, true)
+		}
+	}
 	workspace_enforce_scrollback_budget(workspace)
 	workspace_reconcile_job_owners(workspace)
 	workspace_cursor_tick(workspace)

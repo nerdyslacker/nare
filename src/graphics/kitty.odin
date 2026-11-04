@@ -20,6 +20,9 @@ Kitty_Action :: enum {
 	Query,
 	Display,
 	Delete,
+	Frame,
+	Animate,
+	Compose,
 	Unsupported,
 }
 
@@ -66,6 +69,10 @@ Kitty_Command :: struct {
 	more: bool,
 	quiet: int,
 	medium: Kitty_Medium,
+	virtual: bool,
+	parent_image_id: u32,
+	parent_placement_id: u32,
+	parent_offset_x, parent_offset_y: int,
 }
 
 Kitty_Transfer :: struct {
@@ -156,7 +163,9 @@ kitty_receive_direct :: proc(
 	}
 
 	command = frame.command
-	if command.action == .Display || command.action == .Delete do return command, {}, true, .None
+	if command.action == .Display || command.action == .Delete || command.action == .Animate || command.action == .Compose {
+		return command, {}, true, .None
+	}
 	if command.medium != .Direct do return command, {}, true, .Unsupported
 	encoded_limit, limit_error := kitty_encoded_limit(command, limits)
 	if limit_error != .None do return command, {}, true, limit_error
@@ -206,6 +215,8 @@ kitty_parse_direct_frame :: proc(data: []byte) -> (Kitty_Frame, Kitty_Error) {
 	seen_source_x, seen_source_y, seen_source_width, seen_source_height := false, false, false, false
 	seen_destination_x, seen_destination_y := false, false
 	seen_z, seen_cursor_policy, seen_delete := false, false, false
+	seen_virtual, seen_parent_image, seen_parent_placement := false, false, false
+	seen_parent_offset_x, seen_parent_offset_y := false, false
 	unsupported := false
 	key_count := 0
 	remaining := control
@@ -231,6 +242,9 @@ kitty_parse_direct_frame :: proc(data: []byte) -> (Kitty_Frame, Kitty_Error) {
 			case 'q': command.action = .Query
 			case 'p': command.action = .Display
 			case 'd': command.action = .Delete
+			case 'f': command.action = .Frame
+			case 'a': command.action = .Animate
+			case 'c': command.action = .Compose
 			case: command.action = .Unsupported
 			}
 		case 'f':
@@ -339,6 +353,42 @@ kitty_parse_direct_frame :: proc(data: []byte) -> (Kitty_Frame, Kitty_Error) {
 				return Kitty_Frame{command = command}, .Malformed
 			}
 			command.z = i32(parsed)
+		case 'U':
+			if seen_virtual do return Kitty_Frame{command = command}, .Malformed
+			seen_virtual = true
+			parsed, ok := parse_kitty_uint(value)
+			if !ok || parsed > 1 do return Kitty_Frame{command = command}, .Malformed
+			command.virtual = parsed == 1
+		case 'P':
+			if seen_parent_image do return Kitty_Frame{command = command}, .Malformed
+			seen_parent_image = true
+			parsed, ok := parse_kitty_uint(value)
+			if !ok || parsed > u64(max(u32)) do return Kitty_Frame{command = command}, .Malformed
+			command.parent_image_id = u32(parsed)
+		case 'Q':
+			if seen_parent_placement do return Kitty_Frame{command = command}, .Malformed
+			seen_parent_placement = true
+			parsed, ok := parse_kitty_uint(value)
+			if !ok || parsed > u64(max(u32)) do return Kitty_Frame{command = command}, .Malformed
+			command.parent_placement_id = u32(parsed)
+		case 'H':
+			if seen_parent_offset_x do return Kitty_Frame{command = command}, .Malformed
+			seen_parent_offset_x = true
+			parsed_bytes := 0
+			parsed, ok := strconv.parse_int(value, 10, &parsed_bytes)
+			if !ok || parsed_bytes != len(value) || parsed < int(min(i32)) || parsed > int(max(i32)) {
+				return Kitty_Frame{command = command}, .Malformed
+			}
+			command.parent_offset_x = parsed
+		case 'V':
+			if seen_parent_offset_y do return Kitty_Frame{command = command}, .Malformed
+			seen_parent_offset_y = true
+			parsed_bytes := 0
+			parsed, ok := strconv.parse_int(value, 10, &parsed_bytes)
+			if !ok || parsed_bytes != len(value) || parsed < int(min(i32)) || parsed > int(max(i32)) {
+				return Kitty_Frame{command = command}, .Malformed
+			}
+			command.parent_offset_y = parsed
 		case 'C':
 			if seen_cursor_policy do return Kitty_Frame{command = command}, .Malformed
 			seen_cursor_policy = true
@@ -463,6 +513,32 @@ kitty_parse_direct_frame :: proc(data: []byte) -> (Kitty_Frame, Kitty_Error) {
 		case .Z_Index:
 			if seen_id || seen_placement || seen_source_x || seen_source_y || !seen_z do return Kitty_Frame{command = command}, .Malformed
 		}
+	} else if command.action == .Frame {
+		if command.image_id == 0 || seen_placement || seen_virtual || seen_parent_image || seen_parent_placement ||
+		   seen_parent_offset_x || seen_parent_offset_y || seen_cursor_policy {
+			return Kitty_Frame{command = command}, .Malformed
+		}
+	} else if command.action == .Animate {
+		if command.image_id == 0 || len(payload) != 0 || seen_format || seen_data_size || seen_data_offset ||
+		   seen_medium || seen_compression || seen_more || seen_placement || seen_source_x || seen_source_y ||
+		   seen_source_width || seen_source_height || seen_destination_x || seen_destination_y ||
+		   seen_virtual || seen_parent_image || seen_parent_placement || seen_parent_offset_x || seen_parent_offset_y {
+			return Kitty_Frame{command = command}, .Malformed
+		}
+	} else if command.action == .Compose {
+		if command.image_id == 0 || len(payload) != 0 || !seen_columns || !seen_rows || seen_format ||
+		   seen_width || seen_height || seen_data_size || seen_data_offset || seen_medium || seen_compression ||
+		   seen_more || seen_placement || seen_z || seen_virtual || seen_parent_image || seen_parent_placement ||
+		   seen_parent_offset_x || seen_parent_offset_y {
+			return Kitty_Frame{command = command}, .Malformed
+		}
+	}
+	if seen_virtual && seen_parent_image do return Kitty_Frame{command = command}, .Malformed
+	if (seen_parent_placement || seen_parent_offset_x || seen_parent_offset_y) && !seen_parent_image {
+		return Kitty_Frame{command = command}, .Malformed
+	}
+	if seen_parent_image && command.action != .Display && command.action != .Transmit_And_Display {
+		return Kitty_Frame{command = command}, .Malformed
 	}
 	frame.command = command
 	frame.payload = payload
@@ -597,4 +673,299 @@ parse_kitty_uint :: proc(value: string) -> (u64, bool) {
 	parsed_bytes := 0
 	result, ok := strconv.parse_u64(value, 10, &parsed_bytes)
 	return result, ok && parsed_bytes == len(value)
+}
+
+kitty_normalized_gap :: proc(gap: i32) -> i32 {
+	if gap == 0 do return DEFAULT_FRAME_GAP_MS
+	if gap < 0 do return -1
+	return gap
+}
+
+kitty_frame_bytes :: proc(resource: ^Resource) -> int {
+	return resource.width*resource.height*bytes_per_pixel(resource.format)
+}
+
+kitty_fill_canvas :: proc(pixels: []byte, channels: int, background: u32) {
+	if background == 0 do return
+	red := byte(background >> 24)
+	green := byte(background >> 16)
+	blue := byte(background >> 8)
+	alpha := byte(background)
+	for offset := 0; offset+channels <= len(pixels); offset += channels {
+		pixels[offset] = red
+		pixels[offset+1] = green
+		pixels[offset+2] = blue
+		if channels == 4 do pixels[offset+3] = alpha
+	}
+}
+
+kitty_blend_frame_rect :: proc(
+	canvas: []byte,
+	canvas_stride, channels: int,
+	source: []byte,
+	source_stride: int,
+	x, y, width, height: int,
+	replace: bool,
+) {
+	for row in 0..<height {
+		destination_row := (y+row)*canvas_stride+x*channels
+		source_row := row*source_stride
+		for column in 0..<width {
+			destination := destination_row+column*channels
+			origin := source_row+column*channels
+			if replace || channels == 3 {
+				copy(canvas[destination:destination+channels], source[origin:origin+channels])
+				continue
+			}
+			alpha := int(source[origin+3])
+			if alpha == 255 {
+				copy(canvas[destination:destination+4], source[origin:origin+4])
+				continue
+			}
+			if alpha == 0 do continue
+			inverse := 255-alpha
+			for channel in 0..<3 {
+				canvas[destination+channel] = byte((int(source[origin+channel])*alpha+int(canvas[destination+channel])*inverse+127)/255)
+			}
+			canvas[destination+3] = byte(min(255, alpha+int(canvas[destination+3])*inverse/255))
+		}
+	}
+}
+
+kitty_add_frame :: proc(
+	registry: ^Registry,
+	resource: ^Resource,
+	command: Kitty_Command,
+	image: ^Decoded_Image,
+) -> Kitty_Error {
+	if resource == nil || image == nil || image.width <= 0 || image.height <= 0 do return .Invalid_Data
+	if image.format != resource.format do return .Invalid_Data
+	channels := bytes_per_pixel(resource.format)
+	if channels <= 0 || resource.width <= 0 || resource.height <= 0 do return .Invalid_Data
+	frame_size := kitty_frame_bytes(resource)
+	if frame_size <= 0 do return .Image_Limit
+	x := command.source_x
+	y := command.source_y
+	if x < 0 || y < 0 || x+image.width > resource.width || y+image.height > resource.height {
+		return .Invalid_Data
+	}
+	edit_index := -1
+	if command.rows > 0 {
+		edit_index = command.rows-1
+		if edit_index >= len(resource.frames) do return .Invalid_Data
+	}
+	base_index := -1
+	if edit_index < 0 && command.columns > 0 {
+		base_index = command.columns-1
+		if base_index >= len(resource.frames) do return .Invalid_Data
+	}
+	gap := kitty_normalized_gap(command.z)
+	if edit_index >= 0 {
+		frame := &resource.frames[edit_index]
+		kitty_blend_frame_rect(
+			frame.pixels,
+			resource.stride,
+			channels,
+			image.pixels,
+			image.stride,
+			x,
+			y,
+			image.width,
+			image.height,
+			command.destination_x == 1,
+		)
+		if command.z != 0 do frame.gap_ms = gap
+		if edit_index == resource.current_frame {
+			resource.pixels = frame.pixels
+			resource.version += 1
+		}
+		return .None
+	}
+	if len(resource.frames) >= MAX_KITTY_FRAMES do return .Image_Limit
+	if resource.frame_bytes+frame_size > MAX_CACHE_BYTES do return .Image_Limit
+	if registry != nil {
+		if registry.decoded_bytes+frame_size > registry.limits.cache_bytes ||
+		   registry.protocol_bytes[int(Protocol.Kitty)]+frame_size > protocol_budget(registry, .Kitty) {
+			return .Image_Limit
+		}
+		if registry.shared_cache != nil && registry.shared_cache.decoded_bytes+frame_size > registry.shared_cache.limit {
+			return .Image_Limit
+		}
+	}
+	pixels := make([]byte, frame_size)
+	if base_index >= 0 {
+		copy(pixels, resource.frames[base_index].pixels)
+	} else {
+		kitty_fill_canvas(pixels, channels, u32(command.destination_y))
+	}
+	kitty_blend_frame_rect(
+		pixels,
+		resource.stride,
+		channels,
+		image.pixels,
+		image.stride,
+		x,
+		y,
+		image.width,
+		image.height,
+		command.destination_x == 1,
+	)
+	append(&resource.frames, Frame{pixels = pixels, gap_ms = gap})
+	resource.frame_bytes += frame_size
+	if registry != nil {
+		registry.decoded_bytes += frame_size
+		registry.protocol_bytes[int(Protocol.Kitty)] += frame_size
+		if registry.shared_cache != nil do registry.shared_cache.decoded_bytes += frame_size
+	}
+	return .None
+}
+
+kitty_control_animation :: proc(resource: ^Resource, command: Kitty_Command) -> Kitty_Error {
+	if resource == nil || len(resource.frames) == 0 do return .Invalid_Data
+	if command.columns > 0 {
+		if !resource_set_frame(resource, command.columns-1) do return .Invalid_Data
+	}
+	if command.rows > 0 {
+		index := command.rows-1
+		if index >= len(resource.frames) do return .Invalid_Data
+		if command.z != 0 do resource.frames[index].gap_ms = kitty_normalized_gap(command.z)
+	}
+	if command.height > 0 {
+		if command.height == 1 {
+			resource.loops_remaining = -1
+		} else {
+			resource.loops_remaining = command.height-1
+		}
+	}
+	if command.width != 0 {
+		switch command.width {
+		case 1:
+			resource.animation = .Stopped
+			resource.loops_remaining = 0
+			resource.next_frame = {}
+		case 2:
+			resource.animation = .Loading
+			if command.height == 0 do resource.loops_remaining = -1
+			resource.next_frame = kitty_next_frame_time(resource, time.tick_now())
+		case 3:
+			resource.animation = .Running
+			if command.height == 0 do resource.loops_remaining = -1
+			resource.next_frame = kitty_next_frame_time(resource, time.tick_now())
+		case:
+			return .Invalid_Data
+		}
+	}
+	return .None
+}
+
+kitty_compose_frames :: proc(resource: ^Resource, command: Kitty_Command) -> Kitty_Error {
+	if resource == nil || len(resource.frames) == 0 do return .Invalid_Data
+	source_index := command.rows-1
+	destination_index := command.columns-1
+	if source_index < 0 || destination_index < 0 ||
+	   source_index >= len(resource.frames) || destination_index >= len(resource.frames) {
+		return .Invalid_Data
+	}
+	width := command.source_width
+	height := command.source_height
+	if width <= 0 do width = resource.width
+	if height <= 0 do height = resource.height
+	x := command.source_x
+	y := command.source_y
+	target_x := command.destination_x
+	target_y := command.destination_y
+	if x < 0 || y < 0 || target_x < 0 || target_y < 0 ||
+	   x+width > resource.width || y+height > resource.height ||
+	   target_x+width > resource.width || target_y+height > resource.height {
+		return .Invalid_Data
+	}
+	if source_index == destination_index && x < target_x+width && target_x < x+width &&
+	   y < target_y+height && target_y < y+height {
+		return .Invalid_Data
+	}
+	channels := bytes_per_pixel(resource.format)
+	source := resource.frames[source_index].pixels
+	destination := resource.frames[destination_index].pixels
+	for row in 0..<height {
+		source_offset := (y+row)*resource.stride+x*channels
+		destination_offset := (target_y+row)*resource.stride+target_x*channels
+		if command.no_cursor_move || channels == 3 {
+			copy(destination[destination_offset:destination_offset+width*channels], source[source_offset:source_offset+width*channels])
+			continue
+		}
+		for column in 0..<width {
+			origin := source_offset+column*channels
+			target := destination_offset+column*channels
+			alpha := int(source[origin+3])
+			if alpha == 255 {
+				copy(destination[target:target+4], source[origin:origin+4])
+				continue
+			}
+			if alpha == 0 do continue
+			inverse := 255-alpha
+			for channel in 0..<3 {
+				destination[target+channel] = byte((int(source[origin+channel])*alpha+int(destination[target+channel])*inverse+127)/255)
+			}
+			destination[target+3] = byte(min(255, alpha+int(destination[target+3])*inverse/255))
+		}
+	}
+	if destination_index == resource.current_frame {
+		resource.pixels = destination
+		resource.version += 1
+	}
+	return .None
+}
+
+kitty_frame_gap :: proc(resource: ^Resource, index: int) -> i32 {
+	if index < 0 || index >= len(resource.frames) do return DEFAULT_FRAME_GAP_MS
+	gap := resource.frames[index].gap_ms
+	if gap == 0 do return DEFAULT_FRAME_GAP_MS
+	return gap
+}
+
+kitty_next_frame_time :: proc(resource: ^Resource, now: time.Tick) -> time.Tick {
+	gap := kitty_frame_gap(resource, resource.current_frame)
+	if gap <= 0 do gap = DEFAULT_FRAME_GAP_MS
+	return time.tick_add(now, time.Duration(gap)*time.Millisecond)
+}
+
+kitty_animation_advance :: proc(resource: ^Resource, now: time.Tick) -> bool {
+	if resource == nil || (resource.animation != .Running && resource.animation != .Loading) || len(resource.frames) <= 1 do return false
+	if resource.next_frame == {} {
+		resource.next_frame = kitty_next_frame_time(resource, now)
+		return false
+	}
+	if time.tick_since(resource.next_frame) < 0 do return false
+	index := resource.current_frame
+	for step := 0; step < len(resource.frames); step += 1 {
+		next := index+1
+		if next >= len(resource.frames) {
+			if resource.animation == .Loading {
+				resource.next_frame = {}
+				return false
+			}
+			if resource.loops_remaining == 0 {
+				resource.animation = .Stopped
+				resource.next_frame = {}
+				return false
+			}
+			if resource.loops_remaining > 0 do resource.loops_remaining -= 1
+			next = 0
+		}
+		index = next
+		if kitty_frame_gap(resource, index) < 0 do continue
+		if !resource_set_frame(resource, index) do return false
+		resource.next_frame = kitty_next_frame_time(resource, now)
+		return true
+	}
+	resource.next_frame = kitty_next_frame_time(resource, now)
+	return false
+}
+
+kitty_animation_timeout_ms :: proc(resource: ^Resource, now: time.Tick) -> int {
+	if resource == nil || (resource.animation != .Running && resource.animation != .Loading) || len(resource.frames) <= 1 do return -1
+	if resource.next_frame == {} do return 1
+	remaining := -time.tick_since(resource.next_frame)
+	if remaining <= 0 do return 0
+	return max(1, int((remaining+time.Millisecond-time.Nanosecond)/time.Millisecond))
 }

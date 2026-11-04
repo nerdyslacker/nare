@@ -1,5 +1,7 @@
 package graphics
 
+import "core:time"
+
 MAX_IMAGE_DIMENSION :: 16_384
 MAX_IMAGE_PIXELS :: 16 * 1024 * 1024
 MAX_IMAGE_BYTES :: 64 * 1024 * 1024
@@ -10,6 +12,20 @@ MAX_ACTIVE_IMAGES :: 65_536
 MAX_ACTIVE_PLACEMENTS :: 262_144
 MAX_PLACEMENT_CELLS :: 65_535
 MAX_PLACEMENT_PIXELS :: MAX_PLACEMENT_CELLS*MAX_IMAGE_DIMENSION
+MAX_KITTY_FRAMES :: 1024
+DEFAULT_FRAME_GAP_MS :: 40
+MAX_RELATIVE_DEPTH :: 64
+
+Animation_State :: enum u8 {
+	Stopped,
+	Loading,
+	Running,
+}
+
+Frame :: struct {
+	pixels: []byte,
+	gap_ms: i32,
+}
 
 Pixel_Format :: enum u8 {
 	RGB8,
@@ -47,6 +63,10 @@ Error :: enum {
 	Duplicate_Protocol_ID,
 	Unknown_Image,
 	Invalid_Placement,
+	Unknown_Parent,
+	Parent_Cycle,
+	Parent_Too_Deep,
+	Frame_Limit,
 	Active_Limit,
 	ID_Exhausted,
 }
@@ -80,6 +100,13 @@ Resource :: struct {
 	stride: int,
 	format: Pixel_Format,
 	pixels: []byte,
+	frames: [dynamic]Frame,
+	current_frame: int,
+	animation: Animation_State,
+	next_frame: time.Tick,
+	loops_remaining: int,
+	frame_bytes: int,
+	version: u64,
 	placement_count: int,
 	last_used: u64,
 }
@@ -96,6 +123,9 @@ Placement_Request :: struct {
 	source_width, source_height: int,
 	z: i32,
 	preserve_aspect: bool,
+	virtual: bool,
+	parent_placement_id: u64,
+	relative_row, relative_column: int,
 }
 
 Placement :: struct {
@@ -111,6 +141,9 @@ Placement :: struct {
 	source_width, source_height: int,
 	z: i32,
 	preserve_aspect: bool,
+	virtual: bool,
+	parent_placement_id: u64,
+	relative_row, relative_column: int,
 }
 
 Registry :: struct {
@@ -239,7 +272,7 @@ registry_init_with_limits :: proc(registry: ^Registry, limits: Limits) -> Error 
 
 registry_destroy :: proc(registry: ^Registry) {
 	registry_detach_shared_cache(registry)
-	for &resource in registry.resources do delete(resource.pixels)
+	for &resource in registry.resources do resource_destroy_pixels(&resource)
 	delete(registry.resources)
 	delete(registry.placements)
 	registry^ = {}
@@ -285,7 +318,7 @@ add_image :: proc(
 	id := registry.next_resource_id
 	registry.next_resource_id += 1
 	last_used := registry_tick(registry)
-	append(&registry.resources, Resource{
+	resource := Resource{
 		id = id,
 		protocol = protocol,
 		protocol_id = protocol_id,
@@ -294,8 +327,11 @@ add_image :: proc(
 		stride = image.stride,
 		format = image.format,
 		pixels = image.pixels,
+		version = 1,
 		last_used = last_used,
-	})
+	}
+	append(&resource.frames, Frame{pixels = image.pixels})
+	append(&registry.resources, resource)
 	registry.decoded_bytes += byte_count
 	registry.protocol_bytes[protocol_index] += byte_count
 	if registry.shared_cache != nil do registry.shared_cache.decoded_bytes += byte_count
@@ -323,6 +359,28 @@ add_placement :: proc(registry: ^Registry, request: Placement_Request) -> (u64, 
 	   source_height <= 0 || source_height > resource.height-request.source_y {
 		return 0, .Invalid_Placement
 	}
+	if request.virtual && request.parent_placement_id != 0 do return 0, .Invalid_Placement
+	replace_id: u64
+	if request.protocol_id != 0 {
+		for &existing in registry.placements {
+			if existing.image_id == request.image_id && existing.protocol_id == request.protocol_id {
+				replace_id = existing.id
+				break
+			}
+		}
+	}
+	if request.parent_placement_id != 0 {
+		parent := find_placement(registry, request.parent_placement_id)
+		if parent == nil do return 0, .Unknown_Parent
+		if parent.id == replace_id do return 0, .Parent_Cycle
+		depth := 0
+		for parent != nil && parent.parent_placement_id != 0 {
+			if parent.id == replace_id do return 0, .Parent_Cycle
+			depth += 1
+			if depth >= MAX_RELATIVE_DEPTH do return 0, .Parent_Too_Deep
+			parent = find_placement(registry, parent.parent_placement_id)
+		}
+	}
 
 	placement := Placement{
 		image_id = request.image_id,
@@ -342,12 +400,15 @@ add_placement :: proc(registry: ^Registry, request: Placement_Request) -> (u64, 
 		source_height = source_height,
 		z = request.z,
 		preserve_aspect = request.preserve_aspect,
+		virtual = request.virtual,
+		parent_placement_id = request.parent_placement_id,
+		relative_row = request.relative_row,
+		relative_column = request.relative_column,
 	}
-	if request.protocol_id != 0 {
-		for &existing in registry.placements {
-			if existing.image_id != request.image_id || existing.protocol_id != request.protocol_id do continue
+	if replace_id != 0 {
+		if existing := find_placement(registry, replace_id); existing != nil {
 			placement.id = existing.id
-			existing = placement
+			existing^ = placement
 			touch(registry, resource)
 			registry.generation += 1
 			return placement.id, .None
@@ -385,6 +446,51 @@ find_placement :: proc(registry: ^Registry, id: u64) -> ^Placement {
 		if placement.id == id do return &placement
 	}
 	return nil
+}
+
+find_protocol_placement :: proc(registry: ^Registry, image_id: u64, protocol_id: u32) -> ^Placement {
+	for &placement in registry.placements {
+		if placement.image_id != image_id do continue
+		if protocol_id == 0 || placement.protocol_id == protocol_id do return &placement
+	}
+	return nil
+}
+
+resource_frame_pixels :: proc(resource: ^Resource) -> []byte {
+	if resource == nil do return nil
+	if resource.current_frame >= 0 && resource.current_frame < len(resource.frames) {
+		return resource.frames[resource.current_frame].pixels
+	}
+	return resource.pixels
+}
+
+resource_total_bytes :: proc(resource: ^Resource) -> int {
+	if resource == nil do return 0
+	if len(resource.frames) > 0 do return len(resource.frames[0].pixels)+resource.frame_bytes
+	return len(resource.pixels)
+}
+
+resource_set_frame :: proc(resource: ^Resource, index: int) -> bool {
+	if resource == nil || index < 0 || index >= len(resource.frames) do return false
+	if resource.current_frame == index do return true
+	resource.current_frame = index
+	resource.pixels = resource.frames[index].pixels
+	resource.version += 1
+	return true
+}
+
+resource_destroy_pixels :: proc(resource: ^Resource) {
+	if resource == nil do return
+	if len(resource.frames) > 0 {
+		for &frame in resource.frames do delete(frame.pixels)
+		delete(resource.frames)
+		resource.frames = nil
+	} else {
+		delete(resource.pixels)
+	}
+	resource.pixels = nil
+	resource.current_frame = 0
+	resource.frame_bytes = 0
 }
 
 remove_placement :: proc(registry: ^Registry, id: u64) -> bool {
@@ -432,7 +538,7 @@ delete_visible_placements :: proc(registry: ^Registry, screen: Screen, top, bott
 		affected := false
 		for placement_index := len(registry.placements)-1; placement_index >= 0; placement_index -= 1 {
 			placement := registry.placements[placement_index]
-			if placement.image_id == resource_id && placement.screen == screen &&
+			if placement.image_id == resource_id && placement.screen == screen && !placement.virtual &&
 			   placement.row <= bottom && placement.row+placement.rows > top {
 				remove_placement_at(registry, placement_index)
 				affected = true
@@ -457,7 +563,7 @@ delete_matching_placements :: proc(
 		affected := false
 		for placement_index := len(registry.placements)-1; placement_index >= 0; placement_index -= 1 {
 			placement := registry.placements[placement_index]
-			if placement.image_id != resource_id || placement.screen != screen do continue
+			if placement.image_id != resource_id || placement.screen != screen || placement.virtual do continue
 			matches := false
 			switch target {
 			case .Cell, .Cell_Z:
@@ -508,7 +614,7 @@ clear_screen :: proc(registry: ^Registry, screen: Screen) {
 registry_clear :: proc(registry: ^Registry) {
 	had_placements := len(registry.placements) > 0
 	if registry.shared_cache != nil do registry.shared_cache.decoded_bytes = max(0, registry.shared_cache.decoded_bytes-registry.decoded_bytes)
-	for &resource in registry.resources do delete(resource.pixels)
+	for &resource in registry.resources do resource_destroy_pixels(&resource)
 	delete(registry.resources)
 	delete(registry.placements)
 	registry.resources = nil
@@ -529,7 +635,7 @@ trim_history :: proc(registry: ^Registry, screen: Screen, history_rows: int) {
 	oldest_row := -max(0, history_rows)
 	for index := len(registry.placements)-1; index >= 0; index -= 1 {
 		placement := registry.placements[index]
-		if placement.screen == screen && placement.row+placement.rows <= oldest_row {
+		if !placement.virtual && placement.screen == screen && placement.row+placement.rows <= oldest_row {
 			remove_placement_at(registry, index)
 		}
 	}
@@ -544,6 +650,7 @@ scroll_up :: proc(
 	changed := false
 	for index := len(registry.placements)-1; index >= 0; index -= 1 {
 		placement := &registry.placements[index]
+		if placement.virtual do continue
 		entirely_inside := placement.row >= top && placement.row+placement.rows-1 <= bottom
 		in_full_viewport := full_viewport && placement.row <= bottom && placement.row+placement.rows > top
 		in_history := retain_history && placement.row < top
@@ -564,6 +671,7 @@ scroll_down :: proc(registry: ^Registry, screen: Screen, top, bottom: int, full_
 	changed := false
 	for index := len(registry.placements)-1; index >= 0; index -= 1 {
 		placement := &registry.placements[index]
+		if placement.virtual do continue
 		entirely_inside := placement.row >= top && placement.row+placement.rows-1 <= bottom
 		in_full_viewport := full_viewport && placement.row <= bottom && placement.row+placement.rows > top
 		if placement.screen != screen || (!entirely_inside && !in_full_viewport) do continue
@@ -606,7 +714,7 @@ clip_placement_bottom :: proc(placement: ^Placement, cells: int) {
 clear_visible :: proc(registry: ^Registry, screen: Screen, top, bottom: int) {
 	for index := len(registry.placements)-1; index >= 0; index -= 1 {
 		placement := registry.placements[index]
-		if placement.screen == screen && placement.row <= bottom && placement.row+placement.rows > top {
+		if !placement.virtual && placement.screen == screen && placement.row <= bottom && placement.row+placement.rows > top {
 			remove_placement_at(registry, index)
 		}
 	}
@@ -741,10 +849,25 @@ evict_oldest :: proc(registry: ^Registry, protocol: Protocol) -> bool {
 }
 
 remove_placement_at :: proc(registry: ^Registry, index: int) {
-	image_id := registry.placements[index].image_id
+	if index < 0 || index >= len(registry.placements) do return
+	id := registry.placements[index].id
+	for child_index := len(registry.placements)-1; child_index >= 0; child_index -= 1 {
+		if registry.placements[child_index].parent_placement_id == id {
+			remove_placement_at(registry, child_index)
+		}
+	}
+	position := -1
+	for placement, placement_index in registry.placements {
+		if placement.id == id {
+			position = placement_index
+			break
+		}
+	}
+	if position < 0 do return
+	image_id := registry.placements[position].image_id
 	resource := find_image(registry, image_id)
 	if resource != nil do resource.placement_count = max(0, resource.placement_count-1)
-	ordered_remove(&registry.placements, index)
+	ordered_remove(&registry.placements, position)
 	if len(registry.placements) == 0 {
 		delete(registry.placements)
 		registry.placements = nil
@@ -757,20 +880,17 @@ delete_resource_at :: proc(registry: ^Registry, index: int) {
 	had_placements := false
 	for placement_index := len(registry.placements)-1; placement_index >= 0; placement_index -= 1 {
 		if registry.placements[placement_index].image_id == id {
-			ordered_remove(&registry.placements, placement_index)
+			remove_placement_at(registry, placement_index)
 			had_placements = true
 		}
 	}
-	if len(registry.placements) == 0 {
-		delete(registry.placements)
-		registry.placements = nil
-	}
-	registry.decoded_bytes -= len(registry.resources[index].pixels)
-	registry.protocol_bytes[int(registry.resources[index].protocol)] -= len(registry.resources[index].pixels)
+	byte_count := resource_total_bytes(&registry.resources[index])
+	registry.decoded_bytes -= byte_count
+	registry.protocol_bytes[int(registry.resources[index].protocol)] -= byte_count
 	if registry.shared_cache != nil {
-		registry.shared_cache.decoded_bytes = max(0, registry.shared_cache.decoded_bytes-len(registry.resources[index].pixels))
+		registry.shared_cache.decoded_bytes = max(0, registry.shared_cache.decoded_bytes-byte_count)
 	}
-	delete(registry.resources[index].pixels)
+	resource_destroy_pixels(&registry.resources[index])
 	ordered_remove(&registry.resources, index)
 	if len(registry.resources) == 0 {
 		delete(registry.resources)

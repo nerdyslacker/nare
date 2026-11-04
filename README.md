@@ -22,11 +22,12 @@
 
 - Nare parses VT/ANSI sequences, Unicode, true color, alternate screens, synchronized updates, mouse input, focus events, and bracketed paste.
 - Fontconfig, FreeType, and HarfBuzz provide fallback fonts, wide and combining characters, color glyphs, and ligatures.
-- The OpenGL renderer falls back to the CPU renderer after initialization or drawing errors. `nare-lite` provides a CPU-only build.
+- Styled underlines support single, double, curly, dotted, and dashed forms with independent SGR 58 colors. Oversized Nerd Font icons scale into cell bounds, and Powerline separators fill the cell without gaps.
+- OpenGL is the default GPU renderer. Vulkan is an alternative backend selected with `[gpu] backend = auto|opengl|vulkan` or `--gpu-backend=...`. Both fall back to the CPU renderer after initialization or drawing errors, and `nare-lite` provides a CPU-only build.
 - Native tabs support resizable split and stacked panes, font zoom, named command rules, close confirmation, and root-session warnings.
 - Bounded scrollback reflows after resize and supports search, prompt navigation, wheel scrolling, and a draggable scrollbar.
 - Nare handles X11 PRIMARY and CLIPBOARD, OSC 8 links, URL hints, command-output copy, and output pipes.
-- Kitty direct graphics, Sixel, and iTerm2 inline images share bounded CPU and GPU image paths.
+- Kitty graphics support direct image transmission, display, z layers, crops, parent-relative placements, Unicode placeholder images, and frame animation. Sixel and iTerm2 inline images share bounded CPU and GPU image paths.
 - tmux control mode maps tmux windows and panes to native Nare views across local or SSH sessions.
 - The status bar can show shell metadata, jobs, system resources, Git state, and zoom. Server and Quake modes remain optional.
 
@@ -40,7 +41,8 @@
 | libX11, libXext, libXrandr | Windows, input, selections, and monitor geometry | Yes |
 | Fontconfig, FreeType, HarfBuzz | Font discovery, rasterization, and shaping | Yes |
 | zlib | Kitty raw-pixel and PNG decompression | Yes |
-| OpenGL and GLX | GPU renderer in `nare` | Full build only |
+| OpenGL and GLX | Default GPU renderer in `nare` | Full build only |
+| Vulkan (`libvulkan.so.1`) | Alternative GPU backend in `nare`, loaded at runtime | Optional, full build only |
 | `tic` from ncurses | Bundled `nare` terminfo entry | Install only |
 | tmux | Native control-mode integration | Optional |
 | `xdg-open` and Git | URL opening and complete status-bar Git data | Optional |
@@ -118,7 +120,7 @@ Use Odin `dev-2026-10` and place `odin` in `PATH`. A usable font must exist on t
 
 ### Build
 
-`make` builds a development `nare` binary with OpenGL support. The release target builds optimized GPU and CPU-only binaries.
+`make` builds a development `nare` binary with OpenGL and Vulkan GPU support. The release target builds optimized GPU and CPU-only binaries.
 
 ```sh
 make
