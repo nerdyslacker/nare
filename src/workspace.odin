@@ -1505,7 +1505,7 @@ workspace_event :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
 				previous_offset := pane.scrollback_state.offset
 				features.scrollback_scroll(&pane.scrollback_state, vt.terminal_screen(&pane.terminal), direction)
 				if pane.scrollback_state.offset != previous_offset {
-					selection.clear(&pane.selection_state)
+					selection.scroll(&pane.selection_state, pane.scrollback_state.offset-previous_offset)
 					workspace.scroll_redraw_source = pane.surface.id
 				}
 			}

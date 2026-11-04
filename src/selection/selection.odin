@@ -29,6 +29,12 @@ finish :: proc(state: ^State, screen: ^vt.Screen, position: vt.Cursor) {
 	state.dragging = false
 }
 
+scroll :: proc(state: ^State, rows: int) {
+	if !state.active && !state.dragging do return
+	state.anchor.row += rows
+	state.focus.row += rows
+}
+
 clear :: proc(state: ^State) {
 	state^ = {}
 }
