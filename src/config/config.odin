@@ -418,7 +418,10 @@ default_path :: proc() -> string {
 
 load :: proc(settings: ^Settings, path: string, missing_ok: bool = false) -> Result {
 	resolved, path_error := os.get_absolute_path(path, context.allocator)
-	if path_error != nil do return {error = .File}
+	if path_error != nil {
+		if missing_ok && path_error == .Not_Exist do return validate(settings, 0)
+		return {error = .File}
+	}
 	defer delete(resolved)
 	stack: [dynamic]string
 	defer delete(stack)
