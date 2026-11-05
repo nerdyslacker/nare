@@ -103,6 +103,10 @@ cpu_render :: proc(
 	for dirty, row in cpu.dirty_rows {
 		if dirty do render_row(cpu, font, window, terminal, screen, row, ligatures, selection_state, scrollbar)
 	}
+	remainder_y := min(screen.rows*window.cell_h, cpu.height)
+	if remainder_y < cpu.height {
+		fill_rect(cpu, window, 0, remainder_y, cpu.width, cpu.height-remainder_y, terminal_color({}, false, terminal))
+	}
 	return true
 }
 
@@ -195,7 +199,7 @@ selection_row_affected :: proc(state: ^selection.State, row: int) -> bool {
 	return row >= first.row && row <= last.row
 }
 
-cpu_present :: proc(cpu: ^CPU, window: ^x11.Window, columns: int) {
+cpu_present :: proc(cpu: ^CPU, window: ^x11.Window, rows: int) {
 	for dirty, row in cpu.dirty_rows {
 		if !dirty do continue
 		y := row * window.cell_h
@@ -212,6 +216,13 @@ cpu_present :: proc(cpu: ^CPU, window: ^x11.Window, columns: int) {
 			i32(y),
 			u32(cpu.width),
 			u32(height),
+		)
+	}
+	remainder_y := min(rows*window.cell_h, cpu.height)
+	if remainder_y < cpu.height {
+		xlib.PutImage(
+			window.display, xlib.Drawable(window.id), window.gc, cpu.image,
+			0, i32(remainder_y), 0, i32(remainder_y), u32(cpu.width), u32(cpu.height-remainder_y),
 		)
 	}
 	_ = xlib.Flush(window.display)
@@ -251,7 +262,7 @@ cpu_draw :: proc(
 	if !cpu_render(cpu, font, window, terminal, ligatures, force, selection_state, screen_override, scrollbar) do return
 	screen := screen_override
 	if screen == nil do screen = vt.terminal_screen(terminal)
-	cpu_present(cpu, window, screen.columns)
+	cpu_present(cpu, window, screen.rows)
 }
 
 render_row :: proc(

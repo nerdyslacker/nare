@@ -14,7 +14,7 @@ NARELITEDIR := $(SYSCONFDIR)/nare-lite
 
 APP := $(BUILD_DIR)/nare
 APP_LITE := $(BUILD_DIR)/nare-lite
-ODIN_FLAGS := -vet -strict-style
+ODIN_FLAGS := -vet -strict-style -define:DEFAULT_TEMP_ALLOCATOR_BACKING_SIZE=524288
 
 .PHONY: build build-lite release check run install uninstall clean
 

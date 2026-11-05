@@ -293,7 +293,7 @@ draw :: proc(
 		_ = cpu_render(&renderer.cpu, renderer.font, window, terminal, renderer.ligatures, true, selection_state, screen_override, scrollbar)
 		screen := screen_override
 		if screen == nil do screen = vt.terminal_screen(terminal)
-		cpu_present(&renderer.cpu, window, screen.columns)
+		cpu_present(&renderer.cpu, window, screen.rows)
 	}
 }
 
