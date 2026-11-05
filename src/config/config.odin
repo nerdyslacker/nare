@@ -94,7 +94,7 @@ Bindings :: struct {
 	copy, paste, font_increase, font_decrease, font_reset: string,
 	tmux_new_tab, tmux_new_window, tmux_attach_last: string,
 	tmux_detach, tmux_reconnect: string,
-	toggle_statusbar, show_jobs, reload_config: string,
+	toggle_statusbar, show_jobs, reload_config, open_config: string,
 }
 
 Statusbar_Jobs_Settings :: struct {
@@ -212,6 +212,7 @@ Settings :: struct {
 	cell_width_percent: int,
 	cell_height_percent: int,
 	title: string,
+	editor: string,
 	url_opener: string,
 	shell_output_pipe: string,
 	startup_command: string,
@@ -253,6 +254,7 @@ settings_init :: proc(settings: ^Settings) {
 	settings.cell_width_percent = 100
 	settings.cell_height_percent = 100
 	settings.title = strings.clone("nare")
+	settings.editor = strings.clone("")
 	settings.url_opener = strings.clone("xdg-open")
 	settings.shell_output_pipe = strings.clone("")
 	settings.startup_command = strings.clone("")
@@ -327,6 +329,7 @@ settings_init :: proc(settings: ^Settings) {
 		toggle_statusbar = strings.clone("alt+shift+b"),
 		show_jobs = strings.clone("alt+shift+j"),
 		reload_config = strings.clone("alt+shift+r"),
+		open_config = strings.clone("alt+shift+e"),
 	}
 	settings.statusbar = {
 		position = .Bottom, height = 24, separator = strings.clone(" | "), show_in_quake = true, border = true,
@@ -368,6 +371,7 @@ settings_destroy :: proc(settings: ^Settings) {
 	delete(settings.italic_font)
 	delete(settings.bold_italic_font)
 	delete(settings.title)
+	delete(settings.editor)
 	delete(settings.url_opener)
 	delete(settings.shell_output_pipe)
 	delete(settings.startup_command)
@@ -618,6 +622,10 @@ apply :: proc(settings: ^Settings, section, key, value: string) -> Error {
 		case "title":
 			if value == "" do return .Invalid_Value
 			replace_string(&settings.title, value)
+		case "editor":
+			parsed, ok := parse_string(value)
+			if !ok || len(parsed) > MAX_STARTUP_COMMAND_BYTES || !valid_command_line(parsed) do return .Invalid_Value
+			replace_string(&settings.editor, parsed)
 		case: return .Unknown_Key
 		}
 	} else if section == "scrollback" {
@@ -866,6 +874,7 @@ apply :: proc(settings: ^Settings, section, key, value: string) -> Error {
 		case "toggle-statusbar": replace_string(&settings.bindings.toggle_statusbar, value)
 		case "show-jobs": replace_string(&settings.bindings.show_jobs, value)
 		case "reload-config": replace_string(&settings.bindings.reload_config, value)
+		case "open-config": replace_string(&settings.bindings.open_config, value)
 		case:
 			if strings.has_prefix(key, "tmux-profile.") {
 				name := key[len("tmux-profile."):]
@@ -1201,7 +1210,7 @@ destroy_bindings :: proc(bindings: ^Bindings) {
 	delete(bindings.copy); delete(bindings.paste); delete(bindings.font_increase); delete(bindings.font_decrease); delete(bindings.font_reset)
 	delete(bindings.tmux_new_tab); delete(bindings.tmux_new_window); delete(bindings.tmux_attach_last)
 	delete(bindings.tmux_detach); delete(bindings.tmux_reconnect)
-	delete(bindings.toggle_statusbar); delete(bindings.show_jobs); delete(bindings.reload_config)
+	delete(bindings.toggle_statusbar); delete(bindings.show_jobs); delete(bindings.reload_config); delete(bindings.open_config)
 	bindings^ = {}
 }
 
@@ -1348,7 +1357,7 @@ shortcut_conflicts :: proc(settings: ^Settings, chord, rule_name: string) -> boo
 	   chord == b.copy || chord == b.paste || chord == b.font_increase || chord == b.font_decrease || chord == b.font_reset ||
 	   chord == b.tmux_new_tab || chord == b.tmux_new_window || chord == b.tmux_attach_last ||
 	   chord == b.tmux_detach || chord == b.tmux_reconnect || chord == b.toggle_statusbar || chord == b.show_jobs ||
-	   chord == b.reload_config {
+	   chord == b.reload_config || chord == b.open_config {
 		return true
 	}
 	for binding in settings.tmux_profile_bindings do if binding.chord == chord do return true

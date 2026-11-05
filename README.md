@@ -149,7 +149,7 @@ The `themes/` directory contains Catppuccin Mocha and Latte. Include a theme bef
 
 `nare-lite` keeps an independent profile under `$XDG_CONFIG_HOME/nare-lite/nare.conf`, or `~/.config/nare-lite/nare.conf`.
 
-Press `Alt+Shift+R` to reload the file. Nare keeps the current settings after a parse error. Set `[shell] startup-command=/usr/bin/fish --login` to replace `$SHELL` for local tabs and panes.
+Press `Alt+Shift+R` to reload the file. Nare keeps the current settings after a parse error. `Alt+Shift+E` opens it in a new tab using `[main] editor`, `$VISUAL`, `$EDITOR`, or `vi`, in that order. Both shortcuts are configurable as `reload-config` and `open-config` under `[bindings]`. Set `[shell] startup-command=/usr/bin/fish --login` to replace `$SHELL` for local tabs and panes.
 
 Middle-click a pane to split it horizontally, or hold `Alt` while middle-clicking to split it vertically. Drag a divider with the left mouse button to resize local panes. `Alt+Shift+H/J/K/L` resizes the active local or tmux pane; the four directional bindings are configurable.
 

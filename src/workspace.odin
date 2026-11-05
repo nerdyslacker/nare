@@ -933,6 +933,29 @@ workspace_new_tab_command :: proc(workspace: ^Workspace, command: []cstring, tmu
 	return workspace_append_new_tab(workspace, pane)
 }
 
+workspace_open_config :: proc(workspace: ^Workspace) -> bool {
+	if workspace == nil || workspace.settings == nil || workspace.settings.config_path == "" do return false
+	editor := workspace.settings.editor
+	if editor == "" do editor = os.get_env("VISUAL", context.temp_allocator)
+	if editor == "" do editor = os.get_env("EDITOR", context.temp_allocator)
+	if editor == "" do editor = "vi"
+	command: [dynamic]cstring
+	defer command_destroy(&command)
+	if !append_command_line(&command, editor) do return false
+	path := workspace.settings.config_path
+	if !os.is_absolute_path(path) {
+		if absolute, path_error := os.get_absolute_path(path, context.temp_allocator); path_error == nil do path = absolute
+	}
+	directory, _ := os.split_path(path)
+	if directory != "" {
+		if directory_error := os.make_directory_all(directory); directory_error != nil && directory_error != .Exist do return false
+	}
+	append_command_argument(&command, path)
+	append(&command, nil)
+	pane := workspace_new_pane_command(workspace, command[:], directory, false)
+	return workspace_append_new_tab(workspace, pane)
+}
+
 workspace_append_new_tab :: proc(workspace: ^Workspace, pane: ^Pane) -> bool {
 	if pane == nil do return false
 	tab := new(Tab)
@@ -2000,6 +2023,10 @@ workspace_shortcut :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
 	bindings := &workspace.settings.bindings
 	if event_matches(event, bindings.reload_config) {
 		_ = workspace_reload_config(workspace)
+		return true
+	}
+	if event_matches(event, bindings.open_config) {
+		if !workspace_open_config(workspace) do x11.set_title(workspace.root, "nare - could not open config")
 		return true
 	}
 	if event_matches(event, bindings.toggle_statusbar) {
