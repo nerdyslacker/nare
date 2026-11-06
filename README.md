@@ -27,7 +27,7 @@
 - Native tabs support resizable split and stacked panes, font zoom, named command rules, close confirmation, and root-session warnings.
 - Bounded scrollback reflows after resize and supports search, prompt navigation, wheel scrolling, and a draggable scrollbar.
 - Nare handles X11 PRIMARY and CLIPBOARD, OSC 8 links, URL hints, command-output copy, and output pipes.
-- Kitty graphics support direct image transmission, display, z layers, crops, parent-relative placements, Unicode placeholder images, and frame animation. Sixel and iTerm2 inline images share bounded CPU and GPU image paths.
+- Kitty graphics support direct, file, temporary-file, and POSIX shared-memory transmission, plus display, z layers, crops, parent-relative placements, Unicode placeholder images, and frame animation. Sixel and iTerm2 inline images share bounded CPU and GPU image paths.
 - tmux control mode maps tmux windows and panes to native Nare views across local or SSH sessions.
 - The status bar can show shell metadata, jobs, system resources, Git state, and zoom. Server and Quake modes remain optional.
 
@@ -376,6 +376,6 @@ alt + grave
 
 Nare treats terminal output as untrusted input. Parsers cap control strings, replies, clipboard transfers, scrollback, decoded images, image placements, and GPU textures. Oversized or malformed data produces a bounded failure path.
 
-OSC 52 clipboard access starts disabled. Enable copy, paste, or both under `[security]`. Kitty accepts direct image data and rejects file, temporary-file, and shared-memory transports so terminal output cannot ask Nare to read local files.
+OSC 52 clipboard access starts disabled. Enable copy, paste, or both under `[security]`. Kitty file transports accept only bounded, user-owned regular files outside sensitive virtual filesystems. Temporary files must be under a known temporary directory and contain `tty-graphics-protocol` in their path; temporary files and POSIX shared-memory objects are unlinked after opening.
 
 Nare invokes URL openers and output-pipe programs without shell interpolation. Server and Quake sockets verify peer credentials from the same user.

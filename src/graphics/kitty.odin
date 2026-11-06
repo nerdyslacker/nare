@@ -1,8 +1,11 @@
 package graphics
 
+import "core:c"
 import base64 "core:encoding/base64"
+import "core:os"
 import "core:strconv"
 import "core:strings"
+import "core:sys/posix"
 import "core:time"
 import zlib "vendor:zlib"
 
@@ -12,6 +15,7 @@ MAX_KITTY_COMPRESSED_BYTES :: MAX_IMAGE_BYTES+(MAX_IMAGE_BYTES>>12)+(MAX_IMAGE_B
 MAX_KITTY_ENCODED_BYTES :: ((MAX_KITTY_COMPRESSED_BYTES+2)/3)*4
 MAX_KITTY_CHUNKS :: 32_768
 MAX_KITTY_CHUNK_BYTES :: 128 * 1024
+MAX_KITTY_REFERENCE_BYTES :: 4096
 KITTY_TRANSFER_TIMEOUT :: 10*time.Second
 
 Kitty_Action :: enum {
@@ -32,6 +36,7 @@ Kitty_Error :: enum {
 	Unsupported,
 	Invalid_Data,
 	Image_Limit,
+	File_Access,
 }
 
 Kitty_Medium :: enum { Direct, File, Temporary_File, Shared_Memory }
@@ -166,7 +171,11 @@ kitty_receive_direct :: proc(
 	if command.action == .Display || command.action == .Delete || command.action == .Animate || command.action == .Compose {
 		return command, {}, true, .None
 	}
-	if command.medium != .Direct do return command, {}, true, .Unsupported
+	if command.medium != .Direct {
+		if command.more do return command, {}, true, .Malformed
+		image, err = kitty_decode_external(command, frame.payload, limits)
+		return command, image, true, err
+	}
 	encoded_limit, limit_error := kitty_encoded_limit(command, limits)
 	if limit_error != .None do return command, {}, true, limit_error
 	if command.more {
@@ -589,6 +598,120 @@ kitty_decode_payload :: proc(command: Kitty_Command, payload: []byte, limits: ^L
 		return {}, .Invalid_Data
 	}
 	return kitty_decode_bytes(command, decoded, limits)
+}
+
+kitty_decode_external :: proc(command: Kitty_Command, payload: []byte, limits: ^Limits = nil) -> (Decoded_Image, Kitty_Error) {
+	if len(payload) == 0 || len(payload) > ((MAX_KITTY_REFERENCE_BYTES+2)/3)*4 do return {}, .Invalid_Data
+	decode_options: base64.Decode_Options = {.Strict}
+	if len(payload)%4 != 0 do decode_options += {.No_Padding}
+	reference, decode_error := base64.decode(string(payload), options = decode_options)
+	if decode_error != nil do return {}, .Invalid_Data
+	defer delete(reference)
+	if len(reference) == 0 || len(reference) > MAX_KITTY_REFERENCE_BYTES || strings.index_byte(string(reference), 0) >= 0 {
+		return {}, .Invalid_Data
+	}
+
+	input_limit, limit_error := kitty_input_limit(command, limits)
+	if limit_error != .None do return {}, limit_error
+	if command.data_size > input_limit do return {}, .Image_Limit
+
+	fd, open_error := kitty_open_external(command.medium, string(reference))
+	if open_error != .None do return {}, open_error
+	defer posix.close(fd)
+
+	status: posix.stat_t
+	if posix.fstat(fd, &status) != .OK || !posix.S_ISREG(status.st_mode) || status.st_uid != posix.getuid() {
+		return {}, .File_Access
+	}
+	file_size := i64(status.st_size)
+	if command.data_offset < 0 || file_size < command.data_offset do return {}, .File_Access
+	available := file_size-command.data_offset
+	read_size := available
+	if command.data_size > 0 do read_size = i64(command.data_size)
+	if read_size <= 0 || read_size > i64(input_limit) || read_size > available do return {}, .File_Access
+
+	data := make([]byte, int(read_size))
+	offset: int = 0
+	for offset < len(data) {
+		remaining := len(data)-offset
+		read := posix.pread(
+			fd,
+			raw_data(data[offset:]),
+			c.size_t(remaining),
+			posix.off_t(command.data_offset+i64(offset)),
+		)
+		if read <= 0 {
+			delete(data)
+			return {}, .File_Access
+		}
+		offset += int(read)
+	}
+	return kitty_decode_bytes(command, data, limits)
+}
+
+kitty_open_external :: proc(medium: Kitty_Medium, reference: string) -> (posix.FD, Kitty_Error) {
+	if medium == .Shared_Memory {
+		if !kitty_valid_shm_name(reference) do return -1, .File_Access
+		name, name_error := strings.clone_to_cstring(reference, context.temp_allocator)
+		if name_error != nil do return -1, .File_Access
+		fd := posix.shm_open(name, {.CLOEXEC}, {})
+		if fd < 0 do return -1, .File_Access
+		status: posix.stat_t
+		if posix.fstat(fd, &status) != .OK || !posix.S_ISREG(status.st_mode) || status.st_uid != posix.getuid() ||
+		   posix.shm_unlink(name) != .OK {
+			posix.close(fd)
+			return -1, .File_Access
+		}
+		return fd, .None
+	}
+
+	if reference[0] != '/' || kitty_sensitive_path(reference) do return -1, .File_Access
+	if medium == .Temporary_File && !kitty_temporary_path(reference) do return -1, .File_Access
+	path, path_error := strings.clone_to_cstring(reference, context.temp_allocator)
+	if path_error != nil do return -1, .File_Access
+	resolved := posix.realpath(path)
+	if resolved == nil do return -1, .File_Access
+	defer posix.free(resolved)
+	resolved_path := string(resolved)
+	if kitty_sensitive_path(resolved_path) || medium == .Temporary_File && !kitty_temporary_path(resolved_path) {
+		return -1, .File_Access
+	}
+	fd := posix.open(resolved, {.CLOEXEC, .NOFOLLOW, .NONBLOCK})
+	if fd < 0 do return -1, .File_Access
+	status: posix.stat_t
+	if posix.fstat(fd, &status) != .OK || !posix.S_ISREG(status.st_mode) || status.st_uid != posix.getuid() {
+		posix.close(fd)
+		return -1, .File_Access
+	}
+	if medium == .Temporary_File && posix.unlink(resolved) != .OK {
+		posix.close(fd)
+		return -1, .File_Access
+	}
+	return fd, .None
+}
+
+kitty_valid_shm_name :: proc(name: string) -> bool {
+	return len(name) >= 2 && len(name) <= 255 && name[0] == '/' && strings.index_byte(name[1:], '/') < 0
+}
+
+kitty_sensitive_path :: proc(path: string) -> bool {
+	return kitty_path_below(path, "/proc") || kitty_path_below(path, "/sys") ||
+	       kitty_path_below(path, "/dev") && !kitty_path_below(path, "/dev/shm")
+}
+
+kitty_temporary_path :: proc(path: string) -> bool {
+	if !strings.contains(path, "tty-graphics-protocol") do return false
+	if kitty_path_below(path, "/tmp") || kitty_path_below(path, "/var/tmp") || kitty_path_below(path, "/dev/shm") {
+		return true
+	}
+	tmpdir := os.get_env("TMPDIR", context.temp_allocator)
+	if tmpdir == "" do return false
+	resolved, path_error := os.get_absolute_path(tmpdir, context.temp_allocator)
+	return path_error == nil && kitty_path_below(path, resolved)
+}
+
+kitty_path_below :: proc(path, root: string) -> bool {
+	return len(path) > len(root) && strings.has_prefix(path, root) && path[len(root)] == '/'
 }
 
 kitty_decode_bytes :: proc(command: Kitty_Command, decoded: []byte, limits: ^Limits = nil) -> (Decoded_Image, Kitty_Error) {
