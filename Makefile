@@ -42,15 +42,15 @@ install: release
 	install -Dm755 $(APP) $(DESTDIR)$(BINDIR)/nare
 	install -Dm644 assets/logo_256.png $(DESTDIR)$(ICONDIR)/nare.png
 	install -Dm644 nare.conf $(DESTDIR)$(NAREDIR)/nare.conf
-	install -Dm644 themes/catppuccin-mocha.conf $(DESTDIR)$(NAREDIR)/themes/catppuccin-mocha.conf
-	install -Dm644 themes/catppuccin-latte.conf $(DESTDIR)$(NAREDIR)/themes/catppuccin-latte.conf
+	install -Dm644 themes/nare-dark.conf $(DESTDIR)$(NAREDIR)/themes/nare-dark.conf
+	install -Dm644 themes/nare-light.conf $(DESTDIR)$(NAREDIR)/themes/nare-light.conf
 	install -Dm644 nare.desktop $(DESTDIR)$(DESKTOPDIR)/nare.desktop
 	tic -x -o $(DESTDIR)$(TERMINFO_DIR) terminfo/nare.terminfo
 	install -Dm755 $(APP_LITE) $(DESTDIR)$(BINDIR)/nare-lite
 	install -Dm644 assets/lite_logo_256.png $(DESTDIR)$(ICONDIR)/nare-lite.png
 	install -Dm644 nare.conf $(DESTDIR)$(NARELITEDIR)/nare.conf
-	install -Dm644 themes/catppuccin-mocha.conf $(DESTDIR)$(NARELITEDIR)/themes/catppuccin-mocha.conf
-	install -Dm644 themes/catppuccin-latte.conf $(DESTDIR)$(NARELITEDIR)/themes/catppuccin-latte.conf
+	install -Dm644 themes/nare-dark.conf $(DESTDIR)$(NARELITEDIR)/themes/nare-dark.conf
+	install -Dm644 themes/nare-light.conf $(DESTDIR)$(NARELITEDIR)/themes/nare-light.conf
 	install -Dm644 nare-lite.desktop $(DESTDIR)$(DESKTOPDIR)/nare-lite.desktop
 	@if command -v update-desktop-database >/dev/null 2>&1; then update-desktop-database $(DESTDIR)$(DESKTOPDIR); fi
 
@@ -59,15 +59,15 @@ uninstall:
 	rm -f $(DESTDIR)$(ICONDIR)/nare.png
 	rm -f $(DESTDIR)$(DESKTOPDIR)/nare.desktop
 	rm -f $(DESTDIR)$(NAREDIR)/nare.conf
-	rm -f $(DESTDIR)$(NAREDIR)/themes/catppuccin-mocha.conf
-	rm -f $(DESTDIR)$(NAREDIR)/themes/catppuccin-latte.conf
+	rm -f $(DESTDIR)$(NAREDIR)/themes/nare-dark.conf
+	rm -f $(DESTDIR)$(NAREDIR)/themes/nare-light.conf
 	rm -f $(DESTDIR)$(TERMINFO_DIR)/n/nare
 	rm -f $(DESTDIR)$(BINDIR)/nare-lite
 	rm -f $(DESTDIR)$(ICONDIR)/nare-lite.png
 	rm -f $(DESTDIR)$(DESKTOPDIR)/nare-lite.desktop
 	rm -f $(DESTDIR)$(NARELITEDIR)/nare.conf
-	rm -f $(DESTDIR)$(NARELITEDIR)/themes/catppuccin-mocha.conf
-	rm -f $(DESTDIR)$(NARELITEDIR)/themes/catppuccin-latte.conf
+	rm -f $(DESTDIR)$(NARELITEDIR)/themes/nare-dark.conf
+	rm -f $(DESTDIR)$(NARELITEDIR)/themes/nare-light.conf
 	@if command -v update-desktop-database >/dev/null 2>&1; then update-desktop-database $(DESTDIR)$(DESKTOPDIR); fi
 
 clean:

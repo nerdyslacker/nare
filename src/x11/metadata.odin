@@ -1,5 +1,7 @@
 package x11
 
+import "core:c"
+import "core:sys/posix"
 import graphics "../graphics"
 import xlib "vendor:x11/xlib"
 
@@ -22,6 +24,7 @@ when NARE_LITE {
 set_window_metadata :: proc(window: ^Window) {
 	class_hint := xlib.XClassHint{res_name = WINDOW_INSTANCE, res_class = WINDOW_CLASS}
 	xlib.SetClassHint(window.display, window.id, &class_hint)
+	set_window_identity(window)
 	icon_atom := xlib.InternAtom(window.display, "_NET_WM_ICON", false)
 	if icon_atom == 0 do return
 	image, image_error := graphics.decode_png(transmute([]byte)WINDOW_ICON_PNG)
@@ -39,6 +42,39 @@ set_window_metadata :: proc(window: ^Window) {
 		xlib.PropModeReplace,
 		raw_data(icon),
 		i32(len(icon)),
+	)
+}
+
+set_window_identity :: proc(window: ^Window) {
+	pid := uint(posix.getpid())
+	pid_atom := xlib.InternAtom(window.display, "_NET_WM_PID", false)
+	if pid_atom != 0 {
+		_ = xlib.ChangeProperty(
+			window.display,
+			window.id,
+			pid_atom,
+			xlib.XA_CARDINAL,
+			32,
+			xlib.PropModeReplace,
+			rawptr(&pid),
+			1,
+		)
+	}
+	hostname: [256]c.char
+	if posix.gethostname(&hostname[0], c.size_t(len(hostname))) != .OK do return
+	length := 0
+	for length < len(hostname) && hostname[length] != 0 do length += 1
+	machine_atom := xlib.InternAtom(window.display, "WM_CLIENT_MACHINE", false)
+	if machine_atom == 0 || window.string_atom == 0 || length == 0 do return
+	_ = xlib.ChangeProperty(
+		window.display,
+		window.id,
+		machine_atom,
+		window.string_atom,
+		8,
+		xlib.PropModeReplace,
+		rawptr(&hostname[0]),
+		i32(length),
 	)
 }
 
