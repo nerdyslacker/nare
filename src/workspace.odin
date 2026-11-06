@@ -42,6 +42,8 @@ Pane :: struct {
 	selection_state: selection.State,
 	search_state: features.State,
 	url_state: features.URL_State,
+	hint_release_pending: bool,
+	hint_release_key: keyboard.Key,
 	shell_state: features.Shell_State,
 	scrollback_state: features.Scrollback_State,
 	scrollbar: Scrollbar_Interaction,
@@ -664,6 +666,7 @@ workspace_enforce_scrollback_budget :: proc(workspace: ^Workspace) {
 				if screen == &pane.terminal.main_screen {
 					features.scrollback_refresh(&pane.scrollback_state, screen)
 					if pane.search_state.active do features.refresh(&pane.search_state, screen)
+					if pane.url_state.active do features.url_refresh(&pane.url_state, &pane.terminal)
 					if pane.shell_state.active do features.shell_refresh(&pane.shell_state, screen)
 				}
 			}
@@ -1162,6 +1165,7 @@ workspace_layout :: proc(workspace: ^Workspace, resize_grid: bool = true) {
 			if commit_grid && (columns != old_columns || rows != old_rows) {
 				_ = vt.terminal_resize(&pane.terminal, columns, rows)
 				if pane.search_state.active do features.refresh(&pane.search_state, vt.terminal_screen(&pane.terminal))
+				if pane.url_state.active do features.url_refresh(&pane.url_state, &pane.terminal)
 				if !tab_is_tmux(tab) {
 					vt.terminal_expect_resize_prompt_redraw(&pane.terminal)
 					_ = pty.resize(&pane.process, pty_size(columns, rows, width, height))
@@ -1447,7 +1451,13 @@ workspace_event :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
 		}
 	case .Input:
 		if event.key_action == .Release {
-			if pane := workspace_active_pane(workspace); pane != nil do workspace_send_key_event(workspace, pane, event)
+			if pane := workspace_active_pane(workspace); pane != nil {
+				if pane.hint_release_pending && event.key == pane.hint_release_key {
+					pane.hint_release_pending = false
+					return true
+				}
+				if !pane.url_state.active do workspace_send_key_event(workspace, pane, event)
+			}
 			return true
 		}
 		if workspace.close_confirmation {
@@ -1463,11 +1473,15 @@ workspace_event :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
 			workspace_rename_input(workspace, event)
 			return true
 		}
-		if workspace_shortcut(workspace, event) do return true
 		pane := workspace_active_pane(workspace)
 		if pane == nil do return true
 		pane.terminal.cursor_phase_visible = true
 		workspace.last_cursor_toggle = time.now()
+		if pane.url_state.active {
+			workspace_handle_hint_input(workspace, pane, event)
+			return true
+		}
+		if workspace_shortcut(workspace, event) do return true
 		if search_shortcut(event) {
 			if pane.url_state.active do features.url_close(&pane.url_state)
 			features.shell_close(&pane.shell_state)
@@ -1651,6 +1665,7 @@ workspace_event :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
 		if workspace.quake != nil do quake.note_focus(workspace.quake, event.focused)
 		pane := workspace_find_pane(workspace, event.source)
 		if pane == nil && event.source == workspace.root.id do pane = workspace_active_pane(workspace)
+		if !event.focused && pane != nil do pane.hint_release_pending = false
 		if event.focused && pane != nil {
 			pane.terminal.cursor_phase_visible = true
 			workspace.last_cursor_toggle = time.now()
@@ -1871,6 +1886,43 @@ workspace_handle_search_input :: proc(workspace: ^Workspace, pane: ^Pane, event:
 	workspace_redraw(workspace, pane, true)
 }
 
+workspace_open_hints :: proc(workspace: ^Workspace, pane: ^Pane) {
+	if workspace == nil || pane == nil do return
+	pane.hint_release_pending = false
+	features.close(&pane.search_state)
+	features.shell_close(&pane.shell_state)
+	features.scrollback_close(&pane.scrollback_state)
+	selection.clear(&pane.selection_state)
+	features.url_open(&pane.url_state, &pane.terminal)
+	x11.set_title(workspace.root, fmt.tprintf("nare - hints: %d (key opens, Shift+key copies, Esc closes)", len(pane.url_state.links)))
+	workspace_redraw(workspace, pane, true)
+}
+
+workspace_handle_hint_input :: proc(workspace: ^Workspace, pane: ^Pane, event: x11.Event) {
+	if event.key == .Escape {
+		features.url_close(&pane.url_state)
+		pane.hint_release_pending = true
+		pane.hint_release_key = event.key
+	} else if event.key == .Text && event.input_size == 1 {
+		url := features.url_for_hint(&pane.url_state, event.input[0])
+		if url == "" do return
+		if .Shift in event.modifiers {
+			_ = x11.own_selection(workspace.root, .Clipboard, transmute([]byte)url)
+		} else if !features.open_url(workspace.settings.url_opener, url) {
+			fmt.eprintln("nare: could not launch URL opener")
+		}
+		features.url_close(&pane.url_state)
+		pane.hint_release_pending = true
+		pane.hint_release_key = event.key
+	} else {
+		return
+	}
+	tab := workspace_active_tab(workspace)
+	if tab_is_tmux(tab) && tab.tmux_title != "" do x11.set_title(workspace.root, tab.tmux_title)
+	else do x11.set_title(workspace.root, current_window_title(&pane.terminal, workspace.title))
+	workspace_redraw(workspace, pane, true)
+}
+
 workspace_scrollbar :: proc(workspace: ^Workspace, pane: ^Pane) -> drawing.Scrollbar {
 	if !workspace.settings.scrollbar_enabled do return {}
 	return {
@@ -2027,6 +2079,10 @@ workspace_shortcut :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
 	}
 	if event_matches(event, bindings.open_config) {
 		if !workspace_open_config(workspace) do x11.set_title(workspace.root, "nare - could not open config")
+		return true
+	}
+	if event_matches(event, bindings.open_hints) {
+		workspace_open_hints(workspace, workspace_active_pane(workspace))
 		return true
 	}
 	if event_matches(event, bindings.toggle_statusbar) {
@@ -2267,6 +2323,7 @@ workspace_reload_config :: proc(workspace: ^Workspace) -> bool {
 		if len(pane.terminal.main_screen.scrollback) != history_rows {
 			features.scrollback_refresh(&pane.scrollback_state, &pane.terminal.main_screen)
 			if pane.search_state.active do features.refresh(&pane.search_state, &pane.terminal.main_screen)
+			if pane.url_state.active do features.url_refresh(&pane.url_state, &pane.terminal)
 			if pane.shell_state.active do features.shell_refresh(&pane.shell_state, &pane.terminal.main_screen)
 		}
 		pane.terminal.osc52_policy = workspace.settings.osc52_policy
@@ -2618,6 +2675,7 @@ workspace_drain :: proc(workspace: ^Workspace, pane: ^Pane) -> bool {
 			if dirty {
 				features.scrollback_refresh(&pane.scrollback_state, vt.terminal_screen(&pane.terminal))
 				if pane.search_state.active do features.refresh(&pane.search_state, vt.terminal_screen(&pane.terminal))
+				if pane.url_state.active do features.url_refresh(&pane.url_state, &pane.terminal)
 				if pane.visible do workspace_redraw(workspace, pane, false)
 				if pane.terminal.title_changed && !tmux.session_active(&pane.tmux_session) {
 					pane.root_foreground = pty.foreground_is_root(&pane.process)
@@ -2992,6 +3050,7 @@ workspace_feed_pty :: proc(workspace: ^Workspace, pane: ^Pane, data: []byte) -> 
 				if target_pointer_shape != target.terminal.pointer_shape do workspace_apply_pointer_shape(workspace)
 				features.scrollback_refresh(&target.scrollback_state, vt.terminal_screen(&target.terminal))
 				if target.search_state.active do features.refresh(&target.search_state, vt.terminal_screen(&target.terminal))
+				if target.url_state.active do features.url_refresh(&target.url_state, &target.terminal)
 				if target.visible && target != pane do workspace_redraw(workspace, target, false)
 				dirty = target == pane || dirty
 			}

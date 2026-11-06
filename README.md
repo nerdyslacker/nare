@@ -164,6 +164,8 @@ dark=catppuccin-mocha
 
 Press `Alt+Shift+R` to reload the file. Nare keeps the current settings after a parse error. `Alt+Shift+E` opens it in a new tab using `[main] editor`, `$VISUAL`, `$EDITOR`, or `vi`, in that order. Both shortcuts are configurable as `reload-config` and `open-config` under `[bindings]`. Set `[shell] startup-command=/usr/bin/fish --login` to replace `$SHELL` for local tabs and panes.
 
+Press `Ctrl+Shift+U` to label visible HTTP(S) URLs and OSC 8 hyperlinks. Press a label to open its link, `Shift` plus the label to copy it, or `Esc` to close hint mode. Configure the shortcut as `open-hints` under `[bindings]`.
+
 Middle-click a pane to split it horizontally, or hold `Alt` while middle-clicking to split it vertically. Drag a divider with the left mouse button to resize local panes. `Alt+Shift+H/J/K/L` resizes the active local or tmux pane; the four directional bindings are configurable.
 
 Pass a directory to open the first shell there:
