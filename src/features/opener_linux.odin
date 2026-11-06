@@ -19,6 +19,9 @@ open_url :: proc(opener, url: string) -> bool {
 		if grandchild < 0 do posix._exit(127)
 		if grandchild > 0 do posix._exit(0)
 		_ = posix.setsid()
+		devnull := posix.open("/dev/null", {.RDWR})
+		if devnull < 0 do posix._exit(127)
+		for descriptor in 0..=2 do if posix.dup2(devnull, posix.FD(descriptor)) < 0 do posix._exit(127)
 		if linux.close_range(3, linux.Fd(max(i32)), {}) != .NONE {
 			for fd := 3; fd < 1024; fd += 1 do _ = posix.close(posix.FD(fd))
 		}

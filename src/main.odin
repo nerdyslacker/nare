@@ -897,6 +897,7 @@ redraw :: proc(
 	scrollback_state: ^features.Scrollback_State = nil,
 	show_scrollbar: bool = true,
 	scrollbar_override: ^drawing.Scrollbar = nil,
+	url_hover_state: ^features.URL_State = nil,
 ) {
 	scrollbar: drawing.Scrollbar
 	if scrollbar_override != nil {
@@ -907,6 +908,8 @@ redraw :: proc(
 	}
 	if url_state.active {
 		drawing.draw(renderer, window, terminal, force, nil, features.url_view_screen(url_state))
+	} else if url_hover_state != nil && url_hover_state.active {
+		drawing.draw(renderer, window, terminal, force, selection_state, features.url_view_screen(url_hover_state), scrollbar)
 	} else if search_state.active {
 		drawing.draw(renderer, window, terminal, force, &search_state.highlight, features.view_screen(search_state))
 	} else if shell_state != nil && shell_state.active {

@@ -42,6 +42,8 @@ Pane :: struct {
 	selection_state: selection.State,
 	search_state: features.State,
 	url_state: features.URL_State,
+	url_hover_state: features.URL_State,
+	url_hover_hand: bool,
 	hint_release_pending: bool,
 	hint_release_key: keyboard.Key,
 	shell_state: features.Shell_State,
@@ -253,6 +255,7 @@ Workspace :: struct {
 	last_cursor_toggle: time.Time,
 	pointer_shape: vt.Pointer_Shape,
 	pointer_shape_surfaces: int,
+	url_hover_tracking: bool,
 	last_privilege_check: time.Time,
 	scroll_redraw_source: xlib.Window,
 	exit_status: int,
@@ -531,7 +534,7 @@ workspace_init :: proc(
 workspace_service :: proc(workspace: ^Workspace) -> bool {
 	if workspace == nil || len(workspace.tabs) == 0 do return false
 	if workspace.quake != nil && !quake.service(workspace.quake) do return false
-	pointer_tracking := workspace.settings.scrollbar_enabled || (workspace.settings.statusbar.auto_hide && workspace.statusbar.visible)
+	pointer_tracking := workspace.url_hover_tracking || workspace.settings.scrollbar_enabled || (workspace.settings.statusbar.auto_hide && workspace.statusbar.visible)
 	x11.set_mouse_tracking(workspace.root, 0, pointer_tracking)
 	if workspace.statusbar_surface.id != 0 do x11.set_mouse_tracking(&workspace.statusbar_surface, 0, pointer_tracking)
 	for tab in workspace.tabs {
@@ -878,6 +881,7 @@ pane_destroy :: proc(pane: ^Pane) {
 	}
 	features.destroy(&pane.search_state)
 	features.url_destroy(&pane.url_state)
+	features.url_destroy(&pane.url_hover_state)
 	features.shell_destroy(&pane.shell_state)
 	features.scrollback_destroy(&pane.scrollback_state)
 	delete(pane.display_title)
@@ -1163,6 +1167,7 @@ workspace_layout :: proc(workspace: ^Workspace, resize_grid: bool = true) {
 			}
 			columns, rows := x11.grid_size(&pane.surface)
 			if commit_grid && (columns != old_columns || rows != old_rows) {
+				workspace_clear_url_hover(workspace, pane, false)
 				_ = vt.terminal_resize(&pane.terminal, columns, rows)
 				if pane.search_state.active do features.refresh(&pane.search_state, vt.terminal_screen(&pane.terminal))
 				if pane.url_state.active do features.url_refresh(&pane.url_state, &pane.terminal)
@@ -1247,6 +1252,27 @@ workspace_apply_pointer_shape :: proc(workspace: ^Workspace) {
 	workspace_set_pointer_window(workspace, &workspace.jobs_surface, shape)
 	for tab in workspace.tabs do for candidate in tab.panes do workspace_set_pointer_window(workspace, &candidate.surface, shape)
 	_ = xlib.Flush(workspace.root.display)
+}
+
+workspace_url_hover_cursor :: proc(workspace: ^Workspace, pane: ^Pane, hand: bool) {
+	if pane == nil || pane.url_hover_hand == hand do return
+	pane.url_hover_hand = hand
+	if hand do x11.set_pointer_cursor(workspace.root, &pane.surface, .XC_hand2)
+	else do workspace_set_pointer_window(workspace, &pane.surface, pane.terminal.pointer_shape)
+	_ = xlib.Flush(workspace.root.display)
+}
+
+workspace_clear_url_hover :: proc(workspace: ^Workspace, pane: ^Pane, redraw_pane: bool = true) {
+	if pane == nil do return
+	was_active := pane.url_hover_state.active
+	features.url_close(&pane.url_hover_state)
+	workspace_url_hover_cursor(workspace, pane, false)
+	if was_active && redraw_pane && pane.visible do workspace_redraw(workspace, pane, true)
+}
+
+workspace_clear_url_hovers :: proc(workspace: ^Workspace) {
+	workspace.url_hover_tracking = false
+	for tab in workspace.tabs do for pane in tab.panes do workspace_clear_url_hover(workspace, pane)
 }
 
 workspace_tmux_pane_info :: proc(owner: ^Pane, pane_id: int) -> ^tmux.Pane_Info {
@@ -1450,7 +1476,10 @@ workspace_event :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
 			workspace_redraw(workspace, pane, true)
 		}
 	case .Input:
+		alt_key := event.key == .Left_Alt || event.key == .Right_Alt
+		if alt_key && event.key_action == .Press do workspace.url_hover_tracking = true
 		if event.key_action == .Release {
+			if alt_key do workspace_clear_url_hovers(workspace)
 			if pane := workspace_active_pane(workspace); pane != nil {
 				if pane.hint_release_pending && event.key == pane.hint_release_key {
 					pane.hint_release_pending = false
@@ -1572,6 +1601,26 @@ workspace_event :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
 		mouse.column = max(1, mouse.x/pane.surface.cell_w+1)
 		mouse.row = max(1, mouse.y/pane.surface.cell_h+1)
 		local_mouse := pane.terminal.modes.mouse_tracking == 0 || .Shift in mouse.modifiers
+		if mouse.action == .Motion {
+			for tab in workspace.tabs do for candidate in tab.panes do if candidate != pane && candidate.url_hover_state.active {
+				workspace_clear_url_hover(workspace, candidate)
+			}
+			if workspace.url_hover_tracking && .Alt in mouse.modifiers && !pane.search_state.active && !pane.url_state.active && !pane.shell_state.active {
+				hand := features.url_highlight(&pane.url_hover_state, &pane.terminal, workspace_selection_screen(pane), mouse.row-1, mouse.column-1)
+				workspace_url_hover_cursor(workspace, pane, hand)
+				workspace_redraw(workspace, pane, true)
+			} else if pane.url_hover_state.active || pane.url_hover_hand {
+				workspace_clear_url_hover(workspace, pane)
+			}
+		}
+		if .Alt in mouse.modifiers && mouse.action == .Press && mouse.button == 1 {
+			url := features.url_at_cell(&pane.terminal, workspace_selection_screen(pane), mouse.row-1, mouse.column-1)
+			defer delete(url)
+			if url != "" {
+				if !features.open_url(workspace.settings.url_opener, url) do fmt.eprintln("nare: could not launch URL opener")
+				return true
+			}
+		}
 		if workspace.settings.scrollbar_enabled && !pane.search_state.active && !pane.url_state.active && !pane.shell_state.active {
 			handled, scrolled, visual_changed := handle_scrollbar_mouse(&pane.surface, &pane.terminal, &pane.scrollback_state, &pane.scrollbar, mouse)
 			if handled {
@@ -1663,6 +1712,7 @@ workspace_event :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
 		}
 	case .Focus:
 		if workspace.quake != nil do quake.note_focus(workspace.quake, event.focused)
+		if !event.focused do workspace_clear_url_hovers(workspace)
 		pane := workspace_find_pane(workspace, event.source)
 		if pane == nil && event.source == workspace.root.id do pane = workspace_active_pane(workspace)
 		if !event.focused && pane != nil do pane.hint_release_pending = false
@@ -1951,6 +2001,7 @@ workspace_redraw :: proc(workspace: ^Workspace, pane: ^Pane, force: bool) {
 		&pane.scrollback_state,
 		workspace.settings.scrollbar_enabled,
 		&scrollbar,
+		&pane.url_hover_state,
 	)
 	if pane == workspace_active_pane(workspace) && pane.search_state.active do workspace_draw_search_bar(workspace)
 }
@@ -2969,6 +3020,7 @@ workspace_tmux_restore_tab :: proc(workspace: ^Workspace, owner: ^Pane) {
 }
 
 workspace_feed_pty :: proc(workspace: ^Workspace, pane: ^Pane, data: []byte) -> bool {
+	workspace_clear_url_hover(workspace, pane, false)
 	progress_state := pane.terminal.progress_state
 	progress_percent := pane.terminal.progress_percent
 	pointer_shape := pane.terminal.pointer_shape
@@ -3034,6 +3086,7 @@ workspace_feed_pty :: proc(workspace: ^Workspace, pane: ^Pane, data: []byte) -> 
 		case .Output:
 			target := workspace_tmux_view(workspace, pane, event.pane_id)
 			if target != nil {
+				workspace_clear_url_hover(workspace, target, false)
 				target_progress_state := target.terminal.progress_state
 				target_progress_percent := target.terminal.progress_percent
 				target_pointer_shape := target.terminal.pointer_shape
@@ -3204,7 +3257,7 @@ workspace_tmux_activate :: proc(workspace: ^Workspace, pane: ^Pane) -> bool {
 	vt.terminal_set_named_color_resolver(&pane.terminal, terminal_named_color, rawptr(&pane.surface))
 	vt.terminal_set_cell_size(&pane.terminal, pane.surface.cell_w, pane.surface.cell_h)
 	workspace_apply_cursor(workspace, pane)
-	workspace_reset_view_state(pane)
+	workspace_reset_view_state(workspace, pane)
 	return true
 }
 
@@ -3219,7 +3272,7 @@ workspace_tmux_deactivate :: proc(workspace: ^Workspace, pane: ^Pane) {
 	pane.display_title = pane.local_display_title
 	pane.local_display_title = ""
 	pane.root_foreground = pane.local_root_foreground
-	workspace_reset_view_state(pane)
+	workspace_reset_view_state(workspace, pane)
 	x11.set_title(workspace.root, current_window_title(&pane.terminal, workspace.title))
 }
 
@@ -3235,11 +3288,12 @@ workspace_tmux_reset_display :: proc(workspace: ^Workspace, pane: ^Pane) -> bool
 	vt.terminal_rebind(&pane.terminal)
 	vt.terminal_set_cell_size(&pane.terminal, pane.surface.cell_w, pane.surface.cell_h)
 	workspace_apply_cursor(workspace, pane)
-	workspace_reset_view_state(pane)
+	workspace_reset_view_state(workspace, pane)
 	return true
 }
 
-workspace_reset_view_state :: proc(pane: ^Pane) {
+workspace_reset_view_state :: proc(workspace: ^Workspace, pane: ^Pane) {
+	workspace_clear_url_hover(workspace, pane, false)
 	selection.clear(&pane.selection_state)
 	features.destroy(&pane.search_state)
 	features.url_destroy(&pane.url_state)
