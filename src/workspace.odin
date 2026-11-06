@@ -2182,6 +2182,11 @@ workspace_reload_config :: proc(workspace: ^Workspace) -> bool {
 		else do fmt.eprintf("nare: %s: %s\n", path, config.error_string(result.error))
 		return false
 	}
+	if adaptive_error := adaptive_theme_apply(&fresh); adaptive_error != "" {
+		fmt.eprintf("nare: %s\n", adaptive_error)
+		delete(adaptive_error)
+		return false
+	}
 
 	// These values describe the current launch rather than reloadable preferences.
 	config.replace_string(&fresh.working_directory, workspace.settings.working_directory)

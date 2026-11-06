@@ -40,7 +40,7 @@ app_main :: proc() -> int {
 		delete(launch_err)
 		return 2
 	}
-	options, command, command_err := command_from_args(launch.arguments[:])
+	options, command, command_err := command_from_args(launch.arguments[:], launch.mode != .Client)
 	defer config.settings_destroy(&options)
 	if command_err != "" {
 		fmt.eprintln(command_err)
@@ -148,7 +148,7 @@ launch_options :: proc(args: []string) -> (options: Launch_Options, err: string)
 	return options, ""
 }
 
-command_from_args :: proc(args: []string) -> (options: config.Settings, command: [dynamic]cstring, err: string) {
+command_from_args :: proc(args: []string, detect_adaptive_theme: bool) -> (options: config.Settings, command: [dynamic]cstring, err: string) {
 	config.settings_init(&options)
 	for argument in args {
 		if argument == "-e" do break
@@ -167,6 +167,11 @@ command_from_args :: proc(args: []string) -> (options: config.Settings, command:
 					return options, command, fmt.aprintf("%s:%d: %s", path, result.line, config.error_string(result.error))
 				}
 				return options, command, fmt.aprintf("%s: %s", path, config.error_string(result.error))
+			}
+			if detect_adaptive_theme {
+				if adaptive_error := adaptive_theme_apply(&options); adaptive_error != "" {
+					return options, command, adaptive_error
+				}
 			}
 		}
 	}

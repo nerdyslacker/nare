@@ -43,6 +43,7 @@
 | zlib | Kitty raw-pixel and PNG decompression | Yes |
 | OpenGL and GLX | Default GPU renderer in `nare` | Full build only |
 | Vulkan (`libvulkan.so.1`) | Alternative GPU backend in `nare`, loaded at runtime | Optional, full build only |
+| `dbus-send` and XDG Desktop Portal | Adaptive light/dark theme detection | Optional |
 | `tic` from ncurses | Bundled `nare` terminfo entry | Install only |
 | tmux | Native control-mode integration | Optional |
 | `xdg-open` and Git | URL opening and complete status-bar Git data | Optional |
@@ -142,10 +143,22 @@ Use repeatable `include=` directives to split the file. Nare resolves relative p
 
 ```ini
 include=bindings.conf
-include=themes/catppuccin-mocha.conf
 ```
 
-The `themes/` directory contains Catppuccin Mocha and Latte. Include a theme before local `[colors]` overrides.
+The `themes/` directory beside the config contains Catppuccin Mocha and Latte; `make install` installs the same files system-wide. Select a file by name without `.conf`; if it does not exist, Nare keeps its default colors.
+
+```ini
+[main]
+theme=catppuccin-mocha
+```
+
+To follow the desktop light/dark preference, select both names under `[adaptive-theme]`. It takes priority over `[main] theme`. Nare reads the standardized XDG Desktop Portal color scheme at startup and whenever the config is reloaded. If the portal or adaptive theme is unavailable, the global theme remains active.
+
+```ini
+[adaptive-theme]
+light=catppuccin-latte
+dark=catppuccin-mocha
+```
 
 `nare-lite` keeps an independent profile under `$XDG_CONFIG_HOME/nare-lite/nare.conf`, or `~/.config/nare-lite/nare.conf`.
 

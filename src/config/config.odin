@@ -239,6 +239,9 @@ Settings :: struct {
 	tab_rules: [dynamic]Tab_Rule,
 	tab_rule_bindings: [dynamic]Tab_Rule_Binding,
 	config_path: string,
+	theme_name: string,
+	adaptive_light_theme: string,
+	adaptive_dark_theme: string,
 }
 
 settings_init :: proc(settings: ^Settings) {
@@ -379,6 +382,9 @@ settings_destroy :: proc(settings: ^Settings) {
 	delete(settings.working_directory)
 	delete(settings.launch_rule)
 	delete(settings.config_path)
+	delete(settings.theme_name)
+	delete(settings.adaptive_light_theme)
+	delete(settings.adaptive_dark_theme)
 	delete(settings.quake.monitor)
 	delete(settings.tabs.separator)
 	delete(settings.tabs.title_template)
@@ -491,7 +497,7 @@ parse_contents :: proc(
 		if line[0] == '[' {
 			if len(line) < 3 || line[len(line)-1] != ']' do return {error = .Syntax, line = line_number}
 			section = strings.trim_space(line[1:len(line)-1])
-			if section != "main" && section != "scrollback" && section != "url" && section != "shell" && section != "security" && section != "graphics" && section != "gpu" && section != "window" && section != "tabs" && section != "colors" && section != "bindings" && section != "cursor" && section != "tmux" && section != "quake" && section != "statusbar" && section != "statusbar.jobs" && !status_module_section(section) && !tmux_profile_section(section) && !tab_rule_section(section) {
+			if section != "main" && section != "adaptive-theme" && section != "scrollback" && section != "url" && section != "shell" && section != "security" && section != "graphics" && section != "gpu" && section != "window" && section != "tabs" && section != "colors" && section != "bindings" && section != "cursor" && section != "tmux" && section != "quake" && section != "statusbar" && section != "statusbar.jobs" && !status_module_section(section) && !tmux_profile_section(section) && !tab_rule_section(section) {
 				return {error = .Unknown_Section, line = line_number}
 			}
 			if tmux_profile_section(section) {
@@ -524,6 +530,14 @@ parse_contents :: proc(
 			}
 			continue
 		}
+		if section == "adaptive-theme" {
+			if key != "light" && key != "dark" do return {error = .Unknown_Key, line = line_number}
+			theme_name, name_ok := parse_string(value)
+			if !name_ok || !valid_tmux_name(theme_name) do return {error = .Invalid_Value, line = line_number}
+			if key == "light" do replace_string(&settings.adaptive_light_theme, theme_name)
+			else do replace_string(&settings.adaptive_dark_theme, theme_name)
+			continue
+		}
 		if result := apply(settings, section, key, value); result != .None {
 			return {error = result, line = line_number}
 		}
@@ -549,6 +563,36 @@ validate :: proc(settings: ^Settings, line_number: int) -> Result {
 		if tab_rule(settings, binding.rule) == nil || shortcut_conflicts(settings, binding.chord, binding.rule) do return {error = .Invalid_Value, line = binding.source_line}
 	}
 	return {}
+}
+
+theme_path :: proc(settings: ^Settings, name: string) -> string {
+	if settings == nil || !valid_tmux_name(name) do return ""
+	filename := fmt.aprintf("%s.conf", name)
+	defer delete(filename)
+	if settings.config_path != "" {
+		directory, _ := os.split_path(settings.config_path)
+		candidate, join_error := os.join_path({directory, "themes", filename}, context.allocator)
+		if join_error == nil {
+			absolute := regular_file_path(candidate)
+			delete(candidate)
+			if absolute != "" do return absolute
+		}
+	}
+	system_path := fmt.aprintf("/etc/%s/themes/%s", PROFILE_NAME, filename)
+	absolute := regular_file_path(system_path)
+	delete(system_path)
+	return absolute
+}
+
+regular_file_path :: proc(path: string) -> string {
+	absolute, absolute_error := os.get_absolute_path(path, context.allocator)
+	if absolute_error != nil do return ""
+	info, stat_error := os.stat(absolute, context.temp_allocator)
+	if stat_error != nil || info.type != .Regular {
+		delete(absolute)
+		return ""
+	}
+	return absolute
 }
 
 resolve_include_path :: proc(source_path, value: string) -> (string, bool) {
@@ -579,6 +623,10 @@ resolve_include_path :: proc(source_path, value: string) -> (string, bool) {
 apply :: proc(settings: ^Settings, section, key, value: string) -> Error {
 	if section == "main" {
 		switch key {
+		case "theme":
+			theme_name, ok := parse_string(value)
+			if !ok || !valid_tmux_name(theme_name) do return .Invalid_Value
+			replace_string(&settings.theme_name, theme_name)
 		case "renderer":
 			switch value {
 			case "cpu": settings.renderer = .CPU
