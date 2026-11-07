@@ -1372,6 +1372,7 @@ statusbar_group_modules :: proc(workspace: ^Workspace, modules: []config.Status_
 		background := settings.background
 		if style.foreground_set do foreground = style.foreground
 		if style.background_set do background = style.background
+		if module == .Mode do background = statusbar_active_accent(workspace)
 		if module == .Jobs && settings.module_blocks {
 			visible := statusbar_visible_jobs(workspace)
 			if len(visible) > 1 {
