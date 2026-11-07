@@ -37,6 +37,8 @@ MAX_GIT_HASH_BYTES :: 32 * 1024 * 1024
 GIT_STATUS_TIMEOUT_MS :: 1500
 MAX_STATUSBAR_CWD_BYTES :: 4096
 STATUSBAR_SERVICE_INTERVAL :: 100*time.Millisecond
+MAX_GIT_BRANCHES :: 4096
+MAX_GIT_BRANCH_ROWS :: 12
 
 Statusbar_Sample_Job :: struct {
 	battery_requested, resource_requested, git_requested, command_requested: bool,
@@ -174,7 +176,7 @@ statusbar_auto_hide_pointer :: proc(workspace: ^Workspace, pointer_y: int) -> bo
 statusbar_auto_hide_tick :: proc(workspace: ^Workspace) {
 	settings := &workspace.settings.statusbar
 	state := &workspace.statusbar
-	if workspace.jobs_visible || !settings.auto_hide || !state.visible || !state.auto_hide_revealed || !state.auto_hide_pending do return
+	if workspace.jobs_visible || workspace.git_popup_visible || !settings.auto_hide || !state.visible || !state.auto_hide_revealed || !state.auto_hide_pending do return
 	if time.since(state.auto_hide_left_at) < time.Duration(settings.auto_hide_delay_ms)*time.Millisecond do return
 	state.auto_hide_revealed = false
 	state.auto_hide_pending = false
@@ -415,6 +417,7 @@ workspace_toggle_jobs_list :: proc(workspace: ^Workspace) {
 	workspace.jobs_visible = !was_visible
 	workspace.jobs_selected = 0
 	if workspace.jobs_visible {
+		if workspace.git_popup_visible do workspace_close_git_branches(workspace)
 		workspace.statusbar.auto_hide_revealed = true
 		workspace.statusbar.auto_hide_pending = false
 	}
@@ -513,7 +516,7 @@ workspace_draw_jobs_list :: proc(workspace: ^Workspace) {
 	x11.place_child(&workspace.jobs_surface, x, y, width, height)
 	x11.raise_child(&workspace.jobs_surface)
 	draw_workspace_jobs_popup(
-		&workspace.jobs_surface, pane.renderer.font, rows, workspace.jobs_selected-start,
+		&workspace.jobs_surface, pane.renderer.font, "Jobs  ↑/↓ select  Enter focus  Delete stop  Esc close", rows, workspace.jobs_selected-start,
 		row_height, background, foreground, statusbar_active_accent(workspace),
 		workspace.settings.ui_colors.inactive_tab_background,
 	)
@@ -537,6 +540,200 @@ statusbar_jobs_mouse :: proc(workspace: ^Workspace, mouse: keyboard.Mouse_Event)
 statusbar_expanded_job_start :: proc(workspace: ^Workspace, total, shown: int) -> int {
 	if workspace == nil || shown <= 0 || total <= shown do return 0
 	return clamp(workspace.jobs_selected-shown+1, 0, total-shown)
+}
+
+workspace_clear_git_branches :: proc(workspace: ^Workspace) {
+	for branch in workspace.git_branches do delete(branch.name)
+	delete(workspace.git_branches)
+	workspace.git_branches = nil
+	delete(workspace.git_branch_cwd)
+	workspace.git_branch_cwd = ""
+	workspace.git_branch_selected = 0
+	workspace.git_branch_current = -1
+}
+
+statusbar_collect_git_branches :: proc(workspace: ^Workspace, cwd: string) -> bool {
+	command := [?]string{
+		"git", "for-each-ref", fmt.tprintf("--count=%d", MAX_GIT_BRANCHES), "--sort=refname",
+		"--format=%(HEAD)%09%(refname:short)%09%(refname)%09%(symref)", "refs/heads/", "refs/remotes/",
+	}
+	state, output, error_output, process_error := os.process_exec(
+		{working_dir = cwd, command = command[:]}, context.temp_allocator,
+	)
+	if process_error != nil || !state.success || state.exit_code != 0 {
+		message := statusbar_sanitize(strings.trim_space(string(error_output)))
+		if message != "" do fmt.eprintf("nare: could not list Git branches: %s\n", message)
+		return false
+	}
+	remaining := string(output)
+	for remaining != "" && len(workspace.git_branches) < MAX_GIT_BRANCHES {
+		line := remaining
+		if newline := strings.index_byte(remaining, '\n'); newline >= 0 {
+			line, remaining = remaining[:newline], remaining[newline+1:]
+		} else do remaining = ""
+		first := strings.index_byte(line, '\t')
+		if first < 0 do continue
+		second_offset := strings.index_byte(line[first+1:], '\t')
+		if second_offset < 0 do continue
+		second := first+1+second_offset
+		third_offset := strings.index_byte(line[second+1:], '\t')
+		if third_offset < 0 do continue
+		third := second+1+third_offset
+		name := line[first+1:second]
+		refname := line[second+1:third]
+		symref := line[third+1:]
+		remote := strings.has_prefix(refname, "refs/remotes/")
+		if name == "" || remote && symref != "" do continue
+		append(&workspace.git_branches, {name = strings.clone(name), remote = remote})
+		if !remote && line[0] == '*' do workspace.git_branch_current = len(workspace.git_branches)-1
+	}
+	if len(workspace.git_branches) == 0 do return false
+	workspace.git_branch_selected = max(0, workspace.git_branch_current)
+	workspace.git_branch_cwd = strings.clone(cwd)
+	return true
+}
+
+statusbar_git_branch_rows :: proc(workspace: ^Workspace) -> int {
+	if workspace == nil || len(workspace.git_branches) == 0 do return 0
+	row_height := statusbar_row_height(workspace)
+	reserved := workspace_tab_bar_height(workspace)+workspace.settings.window.padding*2+row_height+12
+	return min(len(workspace.git_branches), min(MAX_GIT_BRANCH_ROWS, max(1, (workspace.root.height-reserved)/max(1, row_height))))
+}
+
+statusbar_git_branch_start :: proc(workspace: ^Workspace, shown: int) -> int {
+	if shown <= 0 || len(workspace.git_branches) <= shown do return 0
+	return clamp(workspace.git_branch_selected-shown+1, 0, len(workspace.git_branches)-shown)
+}
+
+workspace_close_git_branches :: proc(workspace: ^Workspace) {
+	if workspace == nil do return
+	workspace.git_popup_visible = false
+	if workspace.jobs_surface.id != 0 do x11.show_child(&workspace.jobs_surface, false)
+	workspace_clear_git_branches(workspace)
+	x11.focus_window(workspace.root)
+}
+
+workspace_toggle_git_branches :: proc(workspace: ^Workspace) {
+	if workspace == nil || workspace.jobs_surface.id == 0 do return
+	if workspace.git_popup_visible {
+		workspace_close_git_branches(workspace)
+		return
+	}
+	_ = statusbar_update_cwd(workspace)
+	if !workspace.statusbar.cwd_local || workspace.statusbar.cwd_source == "" do return
+	workspace_clear_git_branches(workspace)
+	if !statusbar_collect_git_branches(workspace, workspace.statusbar.cwd_source) do return
+	if workspace.jobs_visible do workspace_toggle_jobs_list(workspace)
+	workspace.git_popup_visible = true
+	workspace.statusbar.auto_hide_revealed = true
+	workspace.statusbar.auto_hide_pending = false
+	workspace_draw_git_branches(workspace)
+	x11.focus_child(&workspace.jobs_surface)
+}
+
+workspace_switch_git_branch :: proc(workspace: ^Workspace) -> bool {
+	if workspace == nil || workspace.git_branch_selected < 0 || workspace.git_branch_selected >= len(workspace.git_branches) do return false
+	if workspace.git_branch_selected == workspace.git_branch_current {
+		workspace_close_git_branches(workspace)
+		return true
+	}
+	branch := workspace.git_branches[workspace.git_branch_selected]
+	local_command := [?]string{"git", "switch", "--quiet", "--no-guess", branch.name}
+	remote_command := [?]string{"git", "switch", "--quiet", "--track", branch.name}
+	command := local_command[:]
+	if branch.remote do command = remote_command[:]
+	state, _, error_output, process_error := os.process_exec(
+		{working_dir = workspace.git_branch_cwd, command = command[:]}, context.temp_allocator,
+	)
+	if process_error != nil || !state.success || state.exit_code != 0 {
+		message := statusbar_sanitize(strings.trim_space(string(error_output)))
+		if message == "" do message = "Git rejected the branch switch"
+		fmt.eprintf("nare: %s\n", message)
+		return false
+	}
+	workspace_close_git_branches(workspace)
+	workspace.statusbar.last_git = {}
+	statusbar_tick(workspace, true)
+	return true
+}
+
+workspace_git_branches_input :: proc(workspace: ^Workspace, event: x11.Event) {
+	shown := statusbar_git_branch_rows(workspace)
+	if event.key == .Escape || event_matches(event, workspace.settings.bindings.show_git_branches) {
+		workspace_close_git_branches(workspace)
+		return
+	}
+	if len(workspace.git_branches) == 0 do return
+	if event.key == .Up do workspace.git_branch_selected = max(0, workspace.git_branch_selected-1)
+	else if event.key == .Down do workspace.git_branch_selected = min(len(workspace.git_branches)-1, workspace.git_branch_selected+1)
+	else if event.key == .Page_Up do workspace.git_branch_selected = max(0, workspace.git_branch_selected-max(1, shown))
+	else if event.key == .Page_Down do workspace.git_branch_selected = min(len(workspace.git_branches)-1, workspace.git_branch_selected+max(1, shown))
+	else if event.key == .Enter {
+		_ = workspace_switch_git_branch(workspace)
+		return
+	} else do return
+	workspace_draw_git_branches(workspace)
+}
+
+workspace_draw_git_branches :: proc(workspace: ^Workspace) {
+	if workspace == nil || workspace.jobs_surface.id == 0 || !workspace.git_popup_visible do return
+	pane := workspace_active_pane(workspace)
+	shown := statusbar_git_branch_rows(workspace)
+	if pane == nil || shown <= 0 do return
+	workspace.git_branch_selected = clamp(workspace.git_branch_selected, 0, len(workspace.git_branches)-1)
+	start := statusbar_git_branch_start(workspace, shown)
+	settings := &workspace.settings.statusbar
+	style := settings.module_styles[int(config.Status_Module.Git)]
+	foreground := settings.foreground
+	background := settings.background
+	if style.foreground_set do foreground = style.foreground
+	if style.background_set do background = style.background
+	rows := make([]Statusbar_Draw_Module, shown, context.temp_allocator)
+	for index in 0..<shown {
+		branch_index := start+index
+		branch := workspace.git_branches[branch_index]
+		marker := "* " if branch_index == workspace.git_branch_current else "R " if branch.remote else "  "
+		rows[index] = {
+			text = statusbar_sanitize(fmt.tprintf("%s%s", marker, branch.name)),
+			foreground = foreground, background = background,
+		}
+	}
+	row_height := statusbar_row_height(workspace)
+	width := min(max(320, workspace.root.width/2), max(1, workspace.root.width-24))
+	height := row_height*(shown+1)
+	x := max(0, (workspace.root.width-width)/2)
+	y := workspace.root.height-height-12
+	if statusbar_visible(workspace) {
+		y = workspace.statusbar_surface.y-height-6
+		if settings.position == .Top do y = workspace.statusbar_surface.y+workspace.statusbar_surface.height+6
+	}
+	y = clamp(y, 0, max(0, workspace.root.height-height))
+	x11.place_child(&workspace.jobs_surface, x, y, width, height)
+	x11.raise_child(&workspace.jobs_surface)
+	title := fmt.tprintf("Branches %d/%d  R remote  ↑/↓ select  Enter switch  Esc close", workspace.git_branch_selected+1, len(workspace.git_branches))
+	draw_workspace_jobs_popup(
+		&workspace.jobs_surface, pane.renderer.font, title, rows, workspace.git_branch_selected-start,
+		row_height, background, foreground, statusbar_active_accent(workspace),
+		workspace.settings.ui_colors.inactive_tab_background,
+	)
+}
+
+statusbar_git_branches_mouse :: proc(workspace: ^Workspace, mouse: keyboard.Mouse_Event) -> bool {
+	if workspace == nil || !workspace.git_popup_visible do return false
+	if mouse.action != .Press do return true
+	if mouse.button == 4 || mouse.button == 5 {
+		delta := -1 if mouse.button == 4 else 1
+		workspace.git_branch_selected = clamp(workspace.git_branch_selected+delta, 0, len(workspace.git_branches)-1)
+		workspace_draw_git_branches(workspace)
+		return true
+	}
+	if mouse.button != 1 do return true
+	shown := statusbar_git_branch_rows(workspace)
+	index := mouse.y/max(1, statusbar_row_height(workspace))-1
+	if index < 0 || index >= shown do return true
+	workspace.git_branch_selected = statusbar_git_branch_start(workspace, shown)+index
+	_ = workspace_switch_git_branch(workspace)
+	return true
 }
 
 statusbar_update_clock :: proc(state: ^Statusbar_State, format: string) -> bool {
@@ -1209,7 +1406,7 @@ statusbar_group_modules :: proc(workspace: ^Workspace, modules: []config.Status_
 			}
 			continue
 		}
-		append(&result, {text = value, foreground = foreground, background = background, jobs = module == .Jobs})
+		append(&result, {text = value, foreground = foreground, background = background, jobs = module == .Jobs, git = module == .Git})
 	}
 	return result[:]
 }
@@ -1217,7 +1414,7 @@ statusbar_group_modules :: proc(workspace: ^Workspace, modules: []config.Status_
 statusbar_module_group_key :: proc(modules: []Statusbar_Draw_Module) -> string {
 	output := make([dynamic]byte, 0, len(modules)*32, context.temp_allocator)
 	for module in modules {
-		part := fmt.tprintf("%08x:%08x:%d:%s\x00", module.foreground, module.background, module.jobs, module.text)
+		part := fmt.tprintf("%08x:%08x:%d:%d:%s\x00", module.foreground, module.background, module.jobs, module.git, module.text)
 		append(&output, ..transmute([]byte)part)
 	}
 	return string(output[:])
@@ -1231,11 +1428,15 @@ statusbar_mouse :: proc(workspace: ^Workspace, mouse: keyboard.Mouse_Event) -> b
 	row_height := statusbar_row_height(workspace)
 	compact_y := y
 	cache := &workspace.statusbar.render_cache
-	if mouse.y >= compact_y && mouse.y < compact_y+row_height && mouse.action == .Press && mouse.button == 1 && cache.jobs_hit_valid &&
+	if mouse.y >= compact_y && mouse.y < compact_y+row_height && mouse.action == .Press && mouse.button == 1 && cache.git_hit_valid &&
+	   mouse.x >= cache.git_hit_left && mouse.x < cache.git_hit_right {
+		workspace_toggle_git_branches(workspace)
+	} else if mouse.y >= compact_y && mouse.y < compact_y+row_height && mouse.action == .Press && mouse.button == 1 && cache.jobs_hit_valid &&
 	   mouse.x >= cache.jobs_hit_left && mouse.x < cache.jobs_hit_right {
 		workspace_toggle_jobs_list(workspace)
-	} else if workspace.jobs_visible && mouse.action == .Press && mouse.button == 1 {
-		workspace_toggle_jobs_list(workspace)
+	} else if (workspace.jobs_visible || workspace.git_popup_visible) && mouse.action == .Press && mouse.button == 1 {
+		if workspace.git_popup_visible do workspace_close_git_branches(workspace)
+		else do workspace_toggle_jobs_list(workspace)
 	}
 	return true
 }

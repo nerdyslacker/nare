@@ -227,6 +227,11 @@ Pending_Rule_Window :: struct {
 	started: time.Time,
 }
 
+Git_Branch :: struct {
+	name: string,
+	remote: bool,
+}
+
 Workspace :: struct {
 	root: ^x11.Window,
 	statusbar_surface: x11.Window,
@@ -236,6 +241,11 @@ Workspace :: struct {
 	search_visible: bool,
 	jobs_visible: bool,
 	jobs_selected: int,
+	git_popup_visible: bool,
+	git_branches: [dynamic]Git_Branch,
+	git_branch_selected: int,
+	git_branch_current: int,
+	git_branch_cwd: string,
 	settings: ^config.Settings,
 	command: []cstring,
 	tabs: [dynamic]^Tab,
@@ -453,7 +463,7 @@ workspace_init :: proc(
 	title := overrides.title if overrides.override_title else settings.title
 	workspace^ = Workspace{
 		root = root, settings = settings, command = command, initial_font_size = font_size, font_size = font_size,
-		renaming_tab = -1, last_click_tab = -2, last_cursor_toggle = time.now(), tab_reveal_active = true,
+		renaming_tab = -1, last_click_tab = -2, git_branch_current = -1, last_cursor_toggle = time.now(), tab_reveal_active = true,
 		renderer = renderer, gpu_backend = settings.gpu_backend, ligatures = ligatures, title = strings.clone(title), quake = quake_controller,
 		normal_width = root.width, normal_height = root.height,
 	}
@@ -924,6 +934,9 @@ workspace_destroy :: proc(workspace: ^Workspace) {
 	jobs.destroy(&workspace.jobs)
 	delete(workspace.tab_bounds)
 	delete(workspace.rename_buffer)
+	for branch in workspace.git_branches do delete(branch.name)
+	delete(workspace.git_branches)
+	delete(workspace.git_branch_cwd)
 	delete(workspace.title)
 	statusbar_destroy(&workspace.statusbar)
 	workspace_font_cache_release(workspace.font_cache, workspace.font_entry)
@@ -1312,6 +1325,7 @@ workspace_search_bar_height :: proc(workspace: ^Workspace) -> int {
 workspace_draw_tabs :: proc(workspace: ^Workspace) {
 	defer workspace_draw_close_confirmation(workspace)
 	defer workspace_draw_jobs_list(workspace)
+	defer workspace_draw_git_branches(workspace)
 	defer workspace_draw_search_bar(workspace)
 	defer workspace_draw_statusbar(workspace)
 	height := workspace_tab_bar_height(workspace)
@@ -1471,8 +1485,10 @@ workspace_event :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
 		} else if event.source == workspace.statusbar_surface.id {
 			workspace_draw_statusbar(workspace)
 			workspace_draw_jobs_list(workspace)
+			workspace_draw_git_branches(workspace)
 		} else if event.source == workspace.jobs_surface.id {
-			workspace_draw_jobs_list(workspace)
+			if workspace.git_popup_visible do workspace_draw_git_branches(workspace)
+			else do workspace_draw_jobs_list(workspace)
 		} else if event.source == workspace.search_surface.id {
 			workspace_draw_search_bar(workspace)
 		} else if event.source == workspace.close_surface.id {
@@ -1497,6 +1513,10 @@ workspace_event :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
 		if workspace.close_confirmation {
 			if event.key == .Enter || (event.key == .Text && event.input_size == 1 && (event.input[0] == 'y' || event.input[0] == 'Y')) do return false
 			if event.key == .Escape || (event.key == .Text && event.input_size == 1 && (event.input[0] == 'n' || event.input[0] == 'N')) do workspace_hide_close_confirmation(workspace)
+			return true
+		}
+		if workspace.git_popup_visible {
+			workspace_git_branches_input(workspace, event)
 			return true
 		}
 		if workspace.jobs_visible {
@@ -1580,10 +1600,12 @@ workspace_event :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
 			return true
 		}
 		if statusbar_auto_hide_pointer(workspace, pointer_y) do return true
+		if event.source == workspace.jobs_surface.id && statusbar_git_branches_mouse(workspace, event.mouse) do return true
 		if event.source == workspace.jobs_surface.id && statusbar_jobs_mouse(workspace, event.mouse) do return true
 		if event.source == workspace.statusbar_surface.id && statusbar_mouse(workspace, event.mouse) do return true
-		if workspace.jobs_visible && event.mouse.action == .Press {
-			workspace_toggle_jobs_list(workspace)
+		if (workspace.jobs_visible || workspace.git_popup_visible) && event.mouse.action == .Press {
+			if workspace.git_popup_visible do workspace_close_git_branches(workspace)
+			else do workspace_toggle_jobs_list(workspace)
 			return true
 		}
 		if event.source == workspace.root.id && workspace_tab_bar_mouse(workspace, event.mouse, event.timestamp) do return true
@@ -2206,6 +2228,10 @@ workspace_shortcut :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
 	}
 	if event_matches(event, bindings.show_jobs) {
 		workspace_toggle_jobs_list(workspace)
+		return true
+	}
+	if event_matches(event, bindings.show_git_branches) {
+		workspace_toggle_git_branches(workspace)
 		return true
 	}
 	for &binding in workspace.settings.tab_rule_bindings {

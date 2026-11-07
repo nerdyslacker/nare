@@ -94,7 +94,7 @@ Bindings :: struct {
 	copy, paste, font_increase, font_decrease, font_reset: string,
 	tmux_new_tab, tmux_new_window, tmux_attach_last: string,
 	tmux_detach, tmux_reconnect: string,
-	toggle_statusbar, show_jobs, open_hints, reload_config, open_config: string,
+	toggle_statusbar, show_jobs, show_git_branches, open_hints, reload_config, open_config: string,
 }
 
 Statusbar_Jobs_Settings :: struct {
@@ -331,6 +331,7 @@ settings_init :: proc(settings: ^Settings) {
 		tmux_reconnect = strings.clone("alt+control+r"),
 		toggle_statusbar = strings.clone("alt+shift+b"),
 		show_jobs = strings.clone("alt+shift+j"),
+		show_git_branches = strings.clone("alt+shift+g"),
 		open_hints = strings.clone("control+shift+u"),
 		reload_config = strings.clone("alt+shift+r"),
 		open_config = strings.clone("alt+shift+e"),
@@ -922,6 +923,7 @@ apply :: proc(settings: ^Settings, section, key, value: string) -> Error {
 		case "tmux-reconnect": replace_string(&settings.bindings.tmux_reconnect, value)
 		case "toggle-statusbar": replace_string(&settings.bindings.toggle_statusbar, value)
 		case "show-jobs": replace_string(&settings.bindings.show_jobs, value)
+		case "show-git-branches": replace_string(&settings.bindings.show_git_branches, value)
 		case "open-hints": replace_string(&settings.bindings.open_hints, value)
 		case "reload-config": replace_string(&settings.bindings.reload_config, value)
 		case "open-config": replace_string(&settings.bindings.open_config, value)
@@ -1260,7 +1262,7 @@ destroy_bindings :: proc(bindings: ^Bindings) {
 	delete(bindings.copy); delete(bindings.paste); delete(bindings.font_increase); delete(bindings.font_decrease); delete(bindings.font_reset)
 	delete(bindings.tmux_new_tab); delete(bindings.tmux_new_window); delete(bindings.tmux_attach_last)
 	delete(bindings.tmux_detach); delete(bindings.tmux_reconnect)
-	delete(bindings.toggle_statusbar); delete(bindings.show_jobs); delete(bindings.open_hints); delete(bindings.reload_config); delete(bindings.open_config)
+	delete(bindings.toggle_statusbar); delete(bindings.show_jobs); delete(bindings.show_git_branches); delete(bindings.open_hints); delete(bindings.reload_config); delete(bindings.open_config)
 	bindings^ = {}
 }
 
@@ -1406,7 +1408,7 @@ shortcut_conflicts :: proc(settings: ^Settings, chord, rule_name: string) -> boo
 	   chord == b.toggle_stack || chord == b.swap_pane || chord == b.move_tab_left || chord == b.move_tab_right ||
 	   chord == b.copy || chord == b.paste || chord == b.font_increase || chord == b.font_decrease || chord == b.font_reset ||
 	   chord == b.tmux_new_tab || chord == b.tmux_new_window || chord == b.tmux_attach_last ||
-	   chord == b.tmux_detach || chord == b.tmux_reconnect || chord == b.toggle_statusbar || chord == b.show_jobs ||
+	   chord == b.tmux_detach || chord == b.tmux_reconnect || chord == b.toggle_statusbar || chord == b.show_jobs || chord == b.show_git_branches ||
 	   chord == b.open_hints || chord == b.reload_config || chord == b.open_config {
 		return true
 	}
