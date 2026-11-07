@@ -263,6 +263,7 @@ Workspace :: struct {
 	initial_font_size: int,
 	font_size: int,
 	tab_bounds: [dynamic]Tab_Bounds,
+	tab_bar_height: int,
 	tab_animation_positions: [dynamic]Tab_Animation_Position,
 	tab_animation_started, tab_animation_last_frame: time.Tick,
 	tab_scroll_offset: int,
@@ -1126,8 +1127,10 @@ workspace_layout :: proc(workspace: ^Workspace, resize_grid: bool = true) {
 	if commit_grid do workspace.grid_resize_pending = false
 	row_drag := workspace.split_drag.node != nil && workspace.split_drag.node.axis == .Rows
 	root := workspace.root
-	x11.set_surface_colors(root, workspace.settings.theme.background, workspace.settings.ui_colors.active_border, clear = false)
 	tab_bar := workspace_tab_bar_height(workspace)
+	tab_bar_changed := tab_bar != workspace.tab_bar_height
+	workspace.tab_bar_height = tab_bar
+	x11.set_surface_colors(root, workspace.settings.theme.background, workspace.settings.ui_colors.active_border, clear = tab_bar_changed)
 	status_bar := statusbar_height(workspace)
 	padding := workspace.settings.window.padding
 	content_y := padding
