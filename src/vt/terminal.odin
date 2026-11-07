@@ -247,11 +247,8 @@ terminal_init :: proc(
 		graphics.registry_destroy(&terminal.images)
 		return false
 	}
-	if !screen_init(&terminal.alternate_screen, columns, rows, 0, &terminal.images, .Alternate) {
-		screen_destroy(&terminal.main_screen)
-		graphics.registry_destroy(&terminal.images)
-		return false
-	}
+	terminal.alternate_screen.image_registry = &terminal.images
+	terminal.alternate_screen.image_screen = .Alternate
 	terminal.modes.autowrap = true
 	terminal.modes.cursor_visible = true
 	terminal.modes.alternate_scroll = true
@@ -346,7 +343,10 @@ terminal_input :: proc(terminal: ^Terminal, data: []byte) {
 
 terminal_resize :: proc(terminal: ^Terminal, columns, rows: int) -> bool {
 	main_ok := screen_resize(&terminal.main_screen, columns, rows, terminal.attributes)
-	alternate_ok := screen_resize_without_reflow(&terminal.alternate_screen, columns, rows, terminal.attributes)
+	alternate_ok := true
+	if len(terminal.alternate_screen.cells) > 0 {
+		alternate_ok = screen_resize_without_reflow(&terminal.alternate_screen, columns, rows, terminal.attributes)
+	}
 	return main_ok && alternate_ok
 }
 
@@ -1814,6 +1814,17 @@ report_mode :: proc(terminal: ^Terminal, event: Event) {
 switch_alternate :: proc(terminal: ^Terminal, enabled, save_cursor: bool) {
 	if enabled == terminal.using_alternate do return
 	if enabled {
+		if len(terminal.alternate_screen.cells) == 0 &&
+		   !screen_init(
+			&terminal.alternate_screen,
+			terminal.main_screen.columns,
+			terminal.main_screen.rows,
+			0,
+			&terminal.images,
+			.Alternate,
+		) {
+			return
+		}
 		if save_cursor do terminal.main_screen.saved_cursor = terminal.main_screen.cursor
 		screen_clear(&terminal.alternate_screen, terminal.attributes)
 		terminal.using_alternate = true
@@ -1823,6 +1834,9 @@ switch_alternate :: proc(terminal: ^Terminal, enabled, save_cursor: bool) {
 			terminal.main_screen.cursor = terminal.main_screen.saved_cursor
 			terminal.main_screen.wrap_pending = false
 		}
+		screen_destroy(&terminal.alternate_screen)
+		terminal.alternate_screen.image_registry = &terminal.images
+		terminal.alternate_screen.image_screen = .Alternate
 	}
 	screen_index := 1 if terminal.using_alternate else 0
 	depth := terminal.pointer_shape_depths[screen_index]
@@ -2047,7 +2061,9 @@ terminal_reset :: proc(terminal: ^Terminal) {
 	terminal.modes = Modes{autowrap = true, cursor_visible = true, sixel_private_colors = true, alternate_scroll = true}
 	terminal.using_alternate = false
 	screen_clear(&terminal.main_screen, {})
-	screen_clear(&terminal.alternate_screen, {})
+	screen_destroy(&terminal.alternate_screen)
+	terminal.alternate_screen.image_registry = &terminal.images
+	terminal.alternate_screen.image_screen = .Alternate
 	clear_hyperlinks(terminal)
 	graphics.kitty_transfer_reset(&terminal.kitty_transfer)
 	graphics.registry_clear(&terminal.images)
