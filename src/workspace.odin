@@ -252,6 +252,7 @@ Workspace :: struct {
 	rename_buffer: [dynamic]byte,
 	last_tab_click_timestamp: u64,
 	last_click_tab: int,
+	tab_drag: ^Tab,
 	split_drag: Split_Drag,
 	last_cursor_toggle: time.Time,
 	pointer_shape: vt.Pointer_Shape,
@@ -1558,6 +1559,13 @@ workspace_event :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
 		}
 		if event.source == workspace.statusbar_surface.id do pointer_y += workspace.statusbar_surface.y
 		if event.source == workspace.jobs_surface.id do pointer_y += workspace.jobs_surface.y
+		if workspace.tab_drag != nil && (event.mouse.action == .Motion || event.mouse.action == .Release) {
+			mouse := event.mouse
+			mouse.x = event.mouse.root_x-workspace.root.x
+			mouse.y = event.mouse.root_y-workspace.root.y
+			_ = workspace_tab_bar_mouse(workspace, mouse, event.timestamp)
+			return true
+		}
 		if workspace.split_drag.node != nil && (event.mouse.action == .Motion || event.mouse.action == .Release) {
 			pointer_x = event.mouse.root_x-workspace.root.x
 			pointer_y = event.mouse.root_y-workspace.root.y
@@ -1783,12 +1791,37 @@ workspace_send_key_event :: proc(workspace: ^Workspace, pane: ^Pane, event: x11.
 }
 
 workspace_tab_bar_mouse :: proc(workspace: ^Workspace, mouse: keyboard.Mouse_Event, timestamp: u64) -> bool {
+	if mouse.action == .Release && workspace.tab_drag != nil {
+		workspace.tab_drag = nil
+		return true
+	}
 	height := workspace_tab_bar_height(workspace)
 	if height <= 0 do return false
 	y := 0
 	if workspace.settings.tabs.edge == .Bottom do y = workspace.root.height-height
+	if mouse.action == .Motion && workspace.tab_drag != nil {
+		if mouse.button != 1 {
+			workspace.tab_drag = nil
+			return true
+		}
+		if mouse.y >= y && mouse.y < y+height {
+			target := workspace_tab_at(workspace, mouse.x)
+			for tab, source in workspace.tabs do if tab == workspace.tab_drag {
+				for bound in workspace.tab_bounds do if bound.tab_index == target {
+					midpoint := bound.x+bound.width/2
+					if source < target && mouse.x >= midpoint || source > target && mouse.x < midpoint {
+						workspace_reorder_tab(workspace, source, target)
+					}
+					break
+				}
+				break
+			}
+		}
+		return true
+	}
 	if mouse.y < y || mouse.y >= y+height do return false
 	if mouse.action != .Press do return true
+	workspace.tab_drag = nil
 	index := workspace_tab_at(workspace, mouse.x)
 	if index == TAB_HIT_LEFT || index == TAB_HIT_RIGHT {
 		if mouse.button == 1 {
@@ -1821,6 +1854,8 @@ workspace_tab_bar_mouse :: proc(workspace: ^Workspace, mouse: keyboard.Mouse_Eve
 		workspace_select_tab(workspace, index)
 		if double_click {
 			workspace_begin_rename(workspace, index)
+		} else {
+			workspace.tab_drag = workspace.tabs[index]
 		}
 	} else if double_click {
 		_ = workspace_new_tab(workspace)
@@ -2522,10 +2557,21 @@ workspace_select_tab :: proc(workspace: ^Workspace, index: int) {
 workspace_move_tab :: proc(workspace: ^Workspace, delta: int) {
 	if len(workspace.tabs) < 2 do return
 	target := clamp(workspace.active+delta, 0, len(workspace.tabs)-1)
-	workspace.tabs[workspace.active], workspace.tabs[target] = workspace.tabs[target], workspace.tabs[workspace.active]
+	workspace_reorder_tab(workspace, workspace.active, target)
+}
+
+workspace_reorder_tab :: proc(workspace: ^Workspace, source, target: int) {
+	if source < 0 || source >= len(workspace.tabs) || target < 0 || target >= len(workspace.tabs) || source == target do return
+	tab := workspace.tabs[source]
+	if source < target {
+		for index := source; index < target; index += 1 do workspace.tabs[index] = workspace.tabs[index+1]
+	} else {
+		for index := source; index > target; index -= 1 do workspace.tabs[index] = workspace.tabs[index-1]
+	}
+	workspace.tabs[target] = tab
 	workspace.active = target
 	workspace.tab_reveal_active = true
-	workspace_layout(workspace)
+	workspace_draw_tabs(workspace)
 }
 
 workspace_focus_delta :: proc(workspace: ^Workspace, delta: int) {

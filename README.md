@@ -166,7 +166,7 @@ Press `Alt+Shift+R` to reload the file. Nare keeps the current settings after a 
 
 Press `Ctrl+Shift+U` to label visible URLs and OSC 8 hyperlinks. Plain-text detection covers common web, file, mail, SSH, Git, IPFS, Gemini, Gopher, FTP, news, magnet, and telephone URI schemes. Press a label to open its link, `Shift` plus the label to copy it, or `Esc` to close hint mode. Hold `Alt` to underline detected URIs and show a hand pointer over the link beneath the mouse; `Alt+left-click` opens it. Configure the shortcut as `open-hints` under `[bindings]`.
 
-Middle-click a pane to split it horizontally, or hold `Alt` while middle-clicking to split it vertically. Drag a divider with the left mouse button to resize local panes. `Alt+Shift+H/J/K/L` resizes the active local or tmux pane; the four directional bindings are configurable.
+Drag a tab with the left mouse button to reorder it. Middle-click a pane to split it horizontally, or hold `Alt` while middle-clicking to split it vertically. Drag a divider with the left mouse button to resize local panes. `Alt+Shift+H/J/K/L` resizes the active local or tmux pane; the four directional bindings are configurable.
 
 Pass a directory to open the first shell there:
 
