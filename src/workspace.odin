@@ -44,6 +44,7 @@ Pane :: struct {
 	url_state: features.URL_State,
 	url_hover_state: features.URL_State,
 	url_hover_hand: bool,
+	url_hover_cell: int,
 	hint_release_pending: bool,
 	hint_release_key: keyboard.Key,
 	shell_state: features.Shell_State,
@@ -738,6 +739,7 @@ workspace_new_pane_command :: proc(workspace: ^Workspace, command: []cstring, cw
 	pane := new(Pane)
 	pane.workspace = workspace
 	pane.tmux_pane_id = -1
+	pane.url_hover_cell = -1
 	surface, ok := x11.create_child(workspace.root, 0, 0, workspace.root.width, workspace.root.height)
 	if !ok { free(pane); return nil }
 	pane.surface = surface
@@ -812,6 +814,7 @@ workspace_new_tmux_view :: proc(workspace: ^Workspace, owner: ^Pane, pane_id: in
 	pane.workspace = workspace
 	pane.tmux_owner = owner
 	pane.tmux_pane_id = pane_id
+	pane.url_hover_cell = -1
 	surface, ok := x11.create_child(workspace.root, 0, 0, workspace.root.width, workspace.root.height)
 	if !ok {free(pane); return nil}
 	pane.surface = surface
@@ -1266,6 +1269,7 @@ workspace_clear_url_hover :: proc(workspace: ^Workspace, pane: ^Pane, redraw_pan
 	if pane == nil do return
 	was_active := pane.url_hover_state.active
 	features.url_close(&pane.url_hover_state)
+	pane.url_hover_cell = -1
 	workspace_url_hover_cursor(workspace, pane, false)
 	if was_active && redraw_pane && pane.visible do workspace_redraw(workspace, pane, true)
 }
@@ -1525,6 +1529,7 @@ workspace_event :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
 			return true
 		}
 		if rows := scrollback_shortcut(event, vt.terminal_screen(&pane.terminal).rows); rows != 0 {
+			workspace_clear_url_hover(workspace, pane, false)
 			selection.clear(&pane.selection_state)
 			features.scrollback_scroll(&pane.scrollback_state, vt.terminal_screen(&pane.terminal), rows)
 			workspace_redraw(workspace, pane, true)
@@ -1606,10 +1611,16 @@ workspace_event :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
 				workspace_clear_url_hover(workspace, candidate)
 			}
 			if workspace.url_hover_tracking && .Alt in mouse.modifiers && !pane.search_state.active && !pane.url_state.active && !pane.shell_state.active {
-				hand := features.url_highlight(&pane.url_hover_state, &pane.terminal, workspace_selection_screen(pane), mouse.row-1, mouse.column-1)
-				workspace_url_hover_cursor(workspace, pane, hand)
-				workspace_redraw(workspace, pane, true)
-			} else if pane.url_hover_state.active || pane.url_hover_hand {
+				row, column := mouse.row-1, mouse.column-1
+				screen := workspace_selection_screen(pane)
+				cell := row*screen.columns+column
+				if cell != pane.url_hover_cell {
+					pane.url_hover_cell = cell
+					hand := features.url_highlight(&pane.url_hover_state, &pane.terminal, screen, row, column)
+					workspace_url_hover_cursor(workspace, pane, hand)
+					workspace_redraw(workspace, pane, true)
+				}
+			} else if pane.url_hover_cell >= 0 || pane.url_hover_state.active || pane.url_hover_hand {
 				workspace_clear_url_hover(workspace, pane)
 			}
 		}
@@ -1624,7 +1635,10 @@ workspace_event :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
 		if workspace.settings.scrollbar_enabled && !pane.search_state.active && !pane.url_state.active && !pane.shell_state.active {
 			handled, scrolled, visual_changed := handle_scrollbar_mouse(&pane.surface, &pane.terminal, &pane.scrollback_state, &pane.scrollbar, mouse)
 			if handled {
-				if scrolled do selection.clear(&pane.selection_state)
+				if scrolled {
+					workspace_clear_url_hover(workspace, pane, false)
+					selection.clear(&pane.selection_state)
+				}
 				if scrolled || visual_changed {
 					workspace_redraw(workspace, pane, true)
 				}
@@ -1666,6 +1680,7 @@ workspace_event :: proc(workspace: ^Workspace, event: x11.Event) -> bool {
 				previous_offset := pane.scrollback_state.offset
 				features.scrollback_scroll(&pane.scrollback_state, vt.terminal_screen(&pane.terminal), direction)
 				if pane.scrollback_state.offset != previous_offset {
+					workspace_clear_url_hover(workspace, pane, false)
 					selection.scroll(&pane.selection_state, pane.scrollback_state.offset-previous_offset)
 					workspace.scroll_redraw_source = pane.surface.id
 				}
