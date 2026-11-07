@@ -14,6 +14,10 @@ Tab_Draw_Label :: struct {
 	active: bool,
 	root: bool,
 	tmux: bool,
+	animate: bool,
+	animate_from_x: int,
+	dragging: bool,
+	drag_x: int,
 }
 
 Statusbar_Draw_Module :: struct {
@@ -86,6 +90,7 @@ draw_workspace_tab_bar :: proc(
 	active_index: int,
 	scroll_offset: ^int,
 	reveal_active: bool,
+	animation_progress: int,
 ) {
 	clear(bounds)
 	if height <= 0 || window.width <= 0 do return
@@ -132,34 +137,49 @@ draw_workspace_tab_bar :: proc(
 		scroll_offset^ = 0
 	}
 	x := content_left-scroll_offset^
-	for label, index in labels {
+	for _, index in labels {
 		tab_width := widths[index]
-		if x+tab_width <= content_left {
-			x += tab_width
-			continue
-		}
-		if x >= content_right do break
-		bold := label.active && active_bold
 		visible_left := max(content_left, x)
 		visible_right := min(content_right, x+tab_width)
 		width := visible_right-visible_left
-		if width <= 0 do break
-		append(bounds, {x = visible_left, width = width, tab_index = index})
-		bg := active_background if label.active else inactive_background
-		fg := active_foreground if label.active else inactive_foreground
-		if label.active && label.tmux do bg = tmux_background
-		if label.root {
-			if label.active {
-				bg = root_background
-				fg = active_foreground
-			} else {
-				bg = muted_root_tab_color(root_background, inactive_background)
-				fg = inactive_foreground
-			}
-		}
-		fill_tab_rect(pixels, window, visible_left, 0, width, height, bg)
-		draw_tab_text(pixels, window, font, label.text, x+6, 2+font.ascent, fg, bold, visible_left, visible_right-6)
+		if width > 0 do append(bounds, {x = visible_left, width = width, layout_x = x, tab_index = index})
 		x += tab_width
+	}
+	for active_pass in 0..<2 {
+		x = content_left-scroll_offset^
+		for label, index in labels {
+			tab_width := widths[index]
+			if label.active != (active_pass == 1) {
+				x += tab_width
+				continue
+			}
+			render_x := x
+			if label.animate do render_x = label.animate_from_x+(x-label.animate_from_x)*animation_progress/1000
+			if label.dragging do render_x = label.drag_x
+			visible_left := max(content_left, render_x)
+			visible_right := min(content_right, render_x+tab_width)
+			width := visible_right-visible_left
+			if width <= 0 {
+				x += tab_width
+				continue
+			}
+			bold := label.active && active_bold
+			bg := active_background if label.active else inactive_background
+			fg := active_foreground if label.active else inactive_foreground
+			if label.active && label.tmux do bg = tmux_background
+			if label.root {
+				if label.active {
+					bg = root_background
+					fg = active_foreground
+				} else {
+					bg = muted_root_tab_color(root_background, inactive_background)
+					fg = inactive_foreground
+				}
+			}
+			fill_tab_rect(pixels, window, visible_left, 0, width, height, bg)
+			draw_tab_text(pixels, window, font, label.text, render_x+6, 2+font.ascent, fg, bold, visible_left, visible_right-6)
+			x += tab_width
+		}
 	}
 	xlib.PutImage(window.display, xlib.Drawable(window.id), window.gc, image, 0, 0, 0, i32(y), u32(window.width), u32(height))
 	_ = xlib.Flush(window.display)

@@ -80,6 +80,8 @@ SPLIT_RATIO_HALF :: SPLIT_RATIO_SCALE / 2
 SPLIT_MIN_PIXELS :: 32
 SPLIT_HANDLE_PIXELS :: 5
 SPLIT_KEYBOARD_STEP :: 50
+TAB_REORDER_ANIMATION_DURATION :: 140*time.Millisecond
+TAB_REORDER_FRAME_MS :: 16
 
 Split_Node :: struct {
 	pane: ^Pane,
@@ -218,8 +220,13 @@ split_resize_toward :: proc(node: ^Split_Node, pane: ^Pane, axis: Split_Axis, fi
 }
 
 Tab_Bounds :: struct {
-	x, width: int,
+	x, width, layout_x: int,
 	tab_index: int,
+}
+
+Tab_Animation_Position :: struct {
+	tab_id: u64,
+	from_x: int,
 }
 
 Pending_Rule_Window :: struct {
@@ -256,6 +263,8 @@ Workspace :: struct {
 	initial_font_size: int,
 	font_size: int,
 	tab_bounds: [dynamic]Tab_Bounds,
+	tab_animation_positions: [dynamic]Tab_Animation_Position,
+	tab_animation_started, tab_animation_last_frame: time.Tick,
 	tab_scroll_offset: int,
 	tab_reveal_active: bool,
 	renaming_tab: int,
@@ -263,6 +272,7 @@ Workspace :: struct {
 	last_tab_click_timestamp: u64,
 	last_click_tab: int,
 	tab_drag: ^Tab,
+	tab_drag_offset, tab_drag_x: int,
 	split_drag: Split_Drag,
 	last_cursor_toggle: time.Time,
 	pointer_shape: vt.Pointer_Shape,
@@ -409,6 +419,10 @@ workspace_poll_timeout_ms :: proc(workspace: ^Workspace) -> int {
 		timeout = poll_timeout_after(timeout, interval-time.since(workspace.last_cursor_toggle))
 	}
 	if workspace.statusbar.sample_thread != nil do timeout = poll_timeout_limit(timeout, int(STATUSBAR_SERVICE_INTERVAL/time.Millisecond))
+	if len(workspace.tab_animation_positions) > 0 {
+		time_until_frame := TAB_REORDER_FRAME_MS*time.Millisecond-time.tick_since(workspace.tab_animation_last_frame)
+		timeout = poll_timeout_after(timeout, time_until_frame)
+	}
 	for tab in workspace.tabs do for pane in tab.panes {
 		timeout = poll_timeout_limit(timeout, vt.terminal_kitty_timeout_ms(&pane.terminal))
 		timeout = poll_timeout_limit(timeout, vt.terminal_animation_timeout_ms(&pane.terminal))
@@ -638,6 +652,7 @@ workspace_dispatch_poll :: proc(target: Workspace_Poll_Target, events: posix.Pol
 }
 
 workspace_finish_cycle :: proc(workspace: ^Workspace) {
+	workspace_tab_animation_tick(workspace)
 	for tab in workspace.tabs do for pane in tab.panes do _ = vt.terminal_expire_kitty_transfer(&pane.terminal)
 	for tab in workspace.tabs do for pane in tab.panes {
 		if vt.terminal_animation_tick(&pane.terminal) && pane.visible {
@@ -933,6 +948,7 @@ workspace_destroy :: proc(workspace: ^Workspace) {
 	jobs.reporter_close(&workspace.job_reporter)
 	jobs.destroy(&workspace.jobs)
 	delete(workspace.tab_bounds)
+	delete(workspace.tab_animation_positions)
 	delete(workspace.rename_buffer)
 	for branch in workspace.git_branches do delete(branch.name)
 	delete(workspace.git_branches)
@@ -1322,12 +1338,35 @@ workspace_search_bar_height :: proc(workspace: ^Workspace) -> int {
 	return pane.renderer.font.cell_height+6
 }
 
-workspace_draw_tabs :: proc(workspace: ^Workspace) {
-	defer workspace_draw_close_confirmation(workspace)
-	defer workspace_draw_jobs_list(workspace)
-	defer workspace_draw_git_branches(workspace)
-	defer workspace_draw_search_bar(workspace)
-	defer workspace_draw_statusbar(workspace)
+workspace_tab_animation_progress :: proc(workspace: ^Workspace) -> int {
+	if len(workspace.tab_animation_positions) == 0 do return 1000
+	linear := clamp(int(time.tick_since(workspace.tab_animation_started)*1000/TAB_REORDER_ANIMATION_DURATION), 0, 1000)
+	remaining := 1000-linear
+	return 1000-remaining*remaining*remaining/1_000_000
+}
+
+workspace_tab_animation_tick :: proc(workspace: ^Workspace) {
+	if len(workspace.tab_animation_positions) == 0 do return
+	if time.tick_since(workspace.tab_animation_started) >= TAB_REORDER_ANIMATION_DURATION {
+		delete(workspace.tab_animation_positions)
+		workspace.tab_animation_positions = nil
+	} else if time.tick_since(workspace.tab_animation_last_frame) < TAB_REORDER_FRAME_MS*time.Millisecond {
+		return
+	}
+	workspace.tab_animation_last_frame = time.tick_now()
+	workspace_draw_tabs(workspace, false)
+}
+
+workspace_draw_tabs :: proc(workspace: ^Workspace, draw_overlays: bool = true) {
+	defer {
+		if draw_overlays {
+			workspace_draw_statusbar(workspace)
+			workspace_draw_search_bar(workspace)
+			workspace_draw_git_branches(workspace)
+			workspace_draw_jobs_list(workspace)
+			workspace_draw_close_confirmation(workspace)
+		}
+	}
 	height := workspace_tab_bar_height(workspace)
 	if height == 0 do return
 	labels := make([]Tab_Draw_Label, len(workspace.tabs), context.temp_allocator)
@@ -1352,13 +1391,22 @@ workspace_draw_tabs :: proc(workspace: ^Workspace) {
 		root := false
 		for pane in tab.panes do if pane.root_foreground {root = true; break}
 		labels[index] = {text = label, active = index == workspace.active, root = root, tmux = tab_is_tmux(tab)}
+		for position in workspace.tab_animation_positions do if position.tab_id == tab.id {
+			labels[index].animate = true
+			labels[index].animate_from_x = position.from_x
+			break
+		}
+		if workspace.tab_drag == tab {
+			labels[index].dragging = true
+			labels[index].drag_x = workspace.tab_drag_x
+		}
 	}
 	y := 0
 	if workspace.settings.tabs.edge == .Bottom do y = workspace.root.height-height
 	colors := workspace.settings.ui_colors
 	pane := workspace_active_pane(workspace)
 	if pane == nil do return
-	draw_workspace_tab_bar(workspace.root, pane.renderer.font, labels, &workspace.tab_bounds, y, height, colors.tab_bar_background, colors.active_tab_foreground, colors.active_tab_background, colors.inactive_tab_foreground, colors.inactive_tab_background, colors.root_tab_background, workspace.settings.tmux.active_tab_color, workspace.settings.tabs.active_bold, workspace.active, &workspace.tab_scroll_offset, workspace.tab_reveal_active)
+	draw_workspace_tab_bar(workspace.root, pane.renderer.font, labels, &workspace.tab_bounds, y, height, colors.tab_bar_background, colors.active_tab_foreground, colors.active_tab_background, colors.inactive_tab_foreground, colors.inactive_tab_background, colors.root_tab_background, workspace.settings.tmux.active_tab_color, workspace.settings.tabs.active_bold, workspace.active, &workspace.tab_scroll_offset, workspace.tab_reveal_active, workspace_tab_animation_progress(workspace))
 	workspace.tab_reveal_active = false
 }
 
@@ -1814,7 +1862,7 @@ workspace_send_key_event :: proc(workspace: ^Workspace, pane: ^Pane, event: x11.
 
 workspace_tab_bar_mouse :: proc(workspace: ^Workspace, mouse: keyboard.Mouse_Event, timestamp: u64) -> bool {
 	if mouse.action == .Release && workspace.tab_drag != nil {
-		workspace.tab_drag = nil
+		workspace_finish_tab_drag(workspace)
 		return true
 	}
 	height := workspace_tab_bar_height(workspace)
@@ -1823,9 +1871,11 @@ workspace_tab_bar_mouse :: proc(workspace: ^Workspace, mouse: keyboard.Mouse_Eve
 	if workspace.settings.tabs.edge == .Bottom do y = workspace.root.height-height
 	if mouse.action == .Motion && workspace.tab_drag != nil {
 		if mouse.button != 1 {
-			workspace.tab_drag = nil
+			workspace_finish_tab_drag(workspace)
 			return true
 		}
+		workspace.tab_drag_x = mouse.x-workspace.tab_drag_offset
+		reordered := false
 		if mouse.y >= y && mouse.y < y+height {
 			target := workspace_tab_at(workspace, mouse.x)
 			for tab, source in workspace.tabs do if tab == workspace.tab_drag {
@@ -1833,12 +1883,14 @@ workspace_tab_bar_mouse :: proc(workspace: ^Workspace, mouse: keyboard.Mouse_Eve
 					midpoint := bound.x+bound.width/2
 					if source < target && mouse.x >= midpoint || source > target && mouse.x < midpoint {
 						workspace_reorder_tab(workspace, source, target)
+						reordered = true
 					}
 					break
 				}
 				break
 			}
 		}
+		if !reordered do workspace_draw_tabs(workspace, false)
 		return true
 	}
 	if mouse.y < y || mouse.y >= y+height do return false
@@ -1878,6 +1930,11 @@ workspace_tab_bar_mouse :: proc(workspace: ^Workspace, mouse: keyboard.Mouse_Eve
 			workspace_begin_rename(workspace, index)
 		} else {
 			workspace.tab_drag = workspace.tabs[index]
+			for bound in workspace.tab_bounds do if bound.tab_index == index {
+				workspace.tab_drag_offset = mouse.x-bound.layout_x
+				workspace.tab_drag_x = bound.layout_x
+				break
+			}
 		}
 	} else if double_click {
 		_ = workspace_new_tab(workspace)
@@ -2586,8 +2643,38 @@ workspace_move_tab :: proc(workspace: ^Workspace, delta: int) {
 	workspace_reorder_tab(workspace, workspace.active, target)
 }
 
+workspace_begin_tab_reorder_animation :: proc(workspace: ^Workspace) {
+	positions: [dynamic]Tab_Animation_Position
+	progress := workspace_tab_animation_progress(workspace)
+	for bound in workspace.tab_bounds {
+		if bound.tab_index < 0 || bound.tab_index >= len(workspace.tabs) do continue
+		tab := workspace.tabs[bound.tab_index]
+		from_x := bound.layout_x
+		if tab == workspace.tab_drag do from_x = workspace.tab_drag_x
+		else do for previous in workspace.tab_animation_positions do if previous.tab_id == tab.id {
+			from_x = previous.from_x+(bound.layout_x-previous.from_x)*progress/1000
+			break
+		}
+		append(&positions, {tab_id = tab.id, from_x = from_x})
+	}
+	delete(workspace.tab_animation_positions)
+	workspace.tab_animation_positions = positions
+	workspace.tab_animation_started = time.tick_now()
+	workspace.tab_animation_last_frame = workspace.tab_animation_started
+}
+
+workspace_finish_tab_drag :: proc(workspace: ^Workspace) {
+	for bound in workspace.tab_bounds do if bound.tab_index >= 0 && bound.tab_index < len(workspace.tabs) && workspace.tabs[bound.tab_index] == workspace.tab_drag {
+		if workspace.tab_drag_x != bound.layout_x do workspace_begin_tab_reorder_animation(workspace)
+		break
+	}
+	workspace.tab_drag = nil
+	workspace_draw_tabs(workspace, false)
+}
+
 workspace_reorder_tab :: proc(workspace: ^Workspace, source, target: int) {
 	if source < 0 || source >= len(workspace.tabs) || target < 0 || target >= len(workspace.tabs) || source == target do return
+	workspace_begin_tab_reorder_animation(workspace)
 	tab := workspace.tabs[source]
 	if source < target {
 		for index := source; index < target; index += 1 do workspace.tabs[index] = workspace.tabs[index+1]
