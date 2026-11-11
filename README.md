@@ -31,6 +31,21 @@
 - tmux control mode maps tmux windows and panes to native Nare views across local or SSH sessions.
 - The status bar can show shell metadata, jobs, system resources, Git state, and zoom. Server and Quake modes remain optional.
 
+### Memory Usage (10 Windows)
+
+Memory usage was benchmarked on X11 by launching 10 independent terminal windows per emulator, each running `sleep 300`. All windows were maximized, and memory consumption (RSS, PSS, and USS) was sampled at 5, 15, 30, and 60 seconds after launch. The table shows the final 60-second sample, ranked by PSS.
+
+| Rank | Terminal | Windows | Processes | RSS (MiB) | PSS (MiB) | USS (MiB) |
+|-----:|----------|--------:|----------:|----------:|----------:|----------:|
+| 1 | Rio | 10 | 20 | 323.29 | **112.85** | 95.20 |
+| **2** | **nare** | **10** | **20** | **374.27** | **125.08** | **107.43** |
+| 3 | Alacritty | 10 | 20 | 1054.44 | 304.98 | 241.98 |
+| 4 | WezTerm | 10 | 20 | 1274.05 | 354.89 | 271.07 |
+| 5 | Ghostty | 10 | 30 | 1810.04 | 724.47 | 629.66 |
+| 6 | Kitty | 10 | 40 | 2015.99 | 863.94 | 778.07 |
+
+*All benchmarks completed successfully with 10/10 windows detected. Results represent the combined memory usage of all processes belonging to each terminal emulator.*
+
 ## Install
 
 ### Dependencies
