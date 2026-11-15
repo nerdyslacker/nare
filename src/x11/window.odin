@@ -391,7 +391,8 @@ next_event :: proc(window: ^Window) -> (result: Event, available: bool) {
 		for xlib.CheckTypedWindowEvent(window.display, window.id, .ConfigureNotify, &latest) != false {
 			event = latest
 		}
-		for xlib.CheckTypedWindowEvent(window.display, window.id, .Expose, &latest) != false {}
+		exposed := false
+		for xlib.CheckTypedWindowEvent(window.display, window.id, .Expose, &latest) != false do exposed = true
 		size_changed := note_configure(
 			window,
 			int(event.xconfigure.x),
@@ -406,7 +407,7 @@ next_event :: proc(window: ^Window) -> (result: Event, available: bool) {
 			result.kind = .Resize
 			result.width = window.width
 			result.height = window.height
-		}
+		} else if exposed do result.kind = .Redraw
 	case .FocusIn:
 		window.focused = true
 		if window.input_context != nil do xlib.SetICFocus(window.input_context)

@@ -1200,6 +1200,8 @@ workspace_layout :: proc(workspace: ^Workspace, resize_grid: bool = true) {
 			drag_resize := row_drag && renderer_changed
 			if renderer_changed && (commit_grid || drag_resize) {
 				_ = drawing.resize(&pane.renderer, &pane.surface)
+			} else if renderer_changed {
+				drawing.present_cached(&pane.renderer, &pane.surface)
 			}
 			columns, rows := x11.grid_size(&pane.surface)
 			if commit_grid && (columns != old_columns || rows != old_rows) {
