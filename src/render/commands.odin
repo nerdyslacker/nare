@@ -48,6 +48,7 @@ build_row_commands :: proc(
 	selection_state: ^selection.State = nil,
 	scrollbar: Scrollbar = {},
 	scratch_buffer: ^Command_Scratch = nil,
+	cursor_trail: ^Cursor_Trail = nil,
 ) {
 	clear(output)
 	local_scratch: Command_Scratch
@@ -199,6 +200,7 @@ build_row_commands :: proc(
 	}
 	append_image_commands(output, window, screen, row, .Above_Text)
 	append_placeholder_commands(output, screen, row, .Above_Text, window.cell_w, window.cell_h)
+	append_cursor_trail_commands(output, cursor_trail, row, window.cell_h, active_theme.cursor)
 	append_cursor_commands(output, window, terminal, screen, row)
 	append_scrollbar_commands(output, window, screen, row, scrollbar)
 }

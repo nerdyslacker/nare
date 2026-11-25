@@ -26,6 +26,7 @@ CPU :: struct {
 	previous_image_row_offset: int,
 	previous_selection: selection.State,
 	previous_scrollbar: Scrollbar_Geometry,
+	cursor_trail: Cursor_Trail,
 }
 
 cpu_damage_resize :: proc(cpu: ^CPU, width, height: int) -> bool {
@@ -156,7 +157,7 @@ damage_rows :: proc(
 	if cpu.previous_image_row_offset != screen.image_row_offset do full_redraw = true
 	any_dirty := false
 	for row in 0..<screen.rows {
-		dirty := full_redraw || row == screen.cursor.row || row == cpu.previous_cursor.row
+		dirty := full_redraw || row == screen.cursor.row || row == cpu.previous_cursor.row || cursor_trail_row_damaged(&cpu.cursor_trail, row, terminal.cell_height)
 		if scrollbar_changed &&
 		   (scrollbar_row_affected(cpu.previous_scrollbar, row) || scrollbar_row_affected(scrollbar, row)) {
 			dirty = true
@@ -190,6 +191,7 @@ damage_rows :: proc(
 	cpu.previous_image_row_offset = screen.image_row_offset
 	cpu.previous_selection = current_selection
 	cpu.previous_scrollbar = scrollbar
+	cpu.cursor_trail.previous_bounds_valid = false
 	return any_dirty
 }
 
@@ -277,7 +279,7 @@ render_row :: proc(
 	scrollbar: Scrollbar,
 ) {
 	if row*window.cell_h >= cpu.height do return
-	build_row_commands(&cpu.commands, font, window, terminal, screen, row, ligatures, selection_state, scrollbar, &cpu.command_scratch)
+	build_row_commands(&cpu.commands, font, window, terminal, screen, row, ligatures, selection_state, scrollbar, &cpu.command_scratch, &cpu.cursor_trail)
 	for command in cpu.commands {
 		switch command.kind {
 		case .Rectangle:

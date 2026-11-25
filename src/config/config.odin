@@ -171,6 +171,8 @@ Cursor_Settings :: struct {
 	blink_interval_ms: int,
 	beam_width: int,
 	underline_height: int,
+	trail: bool,
+	trail_delay_ms, trail_decay_fast_ms, trail_decay_slow_ms, trail_threshold: int,
 }
 
 Tmux_Settings :: struct {
@@ -361,7 +363,10 @@ settings_init :: proc(settings: ^Settings) {
 	}
 	append(&settings.statusbar.left, .Mode, .Session)
 	append(&settings.statusbar.right, .Resource, .Battery, .Size, .Progress, .Clock)
-	settings.cursor = {shape = .Block, blink = true, blink_interval_ms = 500, beam_width = 2, underline_height = 2}
+	settings.cursor = {
+		shape = .Block, blink = true, blink_interval_ms = 500, beam_width = 2, underline_height = 2,
+		trail_delay_ms = 3, trail_decay_fast_ms = 100, trail_decay_slow_ms = 400, trail_threshold = 2,
+	}
 	settings.tmux = {enabled = true, auto_detect = true, default_target = .New_Tab, active_tab_color = 0x13ba19, auto_reconnect = true}
 	settings.quake = {
 		monitor = strings.clone("focused"), width_percent = 100, height_percent = 40,
@@ -553,6 +558,7 @@ parse_contents :: proc(
 }
 
 validate :: proc(settings: ^Settings, line_number: int) -> Result {
+	if settings.cursor.trail_decay_fast_ms > settings.cursor.trail_decay_slow_ms do return {error = .Invalid_Value, line = line_number}
 	for binding in settings.tmux_profile_bindings {
 		if tmux_profile(settings, binding.profile) == nil do return {error = .Invalid_Value, line = line_number}
 	}
@@ -1097,6 +1103,26 @@ apply :: proc(settings: ^Settings, section, key, value: string) -> Error {
 			parsed, ok := strconv.parse_int(value)
 			if !ok || parsed < 1 || parsed > 16 do return .Invalid_Value
 			settings.cursor.underline_height = parsed
+		case "trail":
+			parsed, ok := parse_bool(value)
+			if !ok do return .Invalid_Value
+			settings.cursor.trail = parsed
+		case "trail-delay-ms":
+			parsed, ok := strconv.parse_int(value)
+			if !ok || parsed < 0 || parsed > 5000 do return .Invalid_Value
+			settings.cursor.trail_delay_ms = parsed
+		case "trail-decay-fast-ms":
+			parsed, ok := strconv.parse_int(value)
+			if !ok || parsed < 10 || parsed > 5000 do return .Invalid_Value
+			settings.cursor.trail_decay_fast_ms = parsed
+		case "trail-decay-slow-ms":
+			parsed, ok := strconv.parse_int(value)
+			if !ok || parsed < 10 || parsed > 5000 do return .Invalid_Value
+			settings.cursor.trail_decay_slow_ms = parsed
+		case "trail-threshold":
+			parsed, ok := strconv.parse_int(value)
+			if !ok || parsed < 0 || parsed > 100 do return .Invalid_Value
+			settings.cursor.trail_threshold = parsed
 		case: return .Unknown_Key
 		}
 	} else if section == "quake" {

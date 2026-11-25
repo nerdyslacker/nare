@@ -58,6 +58,16 @@ Renderer :: struct {
 	suspended: bool,
 }
 
+configure_cursor_trail :: proc(renderer: ^Renderer, enabled: bool, delay_ms, decay_fast_ms, decay_slow_ms, threshold: int) {
+	if renderer == nil do return
+	cursor_trail_configure(&renderer.cpu.cursor_trail, enabled, delay_ms, decay_fast_ms, decay_slow_ms, threshold)
+}
+
+cursor_trail_timeout_ms :: proc(renderer: ^Renderer) -> int {
+	if renderer == nil || renderer.suspended do return -1
+	return cursor_trail_state_timeout_ms(&renderer.cpu.cursor_trail)
+}
+
 init :: proc(
 	renderer: ^Renderer,
 	window: ^x11.Window,
@@ -252,7 +262,11 @@ draw :: proc(
 	screen_override: ^vt.Screen = nil,
 	scrollbar: Scrollbar = {},
 ) {
-	if renderer.suspended || terminal.modes.synchronized_updates do return
+	if renderer.suspended do return
+	effective_screen := screen_override
+	if effective_screen == nil do effective_screen = vt.terminal_screen(terminal)
+	cursor_trail_update(&renderer.cpu.cursor_trail, window, terminal, effective_screen, screen_override != nil)
+	if terminal.modes.synchronized_updates do return
 	if renderer.active == .CPU {
 		cpu_draw(&renderer.cpu, renderer.font, window, terminal, renderer.ligatures, force, selection_state, screen_override, scrollbar)
 		return

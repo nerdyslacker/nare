@@ -212,6 +212,10 @@ Terminal :: struct {
 	cursor_phase_visible: bool,
 	cursor_beam_width: int,
 	cursor_underline_height: int,
+	cursor_context_generation: u64,
+	cursor_hidden_at, synchronized_update_cursor_at: Cursor,
+	cursor_hidden_alternate, synchronized_update_alternate: bool,
+	cursor_hidden_tracking, synchronized_update_tracking: bool,
 	title_changed: bool,
 	cwd_uri: string,
 	cwd_path: string,
@@ -1765,14 +1769,40 @@ set_modes :: proc(terminal: ^Terminal, event: Event, enabled: bool) {
 				terminal.modes.origin = enabled
 				set_cursor(terminal, 1, 1)
 			case 7: terminal.modes.autowrap = enabled
-			case 25: terminal.modes.cursor_visible = enabled
+			case 25:
+				if terminal.modes.cursor_visible && !enabled {
+					terminal.cursor_hidden_at = terminal_screen(terminal).cursor
+					terminal.cursor_hidden_alternate = terminal.using_alternate
+					terminal.cursor_hidden_tracking = true
+				} else if !terminal.modes.cursor_visible && enabled {
+					if terminal.cursor_hidden_tracking &&
+					   (terminal.cursor_hidden_at != terminal_screen(terminal).cursor ||
+					    terminal.cursor_hidden_alternate != terminal.using_alternate) {
+						terminal.cursor_context_generation += 1
+					}
+					terminal.cursor_hidden_tracking = false
+				}
+				terminal.modes.cursor_visible = enabled
 			case 1000, 1002, 1003: terminal.modes.mouse_tracking = mode if enabled else 0
 			case 1004: terminal.modes.focus_reporting = enabled
 			case 1006: terminal.modes.mouse_sgr = enabled
 			case 1007: terminal.modes.alternate_scroll = enabled
 			case 1047, 1049: switch_alternate(terminal, enabled, mode == 1049)
 			case 2004: terminal.modes.bracketed_paste = enabled
-			case 2026: terminal.modes.synchronized_updates = enabled
+			case 2026:
+				if !terminal.modes.synchronized_updates && enabled {
+					terminal.synchronized_update_cursor_at = terminal_screen(terminal).cursor
+					terminal.synchronized_update_alternate = terminal.using_alternate
+					terminal.synchronized_update_tracking = true
+				} else if terminal.modes.synchronized_updates && !enabled {
+					if terminal.synchronized_update_tracking &&
+					   (terminal.synchronized_update_cursor_at != terminal_screen(terminal).cursor ||
+					    terminal.synchronized_update_alternate != terminal.using_alternate) {
+						terminal.cursor_context_generation += 1
+					}
+					terminal.synchronized_update_tracking = false
+				}
+				terminal.modes.synchronized_updates = enabled
 			case 2027: terminal.modes.grapheme_clusters = enabled
 			case 2031: terminal.modes.color_scheme_reporting = enabled
 			case:

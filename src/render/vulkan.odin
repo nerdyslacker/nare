@@ -1621,6 +1621,7 @@ vulkan_draw :: proc(
 				selection_state,
 				scrollbar,
 				&vk.scratch,
+				&damage.cursor_trail,
 			)
 			start := len(vk.commands)
 			append(&vk.commands, ..vk.row_commands[:])

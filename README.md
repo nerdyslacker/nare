@@ -21,6 +21,7 @@
 ## Features
 
 - Nare parses VT/ANSI sequences, Unicode, true color, alternate screens, synchronized updates, mouse input, focus events, and bracketed paste.
+- Block, beam, and underline cursors support blinking and an optional Kitty-style movement trail.
 - Fontconfig, FreeType, and HarfBuzz provide fallback fonts, wide and combining characters, color glyphs, and ligatures.
 - Styled underlines support single, double, curly, dotted, and dashed forms with independent SGR 58 colors. Oversized Nerd Font icons scale into cell bounds, and Powerline separators fill the cell without gaps.
 - OpenGL is the default GPU renderer. Vulkan is an alternative backend selected with `[gpu] backend = auto|opengl|vulkan` or `--gpu-backend=...`. Both fall back to the CPU renderer after initialization or drawing errors, and `nare-lite` provides a CPU-only build.

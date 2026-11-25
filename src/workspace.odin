@@ -427,6 +427,7 @@ workspace_poll_timeout_ms :: proc(workspace: ^Workspace) -> int {
 	for tab in workspace.tabs do for pane in tab.panes {
 		timeout = poll_timeout_limit(timeout, vt.terminal_kitty_timeout_ms(&pane.terminal))
 		timeout = poll_timeout_limit(timeout, vt.terminal_animation_timeout_ms(&pane.terminal))
+		if pane.visible do timeout = poll_timeout_limit(timeout, drawing.cursor_trail_timeout_ms(&pane.renderer))
 	}
 	if workspace.quake != nil do timeout = quake.poll_timeout_ms(workspace.quake, timeout)
 	return timeout
@@ -659,6 +660,7 @@ workspace_finish_cycle :: proc(workspace: ^Workspace) {
 		if vt.terminal_animation_tick(&pane.terminal) && pane.visible {
 			workspace_redraw(workspace, pane, true)
 		}
+		if pane.visible && drawing.cursor_trail_timeout_ms(&pane.renderer) == 0 do workspace_redraw(workspace, pane, false)
 	}
 	workspace_enforce_scrollback_budget(workspace)
 	workspace_reconcile_job_owners(workspace)
@@ -2574,6 +2576,7 @@ workspace_font_size :: proc(workspace: ^Workspace, size: int) {
 			&new_entry.manager,
 		)
 		if font_error != .None do continue
+		workspace_apply_cursor(workspace, pane)
 	}
 	workspace_font_cache_release(workspace.font_cache, old_entry)
 	workspace_layout(workspace)
@@ -2599,6 +2602,7 @@ workspace_refresh_dpi :: proc(workspace: ^Workspace) -> bool {
 			&new_entry.manager,
 		) == .None {
 			vt.terminal_set_cell_size(&pane.terminal, pane.surface.cell_w, pane.surface.cell_h)
+			workspace_apply_cursor(workspace, pane)
 		}
 	}
 	workspace.search_surface.dpi = workspace.root.dpi
@@ -2619,6 +2623,14 @@ workspace_apply_cursor :: proc(workspace: ^Workspace, pane: ^Pane) {
 	pane.terminal.cursor_phase_visible = true
 	pane.terminal.cursor_beam_width = workspace.settings.cursor.beam_width
 	pane.terminal.cursor_underline_height = workspace.settings.cursor.underline_height
+	drawing.configure_cursor_trail(
+		&pane.renderer,
+		workspace.settings.cursor.trail,
+		workspace.settings.cursor.trail_delay_ms,
+		workspace.settings.cursor.trail_decay_fast_ms,
+		workspace.settings.cursor.trail_decay_slow_ms,
+		workspace.settings.cursor.trail_threshold,
+	)
 }
 
 workspace_switch_tab :: proc(workspace: ^Workspace, delta: int) {
