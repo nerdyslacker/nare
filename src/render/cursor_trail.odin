@@ -168,7 +168,8 @@ cursor_trail_update :: proc(
 			return
 		}
 		trail.observed = rect
-		trail.observed_at = now
+		trail.observed_at = terminal.cursor_position_changed_at
+		if trail.observed_at == {} do trail.observed_at = now
 		trail.pending = true
 	}
 
@@ -187,8 +188,10 @@ cursor_trail_update :: proc(
 	}
 	if !trail.active do return
 
-	trail.previous_bounds = cursor_trail_bounds(trail)
-	trail.previous_bounds_valid = true
+	if !trail.previous_bounds_valid {
+		trail.previous_bounds = cursor_trail_bounds(trail)
+		trail.previous_bounds_valid = true
+	}
 	elapsed_ms := f32(time.tick_since(trail.updated_at))/f32(time.Millisecond)
 	if started do elapsed_ms = 0
 	cursor_trail_advance(trail, min(elapsed_ms, 50))
@@ -245,25 +248,48 @@ cursor_trail_segment :: proc(trail: ^Cursor_Trail, y: f32) -> (left, right: f32,
 	return
 }
 
+append_cursor_trail_segment :: proc(output: ^[dynamic]Command, left, right: f32, y, height: int, color: u32, row_opacity: u8) {
+	if right <= left do return
+	left_pixel, right_pixel := int(left), int(right)
+	if left_pixel == right_pixel {
+		opacity := u8(clamp(int((right-left)*f32(row_opacity)+0.5), 1, 255))
+		append_translucent_rectangle(output, left_pixel, y, 1, height, color, opacity)
+		return
+	}
+	left_coverage := f32(left_pixel+1)-left
+	if left_coverage < 0.999 {
+		append_translucent_rectangle(output, left_pixel, y, 1, height, color, u8(clamp(int(left_coverage*f32(row_opacity)+0.5), 1, 254)))
+	}
+	center_left := left_pixel
+	if left_coverage < 0.999 do center_left += 1
+	if right_pixel > center_left {
+		if row_opacity == 255 do append_rectangle(output, center_left, y, right_pixel-center_left, height, color)
+		else do append_translucent_rectangle(output, center_left, y, right_pixel-center_left, height, color, row_opacity)
+	}
+	right_coverage := right-f32(right_pixel)
+	if right_coverage > 0.001 {
+		append_translucent_rectangle(output, right_pixel, y, 1, height, color, u8(clamp(int(right_coverage*f32(row_opacity)+0.5), 1, 254)))
+	}
+}
+
 append_cursor_trail_commands :: proc(output: ^[dynamic]Command, trail: ^Cursor_Trail, row, cell_height: int, color: u32) {
 	if trail == nil || !trail.active do return
-	// shortcut: rasterize the quad into pixel rows; add polygon commands if profiling shows this path is too costly.
+	// shortcut: rasterize the quad into antialiased pixel rows; add polygon commands if profiling shows this path is too costly.
 	bounds := cursor_trail_bounds(trail)
 	row_top, row_bottom := row*cell_height, (row+1)*cell_height
 	top := max(row_top, int(bounds.top))
 	bottom := min(row_bottom, int(bounds.bottom+0.999))
 	for y := top; y < bottom; y += CURSOR_TRAIL_SLICE_HEIGHT {
 		height := min(CURSOR_TRAIL_SLICE_HEIGHT, bottom-y)
+		vertical_coverage := min(f32(y+height)-bounds.top, bounds.bottom-f32(y))/f32(height)
+		row_opacity := u8(clamp(int(vertical_coverage*255+0.5), 1, 255))
 		left_f, right_f, ok := cursor_trail_segment(trail, f32(y)+f32(height)*0.5)
 		if !ok do continue
-		left, right := int(left_f), int(right_f+0.999)
-		if right <= left do continue
 		if f32(y+height) > trail.target.top && f32(y) < trail.target.bottom {
-			target_left, target_right := int(trail.target.left), int(trail.target.right+0.999)
-			if left < target_left do append_rectangle(output, left, y, min(right, target_left)-left, height, color)
-			if right > target_right do append_rectangle(output, max(left, target_right), y, right-max(left, target_right), height, color)
+			if left_f < trail.target.left do append_cursor_trail_segment(output, left_f, min(right_f, trail.target.left), y, height, color, row_opacity)
+			if right_f > trail.target.right do append_cursor_trail_segment(output, max(left_f, trail.target.right), right_f, y, height, color, row_opacity)
 		} else {
-			append_rectangle(output, left, y, right-left, height, color)
+			append_cursor_trail_segment(output, left_f, right_f, y, height, color, row_opacity)
 		}
 	}
 }

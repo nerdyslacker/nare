@@ -213,6 +213,7 @@ Terminal :: struct {
 	cursor_beam_width: int,
 	cursor_underline_height: int,
 	cursor_context_generation: u64,
+	cursor_position_changed_at: time.Tick,
 	cursor_hidden_at, synchronized_update_cursor_at: Cursor,
 	cursor_hidden_alternate, synchronized_update_alternate: bool,
 	cursor_hidden_tracking, synchronized_update_tracking: bool,
@@ -323,7 +324,16 @@ terminal_keyboard_flags :: proc(terminal: ^Terminal) -> u8 {
 }
 
 terminal_feed :: proc(terminal: ^Terminal, data: []byte) {
+	before_cursor := terminal_screen(terminal).cursor
+	before_alternate := terminal.using_alternate
 	parser_feed(&terminal.parser, data, terminal_event, rawptr(terminal))
+	after_cursor := terminal_screen(terminal).cursor
+	if before_alternate != terminal.using_alternate {
+		terminal.cursor_context_generation += 1
+	}
+	if before_alternate != terminal.using_alternate || before_cursor != after_cursor {
+		terminal.cursor_position_changed_at = time.tick_now()
+	}
 }
 
 // Inform the semantic prompt tracker about bytes sent to the child. OSC 7 is
